@@ -1,12 +1,12 @@
 //! Single-flight authentication for a session already configured to use a proxy.
 //!
 //! Only proxy challenges receive credentials. Rejection stays latched until
-//! teardown; successful verification disables Fetch. The event queue is bounded
-//! and overflow is an explicit failure. Fatal worker failures close the target;
+//! teardown; successful verification disables Fetch. Authentication events are
+//! lossless; held requests/challenges are bounded. Fatal worker failures close the target;
 //! if closing it and disabling Fetch both fail, the connection is closed.
 use crate::{
     Error, Result, Session,
-    connection::{EventStream, RawEvent},
+    connection::{AuthEvents, RawEvent},
     proxy::Proxy,
 };
 use serde_json::{Value, json};
@@ -51,11 +51,7 @@ impl ProxyAuth {
             return Err(Error::InvalidArgument("proxy has no credentials".into()));
         }
         let ownership = session.claim_proxy_auth()?;
-        let events = session.connection().subscribe_filtered(
-            &["Fetch.authRequired", "Fetch.requestPaused"],
-            Some(session.id().0.clone()),
-            1024,
-        );
+        let events = session.connection().subscribe_auth(&session.id().0);
         let (stop, mut stopped) = watch::channel(Stop::Running);
         let (status_sender, status) = watch::channel(ProxyAuthStatus::Pending);
         let (ready, started) = oneshot::channel();
@@ -119,7 +115,7 @@ impl ProxyAuth {
                 }
                 Err(error) => {
                     status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
-                    // An overflow or protocol failure must not leave requests stranded.
+                    // A protocol failure must not leave requests stranded.
                     recover_interception(&session).await;
                     Err(error)
                 }
@@ -205,7 +201,7 @@ struct Handler {
 }
 
 impl Handler {
-    async fn run(&mut self, mut events: EventStream) -> Result<bool> {
+    async fn run(&mut self, mut events: AuthEvents) -> Result<bool> {
         loop {
             let event = events.recv().await?;
             if self.event(event).await? {

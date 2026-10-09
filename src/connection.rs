@@ -13,6 +13,9 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::WebSocketConfig},
 };
 
+mod auth_events;
+pub(crate) use auth_events::AuthEvents;
+
 const CAPACITY: usize = 256;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -41,6 +44,7 @@ struct Inner {
     permits: Semaphore,
     sessions: SessionRegistry,
     subscriptions: Subscriptions,
+    auth_subscriptions: auth_events::AuthSubscriptions,
 }
 
 struct SessionEntry {
@@ -135,6 +139,8 @@ impl Connection {
         let active_sessions = sessions.clone();
         let subscriptions = Subscriptions::default();
         let active_subscriptions = subscriptions.clone();
+        let auth_subscriptions = auth_events::AuthSubscriptions::default();
+        let active_auth_subscriptions = auth_subscriptions.clone();
         tokio::spawn(async move {
             let (mut sink, mut stream) = socket.split();
             let mut pending = HashMap::<u64, Request>::new();
@@ -186,6 +192,7 @@ impl Connection {
                                         if let Some(senders) = active_subscriptions.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
                                             for sender in senders.iter().filter_map(Weak::upgrade) { let _ = sender.send(event.clone()); }
                                         }
+                                        auth_events::dispatch(&active_auth_subscriptions, &event);
                                         let _ = event_sender.send(event);
                                     }
                                 }
@@ -259,6 +266,7 @@ impl Connection {
                 permits: Semaphore::new(CAPACITY),
                 sessions,
                 subscriptions,
+                auth_subscriptions,
             }),
             Some(TIMEOUT),
         ))
