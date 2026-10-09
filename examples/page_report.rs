@@ -2,7 +2,10 @@
 mod common;
 use rustcdp::{
     Result,
-    cdp::page::commands::{CaptureScreenshot, PrintToPdf},
+    cdp::page::{
+        Viewport,
+        commands::{CaptureScreenshot, GetLayoutMetrics, PrintToPdf},
+    },
 };
 use std::{path::PathBuf, time::Duration};
 
@@ -31,7 +34,24 @@ async fn main() -> Result<()> {
         let page = browser.page();
         page.navigate_and_wait(&common::html_url(REPORT), Duration::from_secs(10))
             .await?;
-        let png = page.screenshot(&CaptureScreenshot::new()).await?;
+        let size = page
+            .session()
+            .execute(&GetLayoutMetrics::new())
+            .await?
+            .css_content_size;
+        let png = page
+            .screenshot(
+                &CaptureScreenshot::new()
+                    .with_capture_beyond_viewport(true)
+                    .with_clip(Viewport {
+                        x: size.x,
+                        y: size.y,
+                        width: size.width,
+                        height: size.height,
+                        scale: 1.0,
+                    }),
+            )
+            .await?;
         let pdf = page
             .print_to_pdf(&PrintToPdf::new().with_print_background(true))
             .await?;

@@ -10,12 +10,12 @@ Requires Rust 1.99.1 or newer. The repository pins Rust 1.99.1 through rustup.
 Install Chrome/Chromium or set `CHROME_PATH` to its executable, then:
 
 ```sh
-cargo run --example basic
-cargo run --example interact
+cargo run --example checkout
+cargo run --example page_report
 ```
 
-Examples that launch a browser use headless Chrome and accept additional Chrome
-flags after `--`. `version` and `session` connect to an existing debugging endpoint.
+The examples use headless Chrome and accept additional Chrome flags after `--`.
+They render local sample pages and do not require an external website or account.
 The library itself does not force headless mode. `LaunchOptions` controls arguments,
 the executable, temporary-profile location/prefix, fixed profiles, and startup timeout.
 Launching uses a port selected by Chrome and retries startup failures up to three
@@ -56,12 +56,22 @@ load event. `current_url` preserves fragments.
 exposes the same API. `cookies` and `set_cookies` operate in that context. A context
 created without a proxy explicitly bypasses a proxy configured on the parent browser.
 
-Page interaction includes `element_by_xpath`, `nodes_by_xpath`, `resolve_node`,
+Page interaction includes `element_by_selector`, `wait_for_selector`,
+`element_by_xpath`, `nodes_by_xpath`, `resolve_node`,
 `wait_for_xpath`, `click_xpath`, `click_position`, `press_escape`, `go_back`, and
-`flash_point`. `Element` supports scrolling, position, and CDP or JavaScript clicks.
+`flash_point`. `Element` supports scrolling, position, focus, text insertion, and CDP or
+JavaScript clicks. Use `Page::insert_text` for Unicode text and `press_key` or
+`press_key_with_modifiers` for keyboard events.
 `WaitOptions` controls timeout, polling, count stability, and post-success delay.
 `frame(index)` attaches to an out-of-process iframe owned by the current target;
-it does not select another tab's iframe or implement same-process frame switching.
+it does not select another tab's iframe. For same-process frames, use `main_frame`,
+`frames`, and `Frame::children`. Each `Frame` scopes evaluation and CSS/XPath lookup
+to its own document and resolves the current execution context for each operation.
+Reacquire frame handles after removal or a process swap.
+
+`screenshot(&CaptureScreenshot)` and `print_to_pdf(&PrintToPdf)` return decoded
+bytes. Both accept the generated CDP options, including their fluent setters.
+PDF stream transfer remains available through `Session::execute`.
 
 ## Protocol access
 
@@ -149,11 +159,6 @@ excess work is aborted or canceled. Failed recovery can close the connection; se
 a session. Normal browser/context shutdown awaits authentication cleanup; call
 `detach_proxy_auth()` immediately before closing an unresponsive context to skip it.
 
-```sh
-# Set CDP_PROXY and optionally CDP_URL in your environment first.
-cargo run --example context_proxy
-```
-
 ## Ownership and development
 
 Call `close().await` to confirm cleanup. Closing a context does not close its parent
@@ -177,16 +182,14 @@ cargo doc --no-deps
 
 | Example | Demonstrates | Run |
 | --- | --- | --- |
-| [basic](examples/basic.rs) | Navigation, JavaScript evaluation, HTML and isolated contexts | `cargo run --example basic` |
-| [interact](examples/interact.rs) | XPath waits, DOM node resolution, clicks and keyboard input | `cargo run --example interact` |
-| [launch](examples/launch.rs) | Owned Chrome process, typed version request and cleanup | `cargo run --example launch` |
-| [version](examples/version.rs) | Connect to an existing browser and execute a typed command | `cargo run --example version -- http://127.0.0.1:9222` |
-| [session](examples/session.rs) | Create a target, attach a session, receive events and detach | `cargo run --example session -- http://127.0.0.1:9222` |
-| [context_proxy](examples/context_proxy.rs) | Per-context proxy with on-demand authentication | `cargo run --example context_proxy` |
-| [proxy](examples/proxy.rs) | Low-level proxy authentication guard | `cargo run --example proxy` |
+| [checkout](examples/checkout.rs) | Fill a local checkout form using CSS selectors, Unicode input, Tab and Enter | `cargo run --example checkout` |
+| [page_report](examples/page_report.rs) | Export a workshop report as a full-page PNG and a PDF | `cargo run --example page_report` |
+| [frame_walk](examples/frame_walk.rs) | Explore a dispatch board and update inventory inside a nested iframe | `cargo run --example frame_walk` |
+| [event_watch](examples/event_watch.rs) | Subscribe before navigation and collect structured console events | `cargo run --example event_watch` |
 
-The proxy examples read `CDP_PROXY` and optionally `CDP_URL` from the environment.
-The low-level `proxy` example requires a proxy URL containing credentials.
+The report files go to the system temporary directory under `rustcdp-report/`.
+Set `RUSTCDP_OUTPUT` to choose another directory. Each example closes its browser
+on success or failure.
 
 ## Diagnostics
 
