@@ -1,0 +1,12 @@
+[package]
+name = "rustcdp-examples"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+
+[dependencies]
+rustcdp = { path = ".." }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs"] }
+serde_json = "1"
+percent-encoding = "2"

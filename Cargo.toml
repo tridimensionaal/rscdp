@@ -3,7 +3,8 @@ name = "rustcdp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
-include = ["/src/**", "/examples/**", "/protocol/**", "/build.rs", "/Cargo.toml", "/Cargo.lock", "/README.md"]
+autoexamples = false
+include = ["/src/**", "/protocol/**", "/build.rs", "/Cargo.toml", "/Cargo.lock", "/README.md"]
 
 [features]
 default = []
@@ -17,7 +18,7 @@ serde_json = "1"
 thiserror = "2"
 futures-util = { version = "0.3", features = ["sink"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tempfile = "3"
 url = "2"

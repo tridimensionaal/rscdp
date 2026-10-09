@@ -10,9 +10,13 @@ Requires Rust 1.99.1 or newer. The repository pins Rust 1.99.1 through rustup.
 Install Chrome/Chromium or set `CHROME_PATH` to its executable, then:
 
 ```sh
-cargo run --example checkout
-cargo run --example page_report
+cargo run --manifest-path examples/Cargo.toml --bin checkout
+cargo run --manifest-path examples/Cargo.toml --bin page_report
 ```
+
+The examples are a separate, unpublished Cargo package in `examples/`. Its
+manifest lists the dependencies needed by these applications, including their
+Tokio runtime. Examples are excluded from the library package.
 
 The examples use headless Chrome and accept additional Chrome flags after `--`.
 They render local sample pages and do not require an external website or account.
@@ -188,7 +192,8 @@ Generation runs locally without network access.
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo build --examples
+cargo fmt --manifest-path examples/Cargo.toml --check
+cargo clippy --manifest-path examples/Cargo.toml --all-targets -- -D warnings
 cargo doc --no-deps
 ```
 
@@ -196,10 +201,10 @@ cargo doc --no-deps
 
 | Example | Demonstrates | Run |
 | --- | --- | --- |
-| [checkout](examples/checkout.rs) | Fill a local checkout form using CSS selectors, Unicode input, Tab and Enter | `cargo run --example checkout` |
-| [page_report](examples/page_report.rs) | Export a workshop report as a full-page PNG and a PDF | `cargo run --example page_report` |
-| [frame_walk](examples/frame_walk.rs) | Explore a dispatch board and update inventory inside a nested iframe | `cargo run --example frame_walk` |
-| [event_watch](examples/event_watch.rs) | Subscribe before navigation and collect structured console events | `cargo run --example event_watch` |
+| [checkout](examples/src/bin/checkout.rs) | Fill a local checkout form using CSS selectors, Unicode input, Tab and Enter | `cargo run --manifest-path examples/Cargo.toml --bin checkout` |
+| [page_report](examples/src/bin/page_report.rs) | Export a workshop report as a full-page PNG and a PDF | `cargo run --manifest-path examples/Cargo.toml --bin page_report` |
+| [frame_walk](examples/src/bin/frame_walk.rs) | Explore a dispatch board and update inventory inside a nested iframe | `cargo run --manifest-path examples/Cargo.toml --bin frame_walk` |
+| [event_watch](examples/src/bin/event_watch.rs) | Subscribe before navigation and collect structured console events | `cargo run --manifest-path examples/Cargo.toml --bin event_watch` |
 
 The report files go to the system temporary directory under `rustcdp-report/`.
 Set `RUSTCDP_OUTPUT` to choose another directory. Each example closes its browser
