@@ -63,6 +63,10 @@ impl Drop for RemoteNode {
 }
 
 impl Element {
+    pub(super) fn from_object_id(session: Session, id: RemoteObjectId) -> Self {
+        Self(Arc::new(RemoteNode { session, id }))
+    }
+
     pub fn object_id(&self) -> &RemoteObjectId {
         &self.0.id
     }

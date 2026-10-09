@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 mod capture;
+mod frame;
 mod input;
+pub use frame::Frame;
 mod interaction;
 pub use input::KeyModifiers;
 pub use interaction::{ClickMethod, Element, ElementPosition, WaitOptions};
@@ -111,6 +113,13 @@ impl Page {
             .frame_tree
             .frame
             .id;
+        self.create_isolated_world_for(&frame).await
+    }
+
+    async fn create_isolated_world_for(
+        &self,
+        frame: &crate::cdp::page::FrameId,
+    ) -> Result<ExecutionContextId> {
         let response = self
             .session
             .execute_raw(
@@ -123,8 +132,7 @@ impl Page {
 
     /// Evaluate in a fresh/current isolated world; JavaScript exceptions are errors.
     pub async fn evaluate(&self, expression: &str) -> Result<Value> {
-        let result = self.evaluate_remote(expression, true).await?;
-        result.value.ok_or_else(|| Error::InvalidArgument("JavaScript result has no JSON value; use evaluate_remote for undefined, BigInt and non-finite numbers".into()))
+        json_value(self.evaluate_remote(expression, true).await?)
     }
 
     pub async fn evaluate_remote(
@@ -133,6 +141,16 @@ impl Page {
         return_by_value: bool,
     ) -> Result<RemoteObject> {
         let context = self.create_isolated_world().await?;
+        self.evaluate_with_context(context, expression, return_by_value)
+            .await
+    }
+
+    async fn evaluate_with_context(
+        &self,
+        context: ExecutionContextId,
+        expression: &str,
+        return_by_value: bool,
+    ) -> Result<RemoteObject> {
         let response = self.session.execute_raw("Runtime.evaluate", json!({"expression":expression,"contextId":context,"silent":true,"returnByValue":return_by_value,"awaitPromise":true})).await?;
         if let Some(error) = response.get("exceptionDetails") {
             return Err(Error::JavaScript(error.clone()));
@@ -179,4 +197,8 @@ impl Page {
             .await?;
         Ok(())
     }
+}
+
+fn json_value(result: RemoteObject) -> Result<Value> {
+    result.value.ok_or_else(|| Error::InvalidArgument("JavaScript result has no JSON value; use evaluate_remote for undefined, BigInt and non-finite numbers".into()))
 }
