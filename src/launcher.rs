@@ -206,7 +206,21 @@ fn reap(mut child: Child, temporary: Option<TempDir>) -> std::io::Result<()> {
     }
     child.wait()?;
     if let Some(directory) = temporary {
-        directory.close()?;
+        let path = directory.keep();
+        // Chromium descendants can finish writing after the browser is reaped.
+        // Retry the observed DirectoryNotEmpty race, with a fixed upper bound.
+        for attempt in 0..20 {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::DirectoryNotEmpty && attempt < 19 =>
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
     Ok(())
 }

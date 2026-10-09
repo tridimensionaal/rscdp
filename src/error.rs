@@ -39,6 +39,10 @@ pub enum Error {
     Launch(String),
     #[error(transparent)]
     Task(#[from] tokio::task::JoinError),
+    #[error("JavaScript exception: {0}")]
+    JavaScript(Value),
+    #[error("navigation failed: {0}")]
+    Navigation(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

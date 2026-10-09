@@ -1,10 +1,15 @@
 //! Asynchronous Chrome DevTools Protocol client and browser automation.
 
+pub mod browser;
 pub mod connection;
 pub mod error;
 pub mod launcher;
+pub mod page;
 pub mod protocol;
 pub mod session;
+
+pub use browser::{Browser, BrowserContext};
+pub use page::Page;
 
 pub use connection::Connection;
 pub use session::Session;
