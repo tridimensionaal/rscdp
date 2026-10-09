@@ -2,6 +2,7 @@
 name = "rustcdp"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.99.1"
 include = ["/src/**", "/examples/**", "/protocol/**", "/build.rs", "/Cargo.toml", "/Cargo.lock", "/README.md"]
 
 [features]

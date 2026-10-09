@@ -5,6 +5,8 @@ commands and events, browser and context management, and page automation.
 
 ## Run
 
+Requires Rust 1.99.1 or newer. The repository pins Rust 1.99.1 through rustup.
+
 Install Chrome/Chromium or set `CHROME_PATH` to its executable, then:
 
 ```sh
