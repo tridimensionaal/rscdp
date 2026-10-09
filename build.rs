@@ -28,6 +28,60 @@ fn items<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value[key].as_array().map_or(&[], Vec::as_slice)
 }
 
+fn prose(mut text: &str) -> String {
+    fn escape(text: &str) -> String {
+        text.replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('[', "\\[")
+            .replace(']', "\\]")
+    }
+    let mut out = String::new();
+    while let Some(start) = [text.find("https://"), text.find("http://")]
+        .into_iter()
+        .flatten()
+        .min()
+    {
+        out.push_str(&escape(&text[..start]));
+        text = &text[start..];
+        let end = text
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '\"' | ')' | ']'))
+            .unwrap_or(text.len());
+        let url = text[..end].trim_end_matches(['.', ',', ';']);
+        out.push('<');
+        out.push_str(url);
+        out.push('>');
+        text = &text[url.len()..];
+    }
+    out.push_str(&escape(text));
+    out
+}
+
+// Protocol prose is not Rust: preserve code spans while escaping HTML and
+// bracket ranges outside them so rustdoc does not interpret them as links/tags.
+fn documentation(value: &Value, out: &mut String) {
+    if let Some(description) = value["description"].as_str() {
+        let text = description
+            .split('`')
+            .enumerate()
+            .map(|(index, part)| {
+                if index % 2 == 0 {
+                    prose(part)
+                } else {
+                    part.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("`");
+        out.push_str(&format!("#[doc = {text:?}]\n"));
+    }
+    if value["experimental"] == true {
+        out.push_str("#[doc = \"\nExperimental in the pinned CDP schema.\"]\n");
+    }
+    if value["deprecated"] == true {
+        out.push_str("#[doc = \"\nDeprecated in the pinned CDP schema.\"]\n");
+    }
+}
+
 struct Generator {
     // Only edges stored inline can cause infinitely sized Rust types.
     edges: HashMap<String, Vec<String>>,
@@ -78,6 +132,7 @@ impl Generator {
             };
         }
         if value["enum"].is_array() {
+            documentation(value, extra);
             extra.push_str(&format!("#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]\npub enum {name} {{\n"));
             let mut used = std::collections::HashSet::new();
             for variant in items(value, "enum") {
@@ -105,6 +160,7 @@ impl Generator {
             "boolean" => "bool".into(),
             "any" => "serde_json::Value".into(),
             "object" if value["properties"].is_array() => {
+                documentation(value, extra);
                 self.structure(domain, owner, name, items(value, "properties"), extra);
                 name.into()
             }
@@ -136,6 +192,7 @@ impl Generator {
                 field,
                 &mut extra,
             );
+            documentation(field, out);
             out.push_str(&format!("#[serde(rename = {wire:?})]\n"));
             if field["optional"] == true {
                 ty = format!("Option<{ty}>");
@@ -152,8 +209,57 @@ impl Generator {
         out.push_str(&extra);
     }
 
+    fn constructor(&self, domain: &str, name: &str, fields: &[Value], out: &mut String) {
+        let types: Vec<_> = fields
+            .iter()
+            .map(|field| {
+                let wire = field["name"].as_str().expect("field name");
+                let ty = self.rust_type(
+                    domain,
+                    "",
+                    &format!("{name}{}", type_name(wire)),
+                    field,
+                    &mut String::new(),
+                );
+                (field, ident(wire), ty)
+            })
+            .collect();
+        let required: Vec<_> = types
+            .iter()
+            .filter(|(field, _, _)| field["optional"] != true)
+            .collect();
+        out.push_str(&format!("impl {name} {{\n"));
+        out.push_str("/// Construct a command with its required parameters. Optional fields are omitted.\n#[must_use]\n");
+        if required.len() > 7 {
+            out.push_str("#[allow(clippy::too_many_arguments)]\n");
+        }
+        let args = required
+            .iter()
+            .map(|(_, field, ty)| format!("{field}: impl Into<{ty}>"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("pub fn new({args}) -> Self {{ Self {{\n"));
+        for (field, member, _) in &types {
+            let value = if field["optional"] == true {
+                "None".into()
+            } else {
+                format!("{member}.into()")
+            };
+            out.push_str(&format!("{member}: {value},\n"));
+        }
+        out.push_str("} }\n");
+        for (field, member, ty) in &types {
+            if field["optional"] == true {
+                documentation(field, out);
+                out.push_str(&format!("#[must_use]\npub fn with_{member}(mut self, value: impl Into<{ty}>) -> Self {{ self.{member} = Some(value.into()); self }}\n"));
+            }
+        }
+        out.push_str("}\n");
+    }
+
     fn domain(&self, domain: &Value, out: &mut String) {
         let domain_name = domain["domain"].as_str().expect("domain");
+        documentation(domain, out);
         out.push_str(&format!("pub mod {} {{\n", ident(domain_name)));
         for value in items(domain, "types") {
             let id = value["id"].as_str().expect("type id");
@@ -161,6 +267,7 @@ impl Generator {
             let owner = format!("{domain_name}.{id}");
             let ty = self.rust_type(domain_name, &owner, &name, value, out);
             if ty != name {
+                documentation(value, out);
                 // Transparent newtypes keep protocol identifiers distinct.
                 let eq = if value["type"] == "string" || value["type"] == "integer" {
                     ", PartialEq, Eq, Hash"
@@ -174,7 +281,9 @@ impl Generator {
         for command in items(domain, "commands") {
             let wire = command["name"].as_str().expect("command name");
             let name = type_name(wire);
+            documentation(command, out);
             self.structure(domain_name, "", &name, items(command, "parameters"), out);
+            self.constructor(domain_name, &name, items(command, "parameters"), out);
             self.structure(
                 domain_name,
                 "",
@@ -188,6 +297,7 @@ impl Generator {
         for event in items(domain, "events") {
             let wire = event["name"].as_str().expect("event name");
             let name = type_name(wire);
+            documentation(event, out);
             self.structure(domain_name, "", &name, items(event, "parameters"), out);
             out.push_str(&format!("impl crate::protocol::Event for {name} {{ const METHOD: &'static str = \"{domain_name}.{wire}\"; }}\n"));
         }

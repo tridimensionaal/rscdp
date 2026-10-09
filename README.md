@@ -79,6 +79,10 @@ Each `cdp::<domain>` contains types and `commands`/`events` modules. Commands
 implement `protocol::Command` with an associated response type. Required fields
 are explicit struct fields; optional fields use `Option`. Types with only optional
 fields implement `Default`. Identifier types are transparent newtypes.
+Commands also provide `new(required_parameters)` and chainable `with_*` setters
+for optional parameters, for example `Navigate::new(url).with_referrer(referrer)`.
+Generated Rust documentation includes protocol descriptions and experimental or
+deprecated status from the pinned schema.
 
 `connection.attach(target_id)` returns a flattened `Session`. Both expose typed
 `execute` and JSON `execute_raw`. HTTP, HTTPS, WS, and WSS endpoints are accepted.
@@ -134,7 +138,8 @@ to proxy challenges and propagate preflight failures. The worker serializes the
 cold request burst, latches rejection, and disables Fetch after success. If cached
 credentials later expire, retire the context rather than expecting automatic rearming.
 
-Authentication events use a separate lossless, unbounded queue. Held requests and held challenges are each bounded at 256;
+Authentication events use a separate lossless, unbounded queue. Held requests and
+held challenges are each bounded at 256;
 excess work is aborted or canceled. Failed recovery can close the connection; see
 `proxy_auth` module documentation.
 
