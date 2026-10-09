@@ -87,7 +87,7 @@ impl Drop for Inner {
 
 /// A cloneable handle to one CDP socket. The reader task starts automatically.
 #[derive(Clone)]
-pub struct Connection(Arc<Inner>);
+pub struct Connection(Arc<Inner>, Option<Duration>);
 
 impl Connection {
     /// Connect to a ws/wss endpoint or discover it via HTTP(S) `/json/version`.
@@ -246,15 +246,26 @@ impl Connection {
             // Never let a peer that ignores close hold up shutdown.
             let _ = tokio::time::timeout(Duration::from_secs(1), sink.close()).await;
         });
-        Ok(Self(Arc::new(Inner {
-            requests,
-            events,
-            shutdown,
-            closed,
-            permits: Semaphore::new(CAPACITY),
-            sessions,
-            subscriptions,
-        })))
+        Ok(Self(
+            Arc::new(Inner {
+                requests,
+                events,
+                shutdown,
+                closed,
+                permits: Semaphore::new(CAPACITY),
+                sessions,
+                subscriptions,
+            }),
+            Some(TIMEOUT),
+        ))
+    }
+
+    /// Set this handle's command deadline, including queue admission. None waits
+    /// until completion, session closure, or caller cancellation. Clones inherit it.
+    #[must_use]
+    pub fn with_command_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.1 = timeout;
+        self
     }
 
     pub fn is_closed(&self) -> bool {
@@ -308,10 +319,20 @@ impl Connection {
             .map(|id| self.session_state(id).map(|state| state.0))
             .transpose()?;
         let mut connection_closed = self.0.closed.clone();
-        tokio::time::timeout(TIMEOUT, async {
+        let execute = async {
             let admission = async {
-                let permit = self.0.permits.acquire().await.map_err(|_| Error::ConnectionClosed("connection is closed".into()))?;
-                let slot = self.0.requests.reserve().await.map_err(|_| Error::ConnectionClosed("reader stopped".into()))?;
+                let permit = self
+                    .0
+                    .permits
+                    .acquire()
+                    .await
+                    .map_err(|_| Error::ConnectionClosed("connection is closed".into()))?;
+                let slot = self
+                    .0
+                    .requests
+                    .reserve()
+                    .await
+                    .map_err(|_| Error::ConnectionClosed("reader stopped".into()))?;
                 Ok::<_, Error>((permit, slot))
             };
             let (_permit, slot) = tokio::select! {
@@ -324,13 +345,23 @@ impl Connection {
                 } => return Err(Error::SessionClosed(session_id.clone().unwrap_or_default())),
             };
             let (reply, response) = oneshot::channel();
-            slot.send(Request { method: method.into(), params, session_id, reply });
+            slot.send(Request {
+                method: method.into(),
+                params,
+                session_id,
+                reply,
+            });
             response
                 .await
                 .map_err(|_| Error::ConnectionClosed("reader stopped".into()))?
-        })
-        .await
-        .map_err(|_| Error::Timeout(method.into()))?
+        };
+        if let Some(timeout) = self.1 {
+            tokio::time::timeout(timeout, execute)
+                .await
+                .map_err(|_| Error::Timeout(method.into()))?
+        } else {
+            execute.await
+        }
     }
 
     /// Register synchronously so a subsequent command cannot race subscription.

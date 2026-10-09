@@ -260,9 +260,31 @@ impl Page {
             let mut previous = 0;
             let mut stable = Instant::now();
             loop {
-                let count = self.evaluate(&expression).await?.as_u64().ok_or_else(|| {
-                    Error::InvalidArgument("XPath count is not an integer".into())
-                })?;
+                let count = match self.evaluate(&expression).await {
+                    Ok(value) => value.as_u64().ok_or_else(|| {
+                        Error::InvalidArgument("XPath count is not an integer".into())
+                    })?,
+                    Err(Error::Protocol(error))
+                        if error.code == -32000
+                            && [
+                                "execution context was destroyed",
+                                "cannot find context",
+                                "no frame for given id",
+                                "frame with the given id was not found",
+                                "inspected target navigated",
+                            ]
+                            .iter()
+                            .any(|message| {
+                                error.message.to_ascii_lowercase().contains(message)
+                            }) =>
+                    {
+                        previous = 0;
+                        stable = Instant::now();
+                        tokio::time::sleep(options.polling_interval).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 if count == 0 || count != previous {
                     stable = Instant::now();
                 }

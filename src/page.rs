@@ -39,6 +39,12 @@ impl Page {
         })
     }
 
+    #[must_use]
+    pub fn with_command_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.session = self.session.with_command_timeout(timeout);
+        self
+    }
+
     pub fn session(&self) -> &Session {
         &self.session
     }

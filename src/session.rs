@@ -55,6 +55,12 @@ impl Connection {
 }
 
 impl Session {
+    #[must_use]
+    pub fn with_command_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.connection = self.connection.with_command_timeout(timeout);
+        self
+    }
+
     pub fn id(&self) -> &SessionId {
         &self.id
     }
