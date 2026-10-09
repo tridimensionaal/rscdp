@@ -105,7 +105,7 @@ change its handle's deadline, or `None` to disable it.
 
 Register typed events synchronously before the action that triggers them:
 
-```rust,ignore
+```rust
 let mut loaded = page.session().listen::<rustcdp::cdp::page::events::LoadEventFired>();
 page.navigate("https://example.org").await?;
 loaded.recv().await?;
@@ -128,7 +128,7 @@ Parse a `Proxy` from a URL; `Display` and `Debug` omit credentials. HTTP, HTTPS,
 SOCKS4, and SOCKS5 endpoints are supported. Chrome Fetch authentication supports
 HTTP proxy credentials, not SOCKS credentials.
 
-```rust,ignore
+```rust
 use rustcdp::proxy::{Proxy, ProxyAuthMode};
 
 let proxy: Proxy = proxy_url.parse()?;
