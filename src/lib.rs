@@ -2,6 +2,7 @@
 
 pub mod connection;
 pub mod error;
+pub mod launcher;
 pub mod protocol;
 pub mod session;
 

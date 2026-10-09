@@ -35,6 +35,10 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     #[error(transparent)]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("browser launch failed: {0}")]
+    Launch(String),
+    #[error(transparent)]
+    Task(#[from] tokio::task::JoinError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
