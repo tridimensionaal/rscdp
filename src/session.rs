@@ -16,6 +16,7 @@ pub struct Session {
     target: TargetId,
     closed: watch::Receiver<bool>,
     parent: Option<String>,
+    auth_owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Connection {
@@ -31,13 +32,14 @@ impl Connection {
 
     /// Adopt a session reported by `Target.attachedToTarget` (auto-attach).
     pub fn session(&self, id: SessionId, target: TargetId) -> Result<Session> {
-        let (closed, parent) = self.session_state(&id.0)?;
+        let (closed, parent, auth_owner) = self.session_state(&id.0)?;
         Ok(Session {
             connection: self.clone(),
             id,
             target,
             closed,
             parent,
+            auth_owner,
         })
     }
 
@@ -64,6 +66,31 @@ impl Session {
     }
     pub fn is_closed(&self) -> bool {
         *self.closed.borrow() || self.connection.is_closed()
+    }
+
+    pub(crate) fn claim_proxy_auth(&self) -> Result<ProxyAuthLease> {
+        self.auth_owner
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| {
+                Error::ProxyAuthentication(
+                    "authentication is already armed for this session".into(),
+                )
+            })?;
+        Ok(ProxyAuthLease(self.auth_owner.clone()))
+    }
+
+    pub async fn closed(&self) {
+        let mut closed = self.closed.clone();
+        while !*closed.borrow() && !self.connection.is_closed() {
+            if closed.changed().await.is_err() {
+                break;
+            }
+        }
     }
 
     pub async fn execute<C: Command>(&self, command: &C) -> Result<C::Response> {
@@ -146,5 +173,12 @@ impl<E: Event> TypedEvents<E> {
                 return serde_json::from_value(event.params).map_err(Into::into);
             }
         }
+    }
+}
+
+pub(crate) struct ProxyAuthLease(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for ProxyAuthLease {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
     }
 }

@@ -43,6 +43,8 @@ pub enum Error {
     JavaScript(Value),
     #[error("navigation failed: {0}")]
     Navigation(String),
+    #[error("proxy authentication failed: {0}")]
+    ProxyAuthentication(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

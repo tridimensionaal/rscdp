@@ -42,10 +42,17 @@ struct Inner {
 struct SessionEntry {
     parent: Option<String>,
     closed: watch::Sender<bool>,
+    auth_owner: Arc<std::sync::atomic::AtomicBool>,
 }
 
 type EventKey = (Option<String>, String);
-type Subscriptions = Arc<Mutex<HashMap<EventKey, Weak<broadcast::Sender<RawEvent>>>>>;
+type Subscriptions = Arc<Mutex<HashMap<EventKey, Vec<Weak<broadcast::Sender<RawEvent>>>>>>;
+
+pub(crate) type SessionState = (
+    watch::Receiver<bool>,
+    Option<String>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 
 type SessionRegistry = Arc<Mutex<HashMap<String, SessionEntry>>>;
 
@@ -145,7 +152,7 @@ impl Connection {
                                                 && let Some(id) = result["sessionId"].as_str()
                                             {
                                                 active_sessions.lock().unwrap_or_else(|e| e.into_inner())
-                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: request.session_id.clone(), closed: watch::channel(false).0 });
+                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: request.session_id.clone(), closed: watch::channel(false).0, auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)) });
                                             }
                                             let _ = request.reply.send(result);
                                         }
@@ -154,7 +161,7 @@ impl Connection {
                                         if let Some(id) = event.params["sessionId"].as_str() {
                                             if event.method == "Target.attachedToTarget" {
                                                 active_sessions.lock().unwrap_or_else(|e| e.into_inner())
-                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: event.session_id.clone(), closed: watch::channel(false).0 });
+                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: event.session_id.clone(), closed: watch::channel(false).0, auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)) });
                                             } else if event.method == "Target.detachedFromTarget" {
                                                 let removed = close_sessions(&active_sessions, id);
                                                 let cancelled: Vec<_> = pending.keys().copied().filter(|key| pending[key].session_id.as_ref().is_some_and(|id| removed.contains(id))).collect();
@@ -167,8 +174,8 @@ impl Connection {
                                         }
                                         // No subscribers is normal; subscribed readers detect lag explicitly.
                                         let key = (event.session_id.clone(), event.method.clone());
-                                        if let Some(sender) = active_subscriptions.lock().unwrap_or_else(|e| e.into_inner()).get(&key).and_then(Weak::upgrade) {
-                                            let _ = sender.send(event.clone());
+                                        if let Some(senders) = active_subscriptions.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+                                            for sender in senders.iter().filter_map(Weak::upgrade) { let _ = sender.send(event.clone()); }
                                         }
                                         let _ = event_sender.send(event);
                                     }
@@ -260,16 +267,19 @@ impl Connection {
         self.execute_session(method, params, None).await
     }
 
-    pub(crate) fn session_state(
-        &self,
-        id: &str,
-    ) -> Result<(watch::Receiver<bool>, Option<String>)> {
+    pub(crate) fn session_state(&self, id: &str) -> Result<SessionState> {
         self.0
             .sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(id)
-            .map(|entry| (entry.closed.subscribe(), entry.parent.clone()))
+            .map(|entry| {
+                (
+                    entry.closed.subscribe(),
+                    entry.parent.clone(),
+                    entry.auth_owner.clone(),
+                )
+            })
             .ok_or_else(|| Error::SessionClosed(id.into()))
     }
 
@@ -327,21 +337,31 @@ impl Connection {
     }
 
     pub(crate) fn subscribe_typed(&self, method: &str, session: Option<String>) -> EventStream {
+        self.subscribe_filtered(&[method], session, CAPACITY)
+    }
+
+    pub(crate) fn subscribe_filtered(
+        &self,
+        methods: &[&str],
+        session: Option<String>,
+        capacity: usize,
+    ) -> EventStream {
         let mut subscriptions = self
             .0
             .subscriptions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        subscriptions.retain(|_, sender| sender.strong_count() > 0);
-        let key = (session, method.to_owned());
-        let sender = subscriptions
-            .get(&key)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| {
-                let sender = Arc::new(broadcast::channel(CAPACITY).0);
-                subscriptions.insert(key, Arc::downgrade(&sender));
-                sender
-            });
+        subscriptions.retain(|_, senders| {
+            senders.retain(|sender| sender.strong_count() > 0);
+            !senders.is_empty()
+        });
+        let sender = Arc::new(broadcast::channel(capacity).0);
+        for method in methods {
+            subscriptions
+                .entry((session.clone(), (*method).to_owned()))
+                .or_default()
+                .push(Arc::downgrade(&sender));
+        }
         EventStream {
             receiver: sender.subscribe(),
             closed: self.0.closed.clone(),
