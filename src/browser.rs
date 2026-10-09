@@ -5,11 +5,14 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+mod proxy;
+
 /// A browser connection, its initial page, and optionally an owned Chrome process.
 pub struct Browser {
     connection: Connection,
     page: Page,
     process: Option<BrowserProcess>,
+    auth: Option<crate::proxy_auth::ProxyAuth>,
 }
 
 impl Browser {
@@ -20,6 +23,7 @@ impl Browser {
                 connection,
                 page,
                 process: Some(process),
+                auth: None,
             }),
             Err(error) => {
                 connection.close().await;
@@ -37,6 +41,7 @@ impl Browser {
                 connection,
                 page,
                 process: None,
+                auth: None,
             }),
             Err(error) => {
                 connection.close().await;
@@ -88,6 +93,11 @@ impl Browser {
     }
 
     pub async fn close(&mut self) -> Result<()> {
+        let auth_result = if let Some(auth) = &mut self.auth {
+            auth.stop().await
+        } else {
+            Ok(())
+        };
         let page_result = if let Some(lease) = &self.page.target_lease {
             lease.close().await
         } else {
@@ -97,7 +107,13 @@ impl Browser {
         if let Some(process) = &mut self.process {
             process.close().await?;
         }
-        page_result
+        auth_result.and(page_result)
+    }
+}
+
+impl Drop for Browser {
+    fn drop(&mut self) {
+        self.detach_proxy_auth();
     }
 }
 
@@ -105,6 +121,7 @@ pub struct BrowserContext {
     connection: Connection,
     id: Option<BrowserContextId>,
     page: Page,
+    auth: Option<crate::proxy_auth::ProxyAuth>,
 }
 
 impl BrowserContext {
@@ -125,6 +142,7 @@ impl BrowserContext {
                 connection: connection.clone(),
                 id: Some(id),
                 page,
+                auth: None,
             }),
             Err(error) => {
                 connection
@@ -146,6 +164,11 @@ impl BrowserContext {
     }
 
     pub async fn close(&mut self) -> Result<()> {
+        let auth_result = if let Some(auth) = &mut self.auth {
+            auth.stop().await
+        } else {
+            Ok(())
+        };
         if let Some(id) = &self.id {
             self.connection
                 .execute_raw(
@@ -155,12 +178,13 @@ impl BrowserContext {
                 .await?;
             self.id = None;
         }
-        Ok(())
+        auth_result
     }
 }
 
 impl Drop for BrowserContext {
     fn drop(&mut self) {
+        self.detach_proxy_auth();
         if let Some(id) = self.id.take()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
