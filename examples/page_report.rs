@@ -1,7 +1,7 @@
 //! Export the same locally rendered report to PNG and PDF.
 mod common;
 use rustcdp::{
-    Result,
+    Page, Result,
     cdp::page::{
         Viewport,
         commands::{CaptureScreenshot, GetLayoutMetrics, PrintToPdf},
@@ -30,37 +30,38 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| std::env::temp_dir().join("rustcdp-report"));
     tokio::fs::create_dir_all(&output).await?;
     let mut browser = common::launch().await?;
-    let result = async {
-        let page = browser.page();
-        page.navigate_and_wait(&common::html_url(REPORT), Duration::from_secs(10))
-            .await?;
-        let size = page
-            .session()
-            .execute(&GetLayoutMetrics::new())
-            .await?
-            .css_content_size;
-        let png = page
-            .screenshot(
-                &CaptureScreenshot::new()
-                    .with_capture_beyond_viewport(true)
-                    .with_clip(Viewport {
-                        x: size.x,
-                        y: size.y,
-                        width: size.width,
-                        height: size.height,
-                        scale: 1.0,
-                    }),
-            )
-            .await?;
-        let pdf = page
-            .print_to_pdf(&PrintToPdf::new().with_print_background(true))
-            .await?;
-        tokio::fs::write(output.join("workshop.png"), png).await?;
-        tokio::fs::write(output.join("workshop.pdf"), pdf).await?;
-        println!("Report files: {}", output.display());
-        Ok(())
-    }
-    .await;
-    let closed = browser.close().await;
-    result.and(closed)
+    let result = export_report(browser.page(), &output).await;
+    let cleanup = browser.close().await;
+    result?;
+    cleanup
+}
+
+async fn export_report(page: &Page, output: &std::path::Path) -> Result<()> {
+    page.navigate_and_wait(&common::html_url(REPORT), Duration::from_secs(10))
+        .await?;
+    let size = page
+        .session()
+        .execute(&GetLayoutMetrics::new())
+        .await?
+        .css_content_size;
+    let png = page
+        .screenshot(
+            &CaptureScreenshot::new()
+                .with_capture_beyond_viewport(true)
+                .with_clip(Viewport {
+                    x: size.x,
+                    y: size.y,
+                    width: size.width,
+                    height: size.height,
+                    scale: 1.0,
+                }),
+        )
+        .await?;
+    let pdf = page
+        .print_to_pdf(&PrintToPdf::new().with_print_background(true))
+        .await?;
+    tokio::fs::write(output.join("workshop.png"), png).await?;
+    tokio::fs::write(output.join("workshop.pdf"), pdf).await?;
+    println!("Report files: {}", output.display());
+    Ok(())
 }

@@ -24,8 +24,8 @@ with `Browser::connect` or `Connection::connect`.
 
 ## Browser and page
 
-```rust,no_run
-use rustcdp::{Browser, Result, launcher::LaunchOptions};
+```rust
+use rustcdp::{Browser, Page, Result, launcher::LaunchOptions};
 use std::time::Duration;
 
 #[tokio::main]
@@ -35,17 +35,22 @@ async fn main() -> Result<()> {
         ..Default::default()
     }).await?;
 
-    let result = async {
-        let page = browser.page();
-        page.navigate_and_wait("https://example.org", Duration::from_secs(15)).await?;
-        println!("{}", page.evaluate("document.title").await?);
-        println!("{}", page.html().await?);
-        Ok(())
-    }.await;
-    browser.close().await?;
-    result
+    let result = read_page(browser.page()).await;
+    let cleanup = browser.close().await;
+    result?;
+    cleanup
+}
+
+async fn read_page(page: &Page) -> Result<()> {
+    page.navigate_and_wait("https://example.org", Duration::from_secs(15)).await?;
+    println!("{}", page.evaluate("document.title").await?);
+    println!("{}", page.html().await?);
+    Ok(())
 }
 ```
+
+The operation runs in a named function so `?` can return an error while `main`
+still awaits browser cleanup. If both fail, the operation error is returned.
 
 `evaluate` uses an isolated world and returns JSON. JavaScript exceptions become
 errors. Use `evaluate_remote` for object IDs, `undefined`, BigInt, and non-finite
@@ -75,7 +80,7 @@ PDF stream transfer remains available through `Session::execute`.
 
 ## Protocol access
 
-```rust,no_run
+```rust
 use rustcdp::{Connection, Result, cdp::browser::commands::GetVersion};
 
 async fn version() -> Result<()> {
@@ -106,9 +111,14 @@ change its handle's deadline, or `None` to disable it.
 Register typed events synchronously before the action that triggers them:
 
 ```rust
-let mut loaded = page.session().listen::<rustcdp::cdp::page::events::LoadEventFired>();
-page.navigate("https://example.org").await?;
-loaded.recv().await?;
+use rustcdp::{Page, Result, cdp::page::events::LoadEventFired};
+
+async fn observe_load(page: &Page, url: &str) -> Result<()> {
+    let mut loaded = page.session().listen::<LoadEventFired>();
+    page.navigate(url).await?;
+    loaded.recv().await?;
+    Ok(())
+}
 ```
 
 Typed subscriptions filter by session and method before buffering. Each holds 256
@@ -129,18 +139,22 @@ SOCKS4, and SOCKS5 endpoints are supported. Chrome Fetch authentication supports
 HTTP proxy credentials, not SOCKS credentials.
 
 ```rust
-use rustcdp::proxy::{Proxy, ProxyAuthMode};
+use rustcdp::{Browser, BrowserContext, Result, proxy::{Proxy, ProxyAuthMode}};
+use std::time::Duration;
 
-let proxy: Proxy = proxy_url.parse()?;
-let mut context = browser
-    .new_context_with_proxy(proxy, ProxyAuthMode::OnDemand)
-    .await?;
-let result = async {
+async fn browse_with_proxy(browser: &Browser, proxy: Proxy, url: &str) -> Result<()> {
+    let mut context = browser.new_context_with_proxy(proxy, ProxyAuthMode::OnDemand).await?;
+    let result = load_through_proxy(&context, url).await;
+    let cleanup = context.close().await;
+    result?;
+    cleanup
+}
+
+async fn load_through_proxy(context: &BrowserContext, url: &str) -> Result<()> {
+    let timeout = Duration::from_secs(15);
     context.page().navigate_and_wait(url, timeout).await?;
     context.wait_for_proxy_auth(timeout).await
-}.await;
-context.close().await?;
-result?;
+}
 ```
 
 Use `Browser::launch_with_proxy` for a process-wide proxy. `Preflight` (the enum's
