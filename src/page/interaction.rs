@@ -43,24 +43,22 @@ pub struct ElementPosition {
 
 /// An owned remote node reference, released when its last clone is dropped.
 #[derive(Clone)]
-pub struct Element(Arc<RemoteNode>);
+pub struct Element(pub(super) Arc<RemoteNode>);
 
-struct RemoteNode {
-    session: Session,
-    id: RemoteObjectId,
+pub(super) struct RemoteNode {
+    pub(super) session: Session,
+    pub(super) id: RemoteObjectId,
 }
 
 impl Drop for RemoteNode {
     fn drop(&mut self) {
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let session = self.session.clone();
-            let id = self.id.clone();
-            runtime.spawn(async move {
-                let _ = session
-                    .execute_raw("Runtime.releaseObject", json!({"objectId":id}))
-                    .await;
-            });
-        }
+        let session = self.session.clone();
+        let id = self.id.clone();
+        self.session.connection().runtime().spawn(async move {
+            let _ = session
+                .execute_raw("Runtime.releaseObject", json!({"objectId":id}))
+                .await;
+        });
     }
 }
 
@@ -130,21 +128,24 @@ async fn click_cdp(session: &Session, x: f64, y: f64) -> Result<()> {
     .await
 }
 
-async fn dispatch_pair(
+pub(super) async fn dispatch_pair(
     session: &Session,
     method: &'static str,
     press: Value,
     release: Value,
 ) -> Result<()> {
     let session = session.clone();
-    tokio::spawn(async move {
-        let pressed = session.execute_raw(method, press).await;
-        let released = session.execute_raw(method, release).await;
-        pressed?;
-        released?;
-        Ok(())
-    })
-    .await?
+    session
+        .connection()
+        .runtime()
+        .spawn(async move {
+            let pressed = session.execute_raw(method, press).await;
+            let released = session.execute_raw(method, release).await;
+            pressed?;
+            released?;
+            Ok(())
+        })
+        .await?
 }
 
 impl Page {
@@ -171,21 +172,33 @@ impl Page {
         .await?
     }
 
-    pub async fn element_by_xpath(&self, xpath: &str) -> Result<Option<Element>> {
-        let page = self.clone();
-        let xpath = xpath.to_owned();
-        tokio::spawn(async move { page.element_by_xpath_owned(&xpath).await }).await?
+    /// Find the first matching CSS element. Invalid selectors return a JavaScript error.
+    pub async fn element_by_selector(&self, selector: &str) -> Result<Option<Element>> {
+        let selector = serde_json::to_string(selector)?;
+        self.element_for_expression(format!("document.querySelector({selector})"))
+            .await
     }
 
-    async fn element_by_xpath_owned(&self, xpath: &str) -> Result<Option<Element>> {
-        let xpath = serde_json::to_string(xpath)?;
-        let result = self.evaluate_remote(&format!("document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue"), false).await?;
-        Ok(result.object_id.map(|id| {
-            Element(Arc::new(RemoteNode {
-                session: self.session.clone(),
-                id,
+    pub(super) async fn element_for_expression(
+        &self,
+        expression: String,
+    ) -> Result<Option<Element>> {
+        let page = self.clone();
+        tokio::spawn(async move {
+            let result = page.evaluate_remote(&expression, false).await?;
+            Ok(result.object_id.map(|id| {
+                Element(Arc::new(RemoteNode {
+                    session: page.session.clone(),
+                    id,
+                }))
             }))
-        }))
+        })
+        .await?
+    }
+
+    pub async fn element_by_xpath(&self, xpath: &str) -> Result<Option<Element>> {
+        let xpath = serde_json::to_string(xpath)?;
+        self.element_for_expression(format!("document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue")).await
     }
 
     /// CDP DOM search, including an optional user-agent shadow DOM traversal.
@@ -247,22 +260,36 @@ impl Page {
     }
 
     pub async fn wait_for_xpath(&self, xpath: &str, options: WaitOptions) -> Result<bool> {
+        let xpath = serde_json::to_string(xpath)?;
+        let expression = format!(
+            "document.evaluate({xpath}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"
+        );
+        self.wait_for_count(&expression, options).await
+    }
+
+    /// Wait for a stable, nonzero number of CSS matches. Returns false on timeout.
+    pub async fn wait_for_selector(&self, selector: &str, options: WaitOptions) -> Result<bool> {
+        let selector = serde_json::to_string(selector)?;
+        self.wait_for_count(
+            &format!("document.querySelectorAll({selector}).length"),
+            options,
+        )
+        .await
+    }
+
+    async fn wait_for_count(&self, expression: &str, options: WaitOptions) -> Result<bool> {
         if options.polling_interval.is_zero() {
             return Err(Error::InvalidArgument(
                 "polling interval must be nonzero".into(),
             ));
         }
-        let xpath = serde_json::to_string(xpath)?;
-        let expression = format!(
-            "document.evaluate({xpath}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"
-        );
         let result = tokio::time::timeout(options.timeout, async {
             let mut previous = 0;
             let mut stable = Instant::now();
             loop {
-                let count = match self.evaluate(&expression).await {
+                let count = match self.evaluate(expression).await {
                     Ok(value) => value.as_u64().ok_or_else(|| {
-                        Error::InvalidArgument("XPath count is not an integer".into())
+                        Error::InvalidArgument("selector count is not an integer".into())
                     })?,
                     Err(Error::Protocol(error))
                         if error.code == -32000
@@ -330,9 +357,7 @@ impl Page {
     }
 
     pub async fn press_escape(&self) -> Result<()> {
-        dispatch_pair(&self.session, "Input.dispatchKeyEvent",
-            json!({"type":"keyDown","key":"Escape","code":"Escape","windowsVirtualKeyCode":27,"nativeVirtualKeyCode":27}),
-            json!({"type":"keyUp","key":"Escape","code":"Escape","windowsVirtualKeyCode":27,"nativeVirtualKeyCode":27})).await
+        self.press_key("Escape").await
     }
 
     pub async fn go_back(&self) -> Result<bool> {

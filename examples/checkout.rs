@@ -1,0 +1,56 @@
+//! Fill a local checkout form and submit it through keyboard input.
+mod common;
+use rustcdp::{Error, Result, page::WaitOptions};
+use std::time::Duration;
+
+const CHECKOUT: &str = r#"<!doctype html><meta charset="utf-8"><title>Paper shop</title>
+<h1>Paper shop — checkout</h1><p>Field notebook · $12</p>
+<form onsubmit="event.preventDefault(); document.querySelector('output').textContent =
+  'Reserved for ' + this.customer.value + ': ' + this.note.value">
+<label>Name <input name="customer" required></label>
+<label>Gift note <input name="note"></label><button>Reserve notebook</button>
+</form><output aria-live="polite"></output>"#;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut browser = common::launch().await?;
+    let result = async {
+        let page = browser.page();
+        page.navigate_and_wait(&common::html_url(CHECKOUT), Duration::from_secs(10))
+            .await?;
+        let customer = page
+            .element_by_selector("input[name=customer]")
+            .await?
+            .ok_or_else(|| Error::InvalidArgument("checkout has no customer field".into()))?;
+        customer.type_text("Ada Muñoz").await?;
+        page.press_key("Tab").await?;
+        page.insert_text("For your next idea ✨").await?;
+        page.press_key("Enter").await?;
+        if !page
+            .wait_for_selector(
+                "output:not(:empty)",
+                WaitOptions {
+                    stability_time: Duration::ZERO,
+                    delay_after: Duration::ZERO,
+                    ..Default::default()
+                },
+            )
+            .await?
+        {
+            return Err(Error::Timeout("waiting for the reservation receipt".into()));
+        }
+        let receipt = page
+            .evaluate("document.querySelector('output').textContent")
+            .await?;
+        println!("{receipt}");
+        if receipt != "Reserved for Ada Muñoz: For your next idea ✨" {
+            return Err(Error::InvalidArgument(
+                "unexpected reservation receipt".into(),
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    let closed = browser.close().await;
+    result.and(closed)
+}

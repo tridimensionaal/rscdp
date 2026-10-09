@@ -13,7 +13,9 @@ use crate::{
 use serde_json::{Value, json};
 use std::time::Duration;
 
+mod input;
 mod interaction;
+pub use input::KeyModifiers;
 pub use interaction::{ClickMethod, Element, ElementPosition, WaitOptions};
 
 /// Page operations are shared by the initial browser page and isolated contexts.
