@@ -8,7 +8,10 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{Message, protocol::WebSocketConfig},
+};
 
 const CAPACITY: usize = 256;
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -116,7 +119,10 @@ impl Connection {
                 "expected http(s) or ws(s) debugging URL".into(),
             ));
         };
-        let (socket, _) = connect_async(url).await?;
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(100 * 1024 * 1024))
+            .max_frame_size(Some(100 * 1024 * 1024));
+        let (socket, _) = connect_async_with_config(url, Some(config), false).await?;
         let (requests, mut incoming) = mpsc::channel::<Request>(CAPACITY);
         let (events, _) = broadcast::channel(CAPACITY);
         let event_sender = events.clone();

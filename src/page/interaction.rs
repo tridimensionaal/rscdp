@@ -148,6 +148,29 @@ async fn dispatch_pair(
 }
 
 impl Page {
+    /// Resolve a CDP DOM node into an owned element for geometry and clicking.
+    pub async fn resolve_node(&self, node: &Node) -> Result<Element> {
+        let page = self.clone();
+        let backend_id = node.backend_node_id.clone();
+        tokio::spawn(async move {
+            let context = page.create_isolated_world().await?;
+            let response = page
+                .session
+                .execute_raw(
+                    "DOM.resolveNode",
+                    json!({"backendNodeId":backend_id,"executionContextId":context}),
+                )
+                .await?;
+            let id: RemoteObjectId =
+                serde_json::from_value(response["object"]["objectId"].clone())?;
+            Ok(Element(Arc::new(RemoteNode {
+                session: page.session.clone(),
+                id,
+            })))
+        })
+        .await?
+    }
+
     pub async fn element_by_xpath(&self, xpath: &str) -> Result<Option<Element>> {
         let page = self.clone();
         let xpath = xpath.to_owned();

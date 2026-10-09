@@ -38,12 +38,14 @@ async fn main() -> Result<()> {
             page.evaluate("document.querySelector('button').textContent")
                 .await?
         );
-        println!(
-            "DOM matches: {}",
-            page.nodes_by_xpath("//button", false).await?.len()
-        );
-        page.click_xpath("//button", ClickMethod::JavaScript, false)
-            .await?;
+        let nodes = page.nodes_by_xpath("//button", false).await?;
+        println!("DOM matches: {}", nodes.len());
+        if let Some(node) = nodes.first() {
+            page.resolve_node(node)
+                .await?
+                .click(ClickMethod::JavaScript, false)
+                .await?;
+        }
         page.press_escape().await?;
         page.flash_point(20.0, 20.0, Duration::from_millis(50), 12.0)
             .await?;
