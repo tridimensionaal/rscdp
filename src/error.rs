@@ -31,6 +31,10 @@ pub enum Error {
     Lagged(u64),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
+    #[error(transparent)]
+    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

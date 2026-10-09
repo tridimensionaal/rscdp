@@ -1,7 +1,10 @@
 //! Asynchronous Chrome DevTools Protocol client and browser automation.
 
+pub mod connection;
 pub mod error;
 pub mod protocol;
+
+pub use connection::Connection;
 
 /// Bindings generated from the pinned Chrome DevTools Protocol schemas.
 #[allow(clippy::large_enum_variant)]
