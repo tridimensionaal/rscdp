@@ -6,6 +6,7 @@ pub mod error;
 pub mod launcher;
 pub mod page;
 pub mod protocol;
+pub mod proxy;
 pub mod session;
 
 pub use browser::{Browser, BrowserContext};

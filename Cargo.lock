@@ -786,6 +786,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "heck",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
@@ -793,6 +794,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "url",
 ]
 
 [[package]]
