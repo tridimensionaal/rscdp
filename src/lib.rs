@@ -1,5 +1,8 @@
 //! Asynchronous Chrome DevTools Protocol client and browser automation.
 
+#[cfg(feature = "tracing")]
+mod diagnostics;
+
 pub mod browser;
 pub mod connection;
 pub mod error;

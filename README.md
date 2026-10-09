@@ -180,3 +180,11 @@ cargo doc --no-deps
 
 The proxy examples read `CDP_PROXY` and optionally `CDP_URL` from the environment.
 The low-level `proxy` example requires a proxy URL containing credentials.
+
+## Diagnostics
+
+Enable the optional `tracing` Cargo feature and configure a tracing subscriber in
+your application to receive `rustcdp` events at debug level. Events report command
+names, elapsed time, outcome categories, connection shutdown and process cleanup.
+Command payloads, endpoint URLs and remote error messages are not logged by rustcdp.
+The library does not install a subscriber or change application logging settings.

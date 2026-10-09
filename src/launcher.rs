@@ -51,6 +51,8 @@ impl BrowserProcess {
                     Error::Launch(_) | Error::Timeout(_) | Error::Http(_) | Error::WebSocket(_),
                 ) if retries < 2 => {
                     retries += 1;
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(target: "rustcdp", attempt = retries + 1, "retrying browser launch");
                 }
                 Err(error) => return Err(error),
             }
@@ -204,7 +206,10 @@ struct Cleanup {
 impl Cleanup {
     fn run(mut self) -> std::io::Result<()> {
         if let Some(child) = self.child.take() {
-            reap(child, self.temporary.take())
+            let result = reap(child, self.temporary.take());
+            #[cfg(feature = "tracing")]
+            tracing::debug!(target: "rustcdp", success = result.is_ok(), "browser cleanup finished");
+            result
         } else {
             Ok(())
         }

@@ -236,6 +236,8 @@ impl Connection {
                 }
                 Ok(())
             }.await;
+            #[cfg(feature = "tracing")]
+            tracing::debug!(target: "rustcdp", failed = outcome.is_err(), pending = pending.len(), "connection stopped");
             let reason = outcome
                 .err()
                 .map_or_else(|| "socket closed".into(), |e| e.to_string());
@@ -256,6 +258,8 @@ impl Connection {
             // Never let a peer that ignores close hold up shutdown.
             let _ = tokio::time::timeout(Duration::from_secs(1), sink.close()).await;
         });
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: "rustcdp", "connection established");
         Ok(Self(
             Arc::new(Inner {
                 runtime: tokio::runtime::Handle::current(),
@@ -335,6 +339,8 @@ impl Connection {
             .as_deref()
             .map(|id| self.session_state(id).map(|state| state.0))
             .transpose()?;
+        #[cfg(feature = "tracing")]
+        let mut diagnostic = crate::diagnostics::Command::new(method);
         let mut connection_closed = self.0.closed.clone();
         let execute = async {
             let admission = async {
@@ -372,13 +378,16 @@ impl Connection {
                 .await
                 .map_err(|_| Error::ConnectionClosed("reader stopped".into()))?
         };
-        if let Some(timeout) = self.1 {
+        let result = if let Some(timeout) = self.1 {
             tokio::time::timeout(timeout, execute)
                 .await
-                .map_err(|_| Error::Timeout(method.into()))?
+                .unwrap_or_else(|_| Err(Error::Timeout(method.into())))
         } else {
             execute.await
-        }
+        };
+        #[cfg(feature = "tracing")]
+        diagnostic.finish(&result);
+        result
     }
 
     /// Register synchronously so a subsequent command cannot race subscription.
