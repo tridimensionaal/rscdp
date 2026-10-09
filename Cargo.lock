@@ -788,6 +788,7 @@ dependencies = [
  "heck",
  "percent-encoding",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

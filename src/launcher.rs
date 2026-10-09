@@ -43,6 +43,21 @@ pub struct BrowserProcess {
 
 impl BrowserProcess {
     pub async fn launch(options: LaunchOptions) -> Result<(Self, Connection)> {
+        let mut retries = 0;
+        loop {
+            match Self::launch_once(options.clone()).await {
+                Ok(browser) => return Ok(browser),
+                Err(
+                    Error::Launch(_) | Error::Timeout(_) | Error::Http(_) | Error::WebSocket(_),
+                ) if retries < 2 => {
+                    retries += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn launch_once(options: LaunchOptions) -> Result<(Self, Connection)> {
         let executable = options.executable.clone().map_or_else(find_chrome, Ok)?;
         let (profile, temporary) = if let Some(path) = &options.profile_dir {
             tokio::fs::create_dir_all(path).await?;
@@ -95,7 +110,11 @@ impl BrowserProcess {
         }
         command.arg("about:blank");
         let mut process = Self {
-            child: Some(command.spawn()?),
+            child: Some(
+                command
+                    .spawn()
+                    .map_err(|error| Error::Launch(format!("could not spawn Chrome: {error}")))?,
+            ),
             temporary,
             profile,
             endpoint: String::new(),
@@ -201,10 +220,13 @@ impl Drop for Cleanup {
 }
 
 fn reap(mut child: Child, temporary: Option<TempDir>) -> std::io::Result<()> {
-    if child.try_wait()?.is_none() {
-        child.kill()?;
+    if let Err(error) = terminate(&mut child) {
+        // Never delete a profile while its process could still be using it.
+        if let Some(directory) = temporary {
+            let _ = directory.keep();
+        }
+        return Err(error);
     }
-    child.wait()?;
     if let Some(directory) = temporary {
         let path = directory.keep();
         // Chromium descendants can finish writing after the browser is reaped.
@@ -222,6 +244,30 @@ fn reap(mut child: Child, temporary: Option<TempDir>) -> std::io::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn terminate(child: &mut Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_none() {
+        #[cfg(unix)]
+        {
+            use rustix::process::{Pid, Signal, kill_process};
+            match kill_process(Pid::from_child(child), Signal::TERM) {
+                Ok(()) => {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    while child.try_wait()?.is_none() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+                Err(rustix::io::Errno::SRCH) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if child.try_wait()?.is_none() {
+            child.kill()?;
+        }
+    }
+    child.wait()?;
     Ok(())
 }
 
