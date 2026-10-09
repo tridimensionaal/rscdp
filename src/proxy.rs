@@ -29,6 +29,19 @@ impl Proxy {
             .as_ref()
             .map(|(user, password)| (user.as_str(), password.as_str()))
     }
+
+    pub(crate) fn matches_origin(&self, origin: &str) -> bool {
+        let (Ok(origin), Ok(server)) = (url::Url::parse(origin), url::Url::parse(&self.server))
+        else {
+            return false;
+        };
+        origin.username().is_empty()
+            && origin.password().is_none()
+            && matches!(origin.path(), "" | "/")
+            && origin.query().is_none()
+            && origin.fragment().is_none()
+            && origin.origin() == server.origin()
+    }
 }
 
 impl FromStr for Proxy {

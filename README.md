@@ -177,8 +177,10 @@ credentials, bypassed traffic, and proxies without authentication can all produc
 an unchallenged response. Readiness does not prove that traffic traversed the proxy
 or that the supplied credentials were used.
 
-The worker restricts credentials to proxy challenges, serializes the cold request
-burst, and latches credential rejection. Unchallenged traffic leaves Fetch enabled
+The worker restricts credentials to challenges matching the configured proxy's
+scheme, host, and port. Mismatches are canceled without sending credentials.
+It serializes the cold request burst and latches credential rejection.
+Unchallenged traffic leaves Fetch enabled
 for later challenges; verified authentication disables it. Network errors do not
 count as credential rejection. If cached
 credentials later expire, retire the context rather than expecting automatic rearming.

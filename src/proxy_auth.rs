@@ -1,7 +1,7 @@
 //! Single-flight authentication for a session already configured to use a proxy.
 //!
-//! Only proxy challenges receive credentials. Rejection stays latched until
-//! teardown; successful verification disables Fetch. Authentication events are
+//! Only challenges from the configured proxy origin receive credentials.
+//! Rejection stays latched until teardown; successful verification disables Fetch. Authentication events are
 //! lossless; held requests/challenges are bounded. Fatal worker failures close the target;
 //! if closing it and disabling Fetch both fail, the connection is closed.
 use crate::{
@@ -309,6 +309,15 @@ impl Handler {
         }
         if self.rejected {
             return self.respond(&id, "CancelAuth").await;
+        }
+        if !value["authChallenge"]["origin"]
+            .as_str()
+            .is_some_and(|origin| self.proxy.matches_origin(origin))
+        {
+            self.respond(&id, "CancelAuth").await?;
+            return Err(Error::ProxyAuthentication(
+                "challenge origin does not match the configured proxy".into(),
+            ));
         }
         if self.attempted.contains(&id) {
             self.respond(&id, "CancelAuth").await?;
