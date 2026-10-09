@@ -115,15 +115,22 @@ change its handle's deadline, or `None` to disable it.
 Register typed events synchronously before the action that triggers them:
 
 ```rust
-use rustcdp::{Page, Result, cdp::page::events::LoadEventFired};
+use rustcdp::{Error, Page, Result, cdp::page::events::LoadEventFired};
+use std::time::Duration;
 
 async fn observe_load(page: &Page, url: &str) -> Result<()> {
     let mut loaded = page.session().listen::<LoadEventFired>();
     page.navigate(url).await?;
-    loaded.recv().await?;
+    tokio::time::timeout(Duration::from_secs(15), loaded.recv())
+        .await
+        .map_err(|_| Error::Timeout("waiting for a load event".into()))??;
     Ok(())
 }
 ```
+
+This example expects a full-document navigation. A fragment-only navigation may
+not emit a load event and will time out. Use `navigate_and_wait` when you need to
+wait for the specific navigation's completion rather than observe an event.
 
 Typed subscriptions filter by session and method before buffering. Each holds 256
 events and reports `Error::Lagged` on overflow. `connection.subscribe()` exposes
