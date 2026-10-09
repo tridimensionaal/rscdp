@@ -20,6 +20,7 @@ pub use interaction::{ClickMethod, Element, ElementPosition, WaitOptions};
 #[derive(Clone)]
 pub struct Page {
     session: Session,
+    _page_events: std::sync::Arc<crate::session::DomainGuard>,
     context: Option<BrowserContextId>,
     pub(crate) target_lease: Option<std::sync::Arc<crate::browser::TargetLease>>,
 }
@@ -29,11 +30,10 @@ impl Page {
         session: Session,
         context: Option<BrowserContextId>,
     ) -> Result<Self> {
-        session
-            .execute(&crate::cdp::page::commands::Enable::default())
-            .await?;
+        let page_events = session.enable_page().await?;
         Ok(Self {
             session,
+            _page_events: std::sync::Arc::new(page_events),
             context,
             target_lease: None,
         })

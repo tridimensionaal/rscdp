@@ -8,6 +8,9 @@ use serde_json::{Value, json};
 use std::marker::PhantomData;
 use tokio::sync::watch;
 
+mod domain;
+pub use domain::DomainGuard;
+
 /// A flattened CDP session multiplexed over its parent connection.
 #[derive(Clone)]
 pub struct Session {
@@ -17,6 +20,7 @@ pub struct Session {
     closed: watch::Receiver<bool>,
     parent: Option<String>,
     auth_owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    domains: std::sync::Arc<[tokio::sync::Mutex<usize>; 2]>,
 }
 
 impl Connection {
@@ -32,7 +36,7 @@ impl Connection {
 
     /// Adopt a session reported by `Target.attachedToTarget` (auto-attach).
     pub fn session(&self, id: SessionId, target: TargetId) -> Result<Session> {
-        let (closed, parent, auth_owner) = self.session_state(&id.0)?;
+        let (closed, parent, auth_owner, domains) = self.session_state(&id.0)?;
         Ok(Session {
             connection: self.clone(),
             id,
@@ -40,6 +44,7 @@ impl Connection {
             closed,
             parent,
             auth_owner,
+            domains,
         })
     }
 

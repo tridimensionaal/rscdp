@@ -33,6 +33,7 @@ struct Request {
 }
 
 struct Inner {
+    runtime: tokio::runtime::Handle,
     requests: mpsc::Sender<Request>,
     events: broadcast::Sender<RawEvent>,
     shutdown: watch::Sender<bool>,
@@ -46,6 +47,7 @@ struct SessionEntry {
     parent: Option<String>,
     closed: watch::Sender<bool>,
     auth_owner: Arc<std::sync::atomic::AtomicBool>,
+    domains: Arc<[tokio::sync::Mutex<usize>; 2]>,
 }
 
 type EventKey = (Option<String>, String);
@@ -55,6 +57,7 @@ pub(crate) type SessionState = (
     watch::Receiver<bool>,
     Option<String>,
     Arc<std::sync::atomic::AtomicBool>,
+    Arc<[tokio::sync::Mutex<usize>; 2]>,
 );
 
 type SessionRegistry = Arc<Mutex<HashMap<String, SessionEntry>>>;
@@ -158,7 +161,7 @@ impl Connection {
                                                 && let Some(id) = result["sessionId"].as_str()
                                             {
                                                 active_sessions.lock().unwrap_or_else(|e| e.into_inner())
-                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: request.session_id.clone(), closed: watch::channel(false).0, auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)) });
+                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: request.session_id.clone(), closed: watch::channel(false).0, auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)), domains: Arc::default() });
                                             }
                                             let _ = request.reply.send(result);
                                         }
@@ -167,7 +170,7 @@ impl Connection {
                                         if let Some(id) = event.params["sessionId"].as_str() {
                                             if event.method == "Target.attachedToTarget" {
                                                 active_sessions.lock().unwrap_or_else(|e| e.into_inner())
-                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: event.session_id.clone(), closed: watch::channel(false).0, auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)) });
+                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: event.session_id.clone(), closed: watch::channel(false).0, auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)), domains: Arc::default() });
                                             } else if event.method == "Target.detachedFromTarget" {
                                                 let removed = close_sessions(&active_sessions, id);
                                                 let cancelled: Vec<_> = pending.keys().copied().filter(|key| pending[key].session_id.as_ref().is_some_and(|id| removed.contains(id))).collect();
@@ -248,6 +251,7 @@ impl Connection {
         });
         Ok(Self(
             Arc::new(Inner {
+                runtime: tokio::runtime::Handle::current(),
                 requests,
                 events,
                 shutdown,
@@ -269,7 +273,11 @@ impl Connection {
     }
 
     pub fn is_closed(&self) -> bool {
-        *self.0.shutdown.borrow() || self.0.closed.borrow().is_some()
+        self.0.requests.is_closed() || *self.0.shutdown.borrow() || self.0.closed.borrow().is_some()
+    }
+
+    pub(crate) fn runtime(&self) -> tokio::runtime::Handle {
+        self.0.runtime.clone()
     }
 
     pub async fn execute<C: Command>(&self, command: &C) -> Result<C::Response> {
@@ -295,6 +303,7 @@ impl Connection {
                     entry.closed.subscribe(),
                     entry.parent.clone(),
                     entry.auth_owner.clone(),
+                    entry.domains.clone(),
                 )
             })
             .ok_or_else(|| Error::SessionClosed(id.into()))
