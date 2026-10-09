@@ -37,6 +37,7 @@ impl Default for LaunchOptions {
 pub struct BrowserProcess {
     child: Option<Child>,
     temporary: Option<TempDir>,
+    cleanup: Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>,
     profile: PathBuf,
     endpoint: String,
 }
@@ -118,6 +119,7 @@ impl BrowserProcess {
                     .map_err(|error| Error::Launch(format!("could not spawn Chrome: {error}")))?,
             ),
             temporary,
+            cleanup: None,
             profile,
             endpoint: String::new(),
         };
@@ -191,8 +193,13 @@ impl BrowserProcess {
                 .spawn(move || {
                     let _ = reply.send(cleanup.run());
                 })?;
-            done.await
-                .map_err(|_| Error::Launch("cleanup worker stopped".into()))??;
+            self.cleanup = Some(done);
+        }
+        if let Some(done) = &mut self.cleanup {
+            // Keep completion owned here if the caller cancels this await.
+            let result = done.await;
+            self.cleanup = None;
+            result.map_err(|_| Error::Launch("cleanup worker stopped".into()))??;
         }
         Ok(())
     }
