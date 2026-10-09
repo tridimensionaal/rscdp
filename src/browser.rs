@@ -129,7 +129,10 @@ impl BrowserContext {
         let connection = connection.clone();
         // Finish acquiring ownership even if the caller cancels. An unclaimed
         // result is dropped by Tokio and disposes its context.
-        tokio::spawn(async move { Self::create_owned(&connection, params).await }).await?
+        connection
+            .runtime()
+            .spawn(async move { Self::create_owned(&connection, params).await })
+            .await?
     }
 
     async fn create_owned(connection: &Connection, params: Value) -> Result<Self> {
@@ -185,11 +188,9 @@ impl BrowserContext {
 impl Drop for BrowserContext {
     fn drop(&mut self) {
         self.detach_proxy_auth();
-        if let Some(id) = self.id.take()
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
+        if let Some(id) = self.id.take() {
             let connection = self.connection.clone();
-            runtime.spawn(async move {
+            self.connection.runtime().spawn(async move {
                 let _ = connection
                     .execute_raw(
                         "Target.disposeBrowserContext",
@@ -257,10 +258,9 @@ impl Drop for TargetLease {
     fn drop(&mut self) {
         if !self.closed.load(std::sync::atomic::Ordering::Acquire)
             && let Some(target) = self.target.take()
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
             let connection = self.connection.clone();
-            runtime.spawn(async move {
+            self.connection.runtime().spawn(async move {
                 let _ = connection
                     .execute_raw("Target.closeTarget", json!({"targetId":target}))
                     .await;

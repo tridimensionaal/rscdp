@@ -157,23 +157,26 @@ impl Page {
     pub async fn resolve_node(&self, node: &Node) -> Result<Element> {
         let page = self.clone();
         let backend_id = node.backend_node_id.clone();
-        tokio::spawn(async move {
-            let context = page.create_isolated_world().await?;
-            let response = page
-                .session
-                .execute_raw(
-                    "DOM.resolveNode",
-                    json!({"backendNodeId":backend_id,"executionContextId":context}),
-                )
-                .await?;
-            let id: RemoteObjectId =
-                serde_json::from_value(response["object"]["objectId"].clone())?;
-            Ok(Element(Arc::new(RemoteNode {
-                session: page.session.clone(),
-                id,
-            })))
-        })
-        .await?
+        self.session
+            .connection()
+            .runtime()
+            .spawn(async move {
+                let context = page.create_isolated_world().await?;
+                let response = page
+                    .session
+                    .execute_raw(
+                        "DOM.resolveNode",
+                        json!({"backendNodeId":backend_id,"executionContextId":context}),
+                    )
+                    .await?;
+                let id: RemoteObjectId =
+                    serde_json::from_value(response["object"]["objectId"].clone())?;
+                Ok(Element(Arc::new(RemoteNode {
+                    session: page.session.clone(),
+                    id,
+                })))
+            })
+            .await?
     }
 
     /// Find the first matching CSS element. Invalid selectors return a JavaScript error.
@@ -188,16 +191,19 @@ impl Page {
         expression: String,
     ) -> Result<Option<Element>> {
         let page = self.clone();
-        tokio::spawn(async move {
-            let result = page.evaluate_remote(&expression, false).await?;
-            Ok(result.object_id.map(|id| {
-                Element(Arc::new(RemoteNode {
-                    session: page.session.clone(),
-                    id,
+        self.session
+            .connection()
+            .runtime()
+            .spawn(async move {
+                let result = page.evaluate_remote(&expression, false).await?;
+                Ok(result.object_id.map(|id| {
+                    Element(Arc::new(RemoteNode {
+                        session: page.session.clone(),
+                        id,
+                    }))
                 }))
-            }))
-        })
-        .await?
+            })
+            .await?
     }
 
     pub async fn element_by_xpath(&self, xpath: &str) -> Result<Option<Element>> {
@@ -209,7 +215,10 @@ impl Page {
     pub async fn nodes_by_xpath(&self, xpath: &str, include_shadow_dom: bool) -> Result<Vec<Node>> {
         let page = self.clone();
         let xpath = xpath.to_owned();
-        tokio::spawn(async move { page.nodes_by_xpath_owned(&xpath, include_shadow_dom).await })
+        self.session
+            .connection()
+            .runtime()
+            .spawn(async move { page.nodes_by_xpath_owned(&xpath, include_shadow_dom).await })
             .await?
     }
 
@@ -450,11 +459,9 @@ impl Search {
 }
 impl Drop for Search {
     fn drop(&mut self) {
-        if let Some(id) = self.id.take()
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
+        if let Some(id) = self.id.take() {
             let session = self.session.clone();
-            runtime.spawn(async move {
+            self.session.connection().runtime().spawn(async move {
                 let _ = session
                     .execute_raw("DOM.discardSearchResults", json!({"searchId":id}))
                     .await;

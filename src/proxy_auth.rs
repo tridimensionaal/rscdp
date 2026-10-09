@@ -55,7 +55,7 @@ impl ProxyAuth {
         let (stop, mut stopped) = watch::channel(Stop::Running);
         let (status_sender, status) = watch::channel(ProxyAuthStatus::Pending);
         let (ready, started) = oneshot::channel();
-        let task = tokio::spawn(async move {
+        let task = session.connection().runtime().spawn(async move {
             let _ownership = ownership;
             let enabled = session.execute_raw("Fetch.enable", json!({"patterns":[{"urlPattern":"*","requestStage":"Request"},{"urlPattern":"*","requestStage":"Response"}],"handleAuthRequests":true})).await;
             if let Err(error) = enabled {
