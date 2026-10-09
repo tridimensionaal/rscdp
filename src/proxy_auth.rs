@@ -25,6 +25,8 @@ const DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyAuthStatus {
     Pending,
+    /// A request completed without a proxy challenge; credentials remain unverified.
+    Unchallenged,
     Authenticated,
     Rejected,
     Stopped,
@@ -74,6 +76,7 @@ impl ProxyAuth {
                 requests: VecDeque::new(),
                 cold: None,
                 probe: None,
+                gate_open: false,
                 verified: false,
                 rejected: false,
             };
@@ -136,12 +139,14 @@ impl ProxyAuth {
         self.status.borrow().clone()
     }
 
-    pub async fn wait(&self, timeout: Duration) -> Result<()> {
+    /// Wait for a successful request, with or without an observed proxy challenge.
+    /// Inspect `status()` to distinguish verified authentication from unchallenged traffic.
+    pub async fn wait_ready(&self, timeout: Duration) -> Result<()> {
         let mut status = self.status.clone();
         tokio::time::timeout(timeout, async {
             loop {
                 match status.borrow().clone() {
-                    ProxyAuthStatus::Authenticated => return Ok(()),
+                    ProxyAuthStatus::Unchallenged | ProxyAuthStatus::Authenticated => return Ok(()),
                     ProxyAuthStatus::Rejected => {
                         return Err(Error::ProxyAuthentication("credentials rejected".into()));
                     }
@@ -159,7 +164,7 @@ impl ProxyAuth {
             }
         })
         .await
-        .map_err(|_| Error::Timeout("proxy authentication".into()))?
+        .map_err(|_| Error::Timeout("proxy readiness".into()))?
     }
 
     pub async fn stop(&mut self) -> Result<()> {
@@ -196,6 +201,7 @@ struct Handler {
     requests: VecDeque<String>,
     cold: Option<String>,
     probe: Option<String>,
+    gate_open: bool,
     verified: bool,
     rejected: bool,
 }
@@ -225,34 +231,58 @@ impl Handler {
         }
         self.continue_request(&id).await?;
         let attempted = self.probe.as_ref() == Some(&id);
+        let cold = self.cold.as_ref() == Some(&id);
         if attempted {
             self.probe = None;
-        }
-        let cold = self.cold.as_ref() == Some(&id);
-        let rejected = value["responseStatusCode"] == 407;
-        let failed = value.get("responseErrorReason").is_some();
-        if (cold && rejected) || (attempted && (rejected || failed)) {
-            self.reject().await?;
-        } else if attempted || (cold && !rejected && !failed) {
             self.attempted.remove(&id);
-            self.verified = true;
+        }
+        if cold {
             self.cold = None;
-            if self.probe.is_none()
-                && let Some(id) = self.challenges.pop_front()
+        }
+        if !attempted && !cold {
+            if self.gate_open
+                && self.probe.is_none()
+                && !self.rejected
+                && !self.verified
+                && value["responseStatusCode"] != 407
+                && value.get("responseErrorReason").is_none()
             {
-                self.provide(id).await?;
+                self.status.send_replace(ProxyAuthStatus::Unchallenged);
             }
-            if self.probe.is_none() {
+            return Ok(false);
+        }
+        if value["responseStatusCode"] == 407 {
+            self.reject().await?;
+            return Ok(false);
+        }
+        if value.get("responseErrorReason").is_none() {
+            self.gate_open = true;
+            if attempted {
+                self.verified = true;
+            } else if self.probe.is_none() && !self.verified {
+                // A bypassed request or cached credentials do not verify this proxy.
+                self.status.send_replace(ProxyAuthStatus::Unchallenged);
+            }
+        }
+        // A network failure is inconclusive: retire this probe and let another
+        // request try, instead of latching an incorrect credential rejection.
+        if self.probe.is_none()
+            && let Some(id) = self.challenges.pop_front()
+        {
+            self.provide(id).await?;
+        }
+        if self.probe.is_none() {
+            if self.gate_open {
                 while let Some(id) = self.requests.pop_front() {
                     self.continue_request(&id).await?;
                 }
-                return Ok(true);
+            } else if self.cold.is_none() {
+                self.cold = self.requests.pop_front();
+                if let Some(id) = &self.cold {
+                    self.continue_request(id).await?;
+                }
             }
-        } else if cold && failed {
-            self.cold = self.requests.pop_front();
-            if let Some(id) = self.cold.clone() {
-                self.continue_request(&id).await?;
-            }
+            return Ok(self.verified);
         }
         Ok(false)
     }
@@ -260,7 +290,7 @@ impl Handler {
     async fn request(&mut self, id: String) -> Result<()> {
         if self.rejected {
             self.fail(&id).await?;
-        } else if self.verified || self.cold.as_ref() == Some(&id) {
+        } else if self.gate_open || self.cold.as_ref() == Some(&id) {
             self.continue_request(&id).await?;
         } else if self.cold.is_none() {
             self.cold = Some(id.clone());
@@ -300,6 +330,7 @@ impl Handler {
             .proxy
             .credentials()
             .ok_or_else(|| Error::ProxyAuthentication("missing credentials".into()))?;
+        self.status.send_replace(ProxyAuthStatus::Pending);
         self.probe = Some(id.clone());
         self.attempted.insert(id.clone());
         self.session.execute_raw("Fetch.continueWithAuth", json!({"requestId":id,"authChallengeResponse":{"response":"ProvideCredentials","username":username,"password":password}})).await?;

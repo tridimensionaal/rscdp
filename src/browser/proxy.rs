@@ -65,9 +65,10 @@ impl Browser {
         self.auth.as_ref().map(ProxyAuth::status)
     }
 
-    pub async fn wait_for_proxy_auth(&self, timeout: Duration) -> Result<()> {
+    /// Wait for request readiness; inspect `proxy_auth_status()` for authentication evidence.
+    pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<()> {
         if let Some(auth) = &self.auth {
-            auth.wait(timeout).await?;
+            auth.wait_ready(timeout).await?;
         }
         Ok(())
     }
@@ -85,9 +86,10 @@ impl BrowserContext {
         self.auth.as_ref().map(ProxyAuth::status)
     }
 
-    pub async fn wait_for_proxy_auth(&self, timeout: Duration) -> Result<()> {
+    /// Wait for request readiness; inspect `proxy_auth_status()` for authentication evidence.
+    pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<()> {
         if let Some(auth) = &self.auth {
-            auth.wait(timeout).await?;
+            auth.wait_ready(timeout).await?;
         }
         Ok(())
     }
@@ -108,7 +110,7 @@ async fn start_auth(page: &Page, proxy: Proxy, mode: ProxyAuthMode) -> Result<Op
     if mode == ProxyAuthMode::Preflight {
         tokio::time::timeout(Duration::from_secs(15), async {
             page.navigate("https://www.example.com/").await?;
-            auth.wait(Duration::from_secs(15)).await
+            auth.wait_ready(Duration::from_secs(15)).await
         })
         .await
         .map_err(|_| Error::Timeout("proxy authentication preflight".into()))??;

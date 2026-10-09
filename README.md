@@ -164,15 +164,23 @@ async fn browse_with_proxy(browser: &Browser, proxy: Proxy, url: &str) -> Result
 async fn load_through_proxy(context: &BrowserContext, url: &str) -> Result<()> {
     let timeout = Duration::from_secs(15);
     context.page().navigate_and_wait(url, timeout).await?;
-    context.wait_for_proxy_auth(timeout).await
+    context.wait_for_proxy_ready(timeout).await
 }
 ```
 
 Use `Browser::launch_with_proxy` for a process-wide proxy. `Preflight` (the enum's
-default) authenticates via `https://www.example.com/` before setup returns.
-`OnDemand` authenticates on the first useful request. Both restrict credentials
-to proxy challenges and propagate preflight failures. The worker serializes the
-cold request burst, latches rejection, and disables Fetch after success. If cached
+default) checks readiness via `https://www.example.com/` before setup returns.
+`OnDemand` handles challenges as requests occur. `wait_for_proxy_ready` succeeds
+when a request completes without an observed authentication failure. Inspect
+`proxy_auth_status()` to distinguish `Authenticated` from `Unchallenged`: cached
+credentials, bypassed traffic, and proxies without authentication can all produce
+an unchallenged response. Readiness does not prove that traffic traversed the proxy
+or that the supplied credentials were used.
+
+The worker restricts credentials to proxy challenges, serializes the cold request
+burst, and latches credential rejection. Unchallenged traffic leaves Fetch enabled
+for later challenges; verified authentication disables it. Network errors do not
+count as credential rejection. If cached
 credentials later expire, retire the context rather than expecting automatic rearming.
 
 Authentication events use a separate lossless, unbounded queue. Held requests and

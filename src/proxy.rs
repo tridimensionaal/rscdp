@@ -10,10 +10,10 @@ pub struct Proxy {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProxyAuthMode {
-    /// Authenticate using a synthetic navigation before returning the browser.
+    /// Check proxy readiness using a synthetic navigation before returning the browser.
     #[default]
     Preflight,
-    /// Authenticate on the first useful request; disable interception after success.
+    /// Handle challenges as requests occur; disable interception after verified authentication.
     OnDemand,
 }
 
