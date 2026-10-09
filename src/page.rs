@@ -13,6 +13,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::time::Duration;
 
+mod capture;
 mod input;
 mod interaction;
 pub use input::KeyModifiers;

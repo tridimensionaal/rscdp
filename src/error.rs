@@ -20,6 +20,8 @@ pub enum Error {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
+    Base64(#[from] base64::DecodeError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("connection closed: {0}")]
     ConnectionClosed(String),
