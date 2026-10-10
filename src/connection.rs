@@ -41,6 +41,7 @@ struct Inner {
     events: broadcast::Sender<RawEvent>,
     shutdown: watch::Sender<bool>,
     closed: watch::Receiver<Option<String>>,
+    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     permits: Semaphore,
     sessions: SessionRegistry,
     subscriptions: Subscriptions,
@@ -141,7 +142,7 @@ impl Connection {
         let active_subscriptions = subscriptions.clone();
         let auth_subscriptions = auth_events::AuthSubscriptions::default();
         let active_auth_subscriptions = auth_subscriptions.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let (mut sink, mut stream) = socket.split();
             let mut pending = HashMap::<u64, Request>::new();
             let mut id = 0u64;
@@ -267,6 +268,7 @@ impl Connection {
                 events,
                 shutdown,
                 closed,
+                task: tokio::sync::Mutex::new(Some(task)),
                 permits: Semaphore::new(CAPACITY),
                 sessions,
                 subscriptions,
@@ -432,13 +434,13 @@ impl Connection {
         }
     }
 
+    /// Disconnect and await transport teardown. A canceled wait can be resumed.
     pub async fn close(&self) {
         self.0.shutdown.send_replace(true);
-        let mut closed = self.0.closed.clone();
-        while closed.borrow().is_none() {
-            if closed.changed().await.is_err() {
-                break;
-            }
+        let mut task = self.0.task.lock().await;
+        if let Some(pending) = &mut *task {
+            let _ = pending.await;
+            *task = None;
         }
     }
 }
