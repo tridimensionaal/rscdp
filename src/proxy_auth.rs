@@ -21,6 +21,8 @@ use tokio::{
 };
 
 const MAX_PENDING: usize = 256;
+const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +51,7 @@ pub struct ProxyAuth {
 
 impl ProxyAuth {
     /// Arm before navigation. Only one worker may own a session at a time.
+    /// Setup has a 30-second upper bound even when command timeouts are disabled.
     pub async fn start(session: Session, proxy: Proxy) -> Result<Self> {
         if !proxy.requires_authentication() {
             return Err(Error::InvalidArgument("proxy has no credentials".into()));
@@ -61,9 +64,24 @@ impl ProxyAuth {
         let (ready, started) = oneshot::channel();
         let task = session.connection().runtime().spawn(async move {
             let _ownership = ownership;
+            let enable = session.execute_raw(
+                "Fetch.enable",
+                json!({
+                    "patterns": [
+                        {"urlPattern": "*", "requestStage": "Request"},
+                        {"urlPattern": "*", "requestStage": "Response"}
+                    ],
+                    "handleAuthRequests": true
+                }),
+            );
             let enabled = tokio::select! {
-                result = session.execute_raw("Fetch.enable", json!({"patterns":[{"urlPattern":"*","requestStage":"Request"},{"urlPattern":"*","requestStage":"Response"}],"handleAuthRequests":true})) => result,
+                result = tokio::time::timeout(SETUP_TIMEOUT, enable) => result
+                    .map_err(|_| Error::Timeout("enabling proxy interception".into()))
+                    .and_then(|result| result),
                 _ = failure.changed() => Err(event_failure(&failure)),
+                _ = stopped.changed() => Err(Error::ProxyAuthentication(
+                    "authentication stopped during setup".into(),
+                )),
             };
             if let Err(error) = enabled {
                 status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
@@ -108,10 +126,14 @@ impl ProxyAuth {
                 return Err(error);
             }
             let _ = tokio::time::timeout(DRAIN_TIMEOUT, handler.drain()).await;
-            let disabled = session
-                .execute_raw("Fetch.disable", json!({}))
-                .await
-                .map(|_| ());
+            let disabled = tokio::time::timeout(
+                CLEANUP_TIMEOUT,
+                session.execute_raw("Fetch.disable", json!({})),
+            )
+            .await
+            .map_err(|_| Error::Timeout("disabling proxy interception".into()))
+            .and_then(|result| result)
+            .map(|_| ());
             let outcome = if failure.borrow().is_some() {
                 Err(event_failure(&failure))
             } else {

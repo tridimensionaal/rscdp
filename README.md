@@ -195,6 +195,9 @@ excess work is aborted or canceled. Failed recovery can close the connection; se
 `ProxyAuth` is also available as a low-level owned guard. Only one worker can own
 a session. Normal browser/context shutdown awaits authentication cleanup; call
 `detach_proxy_auth()` immediately before closing an unresponsive context to skip it.
+Authentication setup has a 30-second upper bound and observes cancellation.
+Cleanup gives Fetch disable one second before recovery. These bounds still apply
+when ordinary command timeouts are disabled.
 
 ## Ownership and development
 
