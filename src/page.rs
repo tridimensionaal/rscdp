@@ -9,6 +9,7 @@ use crate::{
         },
         runtime::{ExecutionContextId, RemoteObject},
     },
+    error::with_cleanup,
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -159,6 +160,12 @@ impl Page {
     }
 
     pub async fn html(&self) -> Result<String> {
+        let domain = self.session.enable_dom().await?;
+        let result = self.document_html().await;
+        with_cleanup(result, domain.close().await)
+    }
+
+    async fn document_html(&self) -> Result<String> {
         let response = self
             .session
             .execute_raw("DOM.getDocument", json!({}))

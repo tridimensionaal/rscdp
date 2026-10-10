@@ -211,13 +211,20 @@ impl Page {
     }
 
     /// CDP DOM search, including an optional user-agent shadow DOM traversal.
+    /// Acquire an `enable_dom()` guard before searching and retain it while using
+    /// the returned frontend node IDs.
+    /// `resolve_node()` uses backend IDs and does not require that extra guard.
     pub async fn nodes_by_xpath(&self, xpath: &str, include_shadow_dom: bool) -> Result<Vec<Node>> {
         let page = self.clone();
         let xpath = xpath.to_owned();
         self.session
             .connection()
             .runtime()
-            .spawn(async move { page.nodes_by_xpath_owned(&xpath, include_shadow_dom).await })
+            .spawn(async move {
+                let domain = page.session.enable_dom().await?;
+                let result = page.nodes_by_xpath_owned(&xpath, include_shadow_dom).await;
+                with_cleanup(result, domain.close().await)
+            })
             .await?
     }
 
