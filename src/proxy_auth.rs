@@ -1,15 +1,16 @@
 //! Single-flight authentication for a session already configured to use a proxy.
 //!
 //! Only challenges from the configured proxy origin receive credentials.
-//! Rejection stays latched until teardown; successful verification disables Fetch. Authentication events are
-//! lossless; held requests/challenges are bounded. Fatal worker failures close the target;
+//! Rejection stays latched until teardown; successful verification disables Fetch.
+//! Authentication buffering and held requests/challenges are bounded. Overflow
+//! fails authentication explicitly. Fatal worker failures close the target;
 //! if closing it and disabling Fetch both fail, the connection is closed.
 use crate::{
     Error, Result, Session,
-    connection::{AuthEvents, RawEvent},
+    connection::{AuthEvent, AuthEventKind, AuthEvents},
     proxy::Proxy,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     collections::{HashSet, VecDeque},
     time::Duration,
@@ -53,13 +54,17 @@ impl ProxyAuth {
             return Err(Error::InvalidArgument("proxy has no credentials".into()));
         }
         let ownership = session.claim_proxy_auth()?;
-        let events = session.connection().subscribe_auth(&session.id().0);
+        let mut events = session.connection().subscribe_auth(&session.id().0);
+        let mut failure = events.failure();
         let (stop, mut stopped) = watch::channel(Stop::Running);
         let (status_sender, status) = watch::channel(ProxyAuthStatus::Pending);
         let (ready, started) = oneshot::channel();
         let task = session.connection().runtime().spawn(async move {
             let _ownership = ownership;
-            let enabled = session.execute_raw("Fetch.enable", json!({"patterns":[{"urlPattern":"*","requestStage":"Request"},{"urlPattern":"*","requestStage":"Response"}],"handleAuthRequests":true})).await;
+            let enabled = tokio::select! {
+                result = session.execute_raw("Fetch.enable", json!({"patterns":[{"urlPattern":"*","requestStage":"Request"},{"urlPattern":"*","requestStage":"Response"}],"handleAuthRequests":true})) => result,
+                _ = failure.changed() => Err(event_failure(&failure)),
+            };
             if let Err(error) = enabled {
                 status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
                 let _ = ready.send(Err(error));
@@ -84,7 +89,8 @@ impl ProxyAuth {
                 Ok(false)
             } else {
                 tokio::select! {
-                    result = handler.run(events) => result,
+                    result = handler.run(&mut events) => result,
+                    _ = failure.changed() => Err(event_failure(&failure)),
                     _ = stopped.changed() => Ok(false),
                     _ = session.closed() => Ok(false),
                 }
@@ -106,7 +112,11 @@ impl ProxyAuth {
                 .execute_raw("Fetch.disable", json!({}))
                 .await
                 .map(|_| ());
-            let outcome = outcome.and_then(|authenticated| disabled.map(|_| authenticated));
+            let outcome = if failure.borrow().is_some() {
+                Err(event_failure(&failure))
+            } else {
+                outcome.and_then(|authenticated| disabled.map(|_| authenticated))
+            };
             match outcome {
                 Ok(true) => {
                     status_sender.send_replace(ProxyAuthStatus::Authenticated);
@@ -207,7 +217,7 @@ struct Handler {
 }
 
 impl Handler {
-    async fn run(&mut self, mut events: AuthEvents) -> Result<bool> {
+    async fn run(&mut self, events: &mut AuthEvents) -> Result<bool> {
         loop {
             let event = events.recv().await?;
             if self.event(event).await? {
@@ -216,19 +226,19 @@ impl Handler {
         }
     }
 
-    async fn event(&mut self, event: RawEvent) -> Result<bool> {
-        let value = event.params;
-        let id: String = serde_json::from_value(value["requestId"].clone())?;
-        if event.method == "Fetch.authRequired" {
-            self.challenge(id, value).await?;
-            return Ok(false);
-        }
-        let response =
-            value.get("responseStatusCode").is_some() || value.get("responseErrorReason").is_some();
-        if !response {
-            self.request(id).await?;
-            return Ok(false);
-        }
+    async fn event(&mut self, event: AuthEvent) -> Result<bool> {
+        let AuthEvent { id, kind } = event;
+        let (rejected, failed) = match kind {
+            AuthEventKind::Challenge { is_proxy, origin } => {
+                self.challenge(id, is_proxy, origin.as_deref()).await?;
+                return Ok(false);
+            }
+            AuthEventKind::Request => {
+                self.request(id).await?;
+                return Ok(false);
+            }
+            AuthEventKind::Response { rejected, failed } => (rejected, failed),
+        };
         self.continue_request(&id).await?;
         let attempted = self.probe.as_ref() == Some(&id);
         let cold = self.cold.as_ref() == Some(&id);
@@ -244,18 +254,18 @@ impl Handler {
                 && self.probe.is_none()
                 && !self.rejected
                 && !self.verified
-                && value["responseStatusCode"] != 407
-                && value.get("responseErrorReason").is_none()
+                && !rejected
+                && !failed
             {
                 self.status.send_replace(ProxyAuthStatus::Unchallenged);
             }
             return Ok(false);
         }
-        if value["responseStatusCode"] == 407 {
+        if rejected {
             self.reject().await?;
             return Ok(false);
         }
-        if value.get("responseErrorReason").is_none() {
+        if !failed {
             self.gate_open = true;
             if attempted {
                 self.verified = true;
@@ -303,17 +313,14 @@ impl Handler {
         Ok(())
     }
 
-    async fn challenge(&mut self, id: String, value: Value) -> Result<()> {
-        if value["authChallenge"]["source"] != "Proxy" {
+    async fn challenge(&mut self, id: String, is_proxy: bool, origin: Option<&str>) -> Result<()> {
+        if !is_proxy {
             return self.respond(&id, "Default").await;
         }
         if self.rejected {
             return self.respond(&id, "CancelAuth").await;
         }
-        if !value["authChallenge"]["origin"]
-            .as_str()
-            .is_some_and(|origin| self.proxy.matches_origin(origin))
-        {
+        if !origin.is_some_and(|origin| self.proxy.matches_origin(origin)) {
             self.respond(&id, "CancelAuth").await?;
             return Err(Error::ProxyAuthentication(
                 "challenge origin does not match the configured proxy".into(),
@@ -391,6 +398,15 @@ impl Handler {
         }
         Ok(())
     }
+}
+
+fn event_failure(failure: &watch::Receiver<Option<&'static str>>) -> Error {
+    Error::ProxyAuthentication(
+        failure
+            .borrow()
+            .unwrap_or("authentication event channel stopped")
+            .into(),
+    )
 }
 
 async fn recover_interception(session: &Session) {

@@ -14,7 +14,7 @@ use tokio_tungstenite::{
 };
 
 mod auth_events;
-pub(crate) use auth_events::AuthEvents;
+pub(crate) use auth_events::{AuthEvent, AuthEventKind, AuthEvents};
 
 const CAPACITY: usize = 256;
 const TIMEOUT: Duration = Duration::from_secs(30);

@@ -4,10 +4,95 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
-type Sender = mpsc::UnboundedSender<RawEvent>;
+const CAPACITY: usize = 4096;
+const TEXT_BUDGET: usize = 4 * 1024 * 1024;
+const OVERFLOW: &str = "authentication event queue exceeded its capacity";
+
+type Failure = watch::Receiver<Option<&'static str>>;
 pub(super) type AuthSubscriptions = Arc<Mutex<HashMap<EventKey, Vec<Weak<Sender>>>>>;
+
+pub(crate) struct AuthEvent {
+    pub(crate) id: String,
+    pub(crate) kind: AuthEventKind,
+}
+
+pub(crate) enum AuthEventKind {
+    Request,
+    Response {
+        rejected: bool,
+        failed: bool,
+    },
+    Challenge {
+        is_proxy: bool,
+        origin: Option<String>,
+    },
+}
+
+struct QueuedEvent {
+    event: AuthEvent,
+    _permit: OwnedSemaphorePermit,
+}
+
+pub(super) struct Sender {
+    sender: mpsc::Sender<QueuedEvent>,
+    budget: Arc<Semaphore>,
+    failure: watch::Sender<Option<&'static str>>,
+}
+
+impl Sender {
+    fn send(&self, event: &RawEvent) {
+        if self.failure.borrow().is_some() {
+            return;
+        }
+        let Some(id) = event.params["requestId"].as_str() else {
+            self.failure
+                .send_replace(Some("authentication event has no request ID"));
+            return;
+        };
+        let challenge = event.method == "Fetch.authRequired";
+        let origin = challenge
+            .then(|| event.params["authChallenge"]["origin"].as_str())
+            .flatten();
+        let bytes = id.len().saturating_add(origin.map_or(0, str::len));
+        if bytes > TEXT_BUDGET {
+            self.failure.send_replace(Some(OVERFLOW));
+            return;
+        }
+        let Ok(permit) = self.budget.clone().try_acquire_many_owned(bytes as u32) else {
+            self.failure.send_replace(Some(OVERFLOW));
+            return;
+        };
+        // Keep only fields needed for authentication; headers and bodies can be large.
+        let kind = if challenge {
+            AuthEventKind::Challenge {
+                is_proxy: event.params["authChallenge"]["source"] == "Proxy",
+                origin: origin.map(str::to_owned),
+            }
+        } else if event.params.get("responseStatusCode").is_some()
+            || event.params.get("responseErrorReason").is_some()
+        {
+            AuthEventKind::Response {
+                rejected: event.params["responseStatusCode"] == 407,
+                failed: event.params.get("responseErrorReason").is_some(),
+            }
+        } else {
+            AuthEventKind::Request
+        };
+        let queued = QueuedEvent {
+            event: AuthEvent {
+                id: id.into(),
+                kind,
+            },
+            _permit: permit,
+        };
+        if self.sender.try_send(queued).is_err() {
+            // Never block the socket reader: it must keep receiving command replies.
+            self.failure.send_replace(Some(OVERFLOW));
+        }
+    }
+}
 
 pub(super) fn dispatch(subscriptions: &AuthSubscriptions, event: &RawEvent) {
     let key = (event.session_id.clone(), event.method.clone());
@@ -17,15 +102,20 @@ pub(super) fn dispatch(subscriptions: &AuthSubscriptions, event: &RawEvent) {
         .get(&key)
     {
         for sender in senders.iter().filter_map(Weak::upgrade) {
-            let _ = sender.send(event.clone());
+            sender.send(event);
         }
     }
 }
 
 impl Connection {
     pub(crate) fn subscribe_auth(&self, session: &str) -> AuthEvents {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let sender = Arc::new(sender);
+        let (sender, receiver) = mpsc::channel(CAPACITY);
+        let (failed, failure) = watch::channel(None);
+        let sender = Arc::new(Sender {
+            sender,
+            budget: Arc::new(Semaphore::new(TEXT_BUDGET)),
+            failure: failed,
+        });
         let mut subscriptions = self
             .0
             .auth_subscriptions
@@ -44,25 +134,33 @@ impl Connection {
         AuthEvents {
             receiver,
             _sender: sender,
+            failure,
             closed: self.0.closed.clone(),
         }
     }
 }
 
-// Fetch pauses browser requests until answered: unlike observational events,
-// these must never be dropped. The handler separately bounds held requests.
+// An overflow is fatal: dropping paused requests silently would strand them.
 pub(crate) struct AuthEvents {
-    receiver: mpsc::UnboundedReceiver<RawEvent>,
+    receiver: mpsc::Receiver<QueuedEvent>,
     _sender: Arc<Sender>,
+    failure: Failure,
     closed: watch::Receiver<Option<String>>,
 }
 
 impl AuthEvents {
-    pub(crate) async fn recv(&mut self) -> Result<RawEvent> {
+    pub(crate) fn failure(&self) -> Failure {
+        self.failure.clone()
+    }
+
+    pub(crate) async fn recv(&mut self) -> Result<AuthEvent> {
         loop {
+            if let Some(reason) = *self.failure.borrow() {
+                return Err(Error::ProxyAuthentication(reason.into()));
+            }
             let reason = self.closed.borrow().clone();
             match self.receiver.try_recv() {
-                Ok(event) => return Ok(event),
+                Ok(queued) => return Ok(queued.event),
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     return Err(Error::ConnectionClosed("event sender stopped".into()));
@@ -72,10 +170,11 @@ impl AuthEvents {
                 return Err(Error::ConnectionClosed(reason));
             }
             tokio::select! {
+                _ = self.failure.changed() => {}
                 result = self.closed.changed() => {
                     if result.is_err() { return Err(Error::ConnectionClosed("reader stopped".into())); }
                 }
-                event = self.receiver.recv() => return event.ok_or_else(|| Error::ConnectionClosed("event sender stopped".into())),
+                event = self.receiver.recv() => return event.map(|queued| queued.event).ok_or_else(|| Error::ConnectionClosed("event sender stopped".into())),
             }
         }
     }

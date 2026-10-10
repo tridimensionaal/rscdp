@@ -185,8 +185,10 @@ for later challenges; verified authentication disables it. Network errors do not
 count as credential rejection. If cached
 credentials later expire, retire the context rather than expecting automatic rearming.
 
-Authentication events use a separate lossless, unbounded queue. Held requests and
-held challenges are each bounded at 256;
+Authentication events use a separate queue of at most 4,096 compact events and
+4 MiB of queued request-ID and origin text. Headers and bodies are not retained.
+Overflow fails authentication and triggers recovery instead of silently losing
+paused requests. Held requests and held challenges are each bounded at 256;
 excess work is aborted or canceled. Failed recovery can close the connection; see
 `proxy_auth` module documentation.
 
