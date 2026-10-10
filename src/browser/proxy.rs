@@ -1,6 +1,7 @@
 use super::{Browser, BrowserContext};
 use crate::{
     Error, Page, Result,
+    error::with_cleanup,
     launcher::LaunchOptions,
     proxy::{Proxy, ProxyAuthMode},
     proxy_auth::{ProxyAuth, ProxyAuthStatus},
@@ -32,10 +33,7 @@ impl Browser {
                 browser.auth = auth;
                 Ok(browser)
             }
-            Err(error) => {
-                browser.close().await?;
-                Err(error)
-            }
+            Err(error) => with_cleanup(Err(error), browser.close().await),
         }
     }
 
@@ -54,10 +52,7 @@ impl Browser {
                 context.auth = auth;
                 Ok(context)
             }
-            Err(error) => {
-                context.close().await?;
-                Err(error)
-            }
+            Err(error) => with_cleanup(Err(error), context.close().await),
         }
     }
 

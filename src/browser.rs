@@ -1,6 +1,7 @@
 use crate::{
     Connection, Page, Result,
     cdp::{browser::BrowserContextId, target::TargetId},
+    error::with_cleanup,
     launcher::{BrowserProcess, LaunchOptions},
 };
 use serde_json::{Value, json};
@@ -27,8 +28,7 @@ impl Browser {
             }),
             Err(error) => {
                 connection.close().await;
-                process.close().await?;
-                Err(error)
+                with_cleanup(Err(error), process.close().await)
             }
         }
     }
@@ -104,10 +104,12 @@ impl Browser {
             Ok(())
         };
         self.connection.close().await;
-        if let Some(process) = &mut self.process {
-            process.close().await?;
-        }
-        auth_result.and(page_result)
+        let process_result = if let Some(process) = &mut self.process {
+            process.close().await
+        } else {
+            Ok(())
+        };
+        with_cleanup(with_cleanup(auth_result, page_result), process_result)
     }
 }
 
@@ -148,13 +150,14 @@ impl BrowserContext {
                 auth: None,
             }),
             Err(error) => {
-                connection
+                let cleanup = connection
                     .execute_raw(
                         "Target.disposeBrowserContext",
                         json!({"browserContextId":id}),
                     )
-                    .await?;
-                Err(error)
+                    .await
+                    .map(|_| ());
+                with_cleanup(Err(error), cleanup)
             }
         }
     }
@@ -172,16 +175,23 @@ impl BrowserContext {
         } else {
             Ok(())
         };
-        if let Some(id) = &self.id {
-            self.connection
+        let context_result = if let Some(id) = &self.id {
+            let result = self
+                .connection
                 .execute_raw(
                     "Target.disposeBrowserContext",
                     json!({"browserContextId":id}),
                 )
-                .await?;
-            self.id = None;
-        }
-        auth_result
+                .await
+                .map(|_| ());
+            if result.is_ok() {
+                self.id = None;
+            }
+            result
+        } else {
+            Ok(())
+        };
+        with_cleanup(auth_result, context_result)
     }
 }
 
@@ -211,7 +221,7 @@ async fn create_page(connection: &Connection, context: Option<BrowserContextId>)
         .execute_raw("Target.createTarget", params)
         .await?;
     let target: TargetId = serde_json::from_value(response["targetId"].clone())?;
-    let mut lease = TargetLease {
+    let lease = TargetLease {
         connection: connection.clone(),
         target: Some(target.clone()),
         closed: std::sync::atomic::AtomicBool::new(false),
@@ -223,13 +233,7 @@ async fn create_page(connection: &Connection, context: Option<BrowserContextId>)
             page.target_lease = Some(std::sync::Arc::new(lease));
             Ok(page)
         }
-        Err(error) => {
-            connection
-                .execute_raw("Target.closeTarget", json!({"targetId":target}))
-                .await?;
-            lease.target = None;
-            Err(error)
-        }
+        Err(error) => with_cleanup(Err(error), lease.close().await),
     }
 }
 

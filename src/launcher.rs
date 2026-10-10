@@ -1,4 +1,4 @@
-use crate::{Connection, Error, Result};
+use crate::{Connection, Error, Result, error::with_cleanup};
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -164,10 +164,7 @@ impl BrowserProcess {
         .and_then(|r| r);
         match connected {
             Ok(connection) => Ok((process, connection)),
-            Err(error) => {
-                process.close().await?;
-                Err(error)
-            }
+            Err(error) => with_cleanup(Err(error), process.close().await),
         }
     }
 

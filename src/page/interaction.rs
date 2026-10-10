@@ -2,6 +2,7 @@ use super::Page;
 use crate::{
     Error, Result, Session,
     cdp::{dom::Node, runtime::RemoteObjectId},
+    error::with_cleanup,
 };
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -145,9 +146,7 @@ pub(super) async fn dispatch_pair(
         .spawn(async move {
             let pressed = session.execute_raw(method, press).await;
             let released = session.execute_raw(method, release).await;
-            pressed?;
-            released?;
-            Ok(())
+            with_cleanup(pressed.map(|_| ()), released.map(|_| ()))
         })
         .await?
 }
@@ -268,8 +267,7 @@ impl Page {
             Ok(nodes)
         }
         .await;
-        guard.close().await?;
-        result
+        with_cleanup(result, guard.close().await)
     }
 
     pub async fn wait_for_xpath(&self, xpath: &str, options: WaitOptions) -> Result<bool> {

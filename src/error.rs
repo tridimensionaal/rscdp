@@ -47,6 +47,23 @@ pub enum Error {
     Navigation(String),
     #[error("proxy authentication failed: {0}")]
     ProxyAuthentication(String),
+    #[error("{source}; cleanup also failed: {cleanup}")]
+    Cleanup {
+        #[source]
+        source: Box<Error>,
+        cleanup: Box<Error>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) fn with_cleanup<T>(result: Result<T>, cleanup: Result<()>) -> Result<T> {
+    match (result, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(source), Err(cleanup)) => Err(Error::Cleanup {
+            source: Box::new(source),
+            cleanup: Box::new(cleanup),
+        }),
+    }
+}
