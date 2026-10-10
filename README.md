@@ -142,6 +142,9 @@ Session detachment wakes pending operations and listeners, including descendants
 it. A `Page` owns its Page-domain guard. Call `guard.close().await` to await release.
 Domain transitions run on the owning connection runtime so cancellation or a short
 caller deadline cannot leave a half-completed enable operation.
+Each transition has a 30-second limit. If it stalls, the library detaches the
+affected session; if detachment cannot be confirmed within one second, it closes
+the connection to resolve the uncertain domain state.
 
 ## Proxies
 

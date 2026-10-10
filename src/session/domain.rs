@@ -1,13 +1,17 @@
 use super::Session;
 use crate::{Error, Result};
 use serde_json::json;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 type Counts = Arc<[Mutex<usize>; 2]>;
+const TRANSITION_TIMEOUT: Duration = Duration::from_secs(30);
+const DETACH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Shared ownership of an enabled DOM or Page domain.
 /// Await `close` to confirm the final disable; Drop schedules the same cleanup.
+/// A transition that stalls for 30 seconds triggers session detachment; failed
+/// detachment closes the connection to resolve the uncertain domain state.
 pub struct DomainGuard {
     session: Session,
     counts: Counts,
@@ -28,8 +32,8 @@ impl Session {
         if self.is_closed() {
             return Err(Error::SessionClosed(self.id.0.clone()));
         }
-        // Keep the transition owned until its response or session closure. A
-        // caller can bound its own wait without abandoning a half-enabled domain.
+        // Keep transitions owned through completion or recovery, independently
+        // of the caller's deadline.
         let session = self.clone().with_command_timeout(None);
         let runtime = self.connection.runtime();
         let owner_runtime = runtime.clone();
@@ -39,6 +43,9 @@ impl Session {
         runtime
             .spawn(async move {
                 let mut users = counts[index].lock().await;
+                if session.is_closed() {
+                    return Err(Error::SessionClosed(session.id.0.clone()));
+                }
                 // This async mutex deliberately serializes the enable/disable
                 // transition with reference-count updates across all session handles.
                 if *users == 0 {
@@ -47,7 +54,7 @@ impl Session {
                     } else {
                         "Page.enable"
                     };
-                    session.execute_raw(method, json!({})).await?;
+                    transition(&session, method).await?;
                 }
                 *users += 1;
                 drop(users);
@@ -88,9 +95,24 @@ async fn release(session: Session, counts: Counts, index: usize) -> Result<()> {
         } else {
             "Page.disable"
         };
-        session.execute_raw(method, json!({})).await?;
+        transition(&session, method).await?;
     }
     Ok(())
+}
+
+async fn transition(session: &Session, method: &str) -> Result<()> {
+    match tokio::time::timeout(TRANSITION_TIMEOUT, session.execute_raw(method, json!({}))).await {
+        Ok(result) => result.map(|_| ()),
+        Err(_) => {
+            // Timing out cannot establish whether the remote domain changed.
+            // Keep ownership until detachment or connection teardown resolves it.
+            let detached = tokio::time::timeout(DETACH_TIMEOUT, session.detach()).await;
+            if !matches!(detached, Ok(Ok(()))) && !session.is_closed() {
+                session.connection().close().await;
+            }
+            Err(Error::Timeout(method.into()))
+        }
+    }
 }
 
 impl Drop for DomainGuard {
