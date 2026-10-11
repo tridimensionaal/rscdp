@@ -33,18 +33,50 @@ pub struct Session {
 
 impl Connection {
     /// Attach with shared ownership: the last session handle or session listener
-    /// schedules detachment. Cancellation before this method returns and late
-    /// attach responses are not covered by this ownership guarantee.
+    /// schedules detachment.
+    ///
+    /// The handle's command timeout limits the caller's wait. Acquisition continues
+    /// on the connection runtime after cancellation or timeout; an unclaimed session
+    /// is dropped and detached. Acquisition has its own 30-second limit, including
+    /// when command timeouts are disabled. If that limit expires, or a reply cannot
+    /// be decoded, the connection is closed to resolve the unknown attachment state.
     pub async fn attach(&self, target: TargetId) -> Result<Session> {
-        let response = self
-            .execute(&crate::cdp::target::commands::AttachToTarget {
-                target_id: target.clone(),
-                flatten: Some(true),
-            })
-            .await?;
-        let session = self.session(response.session_id, target)?;
-        session.attachment.arm();
-        Ok(session)
+        let connection = self.clone();
+        let task = self.runtime().spawn(async move {
+            let command_connection = connection.clone().with_command_timeout(None);
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                command_connection.execute(&crate::cdp::target::commands::AttachToTarget {
+                    target_id: target.clone(),
+                    flatten: Some(true),
+                }),
+            )
+            .await;
+            let response = match response {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    if matches!(&error, Error::Json(_)) {
+                        connection.close().await;
+                    }
+                    return Err(error);
+                }
+                Err(_) => {
+                    connection.close().await;
+                    return Err(Error::Timeout("Target.attachToTarget".into()));
+                }
+            };
+            let session = connection.session(response.session_id, target)?;
+            session.attachment.arm();
+            Ok(session)
+        });
+        let joined = if let Some(timeout) = self.command_timeout() {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("Target.attachToTarget".into()))?
+        } else {
+            task.await
+        };
+        joined?
     }
 
     /// Wrap a registered session, including one reported by auto-attach.

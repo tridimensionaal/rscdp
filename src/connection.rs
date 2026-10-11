@@ -238,7 +238,7 @@ impl Connection {
                                             let result = if value.get("error").is_some() {
                                                 Err(serde_json::from_value::<ProtocolError>(value["error"].clone())?.into())
                                             } else {
-                                                value.get("result").cloned().ok_or_else(|| Error::ConnectionClosed("response missing result".into()))
+                                                Ok(value.get("result").cloned().ok_or_else(|| Error::ConnectionClosed("response missing result".into()))?)
                                             };
                                             if matches!(request.method.as_str(), "Target.attachToTarget" | "Target.attachToBrowserTarget")
                                                 && let Ok(result) = &result
@@ -364,6 +364,10 @@ impl Connection {
 
     pub(crate) fn runtime(&self) -> tokio::runtime::Handle {
         self.0.runtime.clone()
+    }
+
+    pub(crate) fn command_timeout(&self) -> Option<Duration> {
+        self.1
     }
 
     pub async fn execute<C: Command>(&self, command: &C) -> Result<C::Response> {

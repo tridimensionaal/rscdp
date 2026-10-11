@@ -241,8 +241,14 @@ timeout closes the connection. Await `session.detach()` to observe errors.
 Wrapping a raw-command or auto-attached session with `Connection::session` does
 not acquire cleanup ownership unless it shares a high-level attachment; otherwise
 the caller must detach explicitly. An expired owned attachment cannot be wrapped
-again while cleanup runs or after it fails. This does not solve cancellation
-before high-level attach returns or lost late attach responses.
+again while cleanup runs or after it fails.
+
+High-level attach acquisition continues after caller cancellation or timeout.
+An unclaimed session is detached when its reply arrives. The handle's command
+timeout limits the caller's wait; acquisition has an independent 30-second limit,
+even when ordinary timeouts are disabled. An unresolved acquisition or an
+undecodable reply closes the connection to resolve the unknown attachment state.
+Raw attach commands remain under the caller's lifecycle management.
 
 The pinned CDP schemas in `protocol/` generate Rust bindings through `build.rs`.
 Generation runs locally without network access.
