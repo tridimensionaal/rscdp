@@ -237,11 +237,20 @@ When no existing page is available, the library creates a visible fallback page
 in a fresh isolated context. It does not share the default profile's cookies or
 storage. Existing tabs continue to be used without acquiring context ownership.
 For an externally connected browser, dropping Browser keeps the fallback context
-alive while Page clones remain and the connection stays open.
-Dropping the last Page schedules disposal; explicit `Browser::close()` disposes
-the context and invalidates those clones. Dropping Browser stops proxy
-authentication even if Page clones keep the context alive. Elements, session listeners,
-and separately attached OOPIF Pages do not acquire this context lease.
+alive while Page/Frame clones, their Elements, or OOPIF Pages returned by
+`Page::frame()` retain it and the connection stays open. OOPIF setup retains its
+parent Page until setup finishes, even if the caller cancels or its wait times out.
+After target selection, the handle's timeout bounds only the caller's setup wait;
+the owned task waits for attach completion under its independent limit and restores
+the handle timeout on the child Session. With timeout `None`, the caller waits for
+setup while the existing attach and domain limits still apply. Dropping the last
+Element schedules remote-object release and retains the context until that
+attempt finishes, capped at 30 seconds while respecting shorter command timeouts.
+Dropping the last dependent owner schedules context disposal; explicit
+`Browser::close()` disposes the context and invalidates these dependents.
+Dropping Browser stops proxy authentication even if dependents keep the context
+alive. Standalone Sessions and session listeners do not retain the context;
+their callers must retain a context owner separately.
 
 Context disposal runs on the owning runtime, serializes concurrent cleanup,
 and continues if its caller cancels. Context close

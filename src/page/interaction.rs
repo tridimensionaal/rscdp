@@ -42,30 +42,45 @@ pub struct ElementPosition {
     pub center_y: f64,
 }
 
-/// An owned remote node reference, released when its last clone is dropped.
+/// An owned remote node reference. Dropping its last clone schedules a best-effort
+/// release attempt, capped at 30 seconds while preserving a shorter handle
+/// deadline. Drop does not guarantee that the remote release is acknowledged.
 #[derive(Clone)]
 pub struct Element(pub(super) Arc<RemoteNode>);
 
 pub(super) struct RemoteNode {
     pub(super) session: Session,
     pub(super) id: RemoteObjectId,
+    context_lease: Option<Arc<crate::browser::ContextLease>>,
 }
 
 impl Drop for RemoteNode {
     fn drop(&mut self) {
         let session = self.session.clone();
         let id = self.id.clone();
+        let context_lease = self.context_lease.take();
         self.session.connection().runtime().spawn(async move {
-            let _ = session
-                .execute_raw("Runtime.releaseObject", json!({"objectId":id}))
-                .await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(30),
+                session.execute_raw("Runtime.releaseObject", json!({"objectId":id})),
+            )
+            .await;
+            drop(context_lease);
         });
     }
 }
 
 impl Element {
-    pub(super) fn from_object_id(session: Session, id: RemoteObjectId) -> Self {
-        Self(Arc::new(RemoteNode { session, id }))
+    pub(super) fn from_object_id(
+        session: Session,
+        id: RemoteObjectId,
+        context_lease: Option<Arc<crate::browser::ContextLease>>,
+    ) -> Self {
+        Self(Arc::new(RemoteNode {
+            session,
+            id,
+            context_lease,
+        }))
     }
 
     pub fn object_id(&self) -> &RemoteObjectId {
@@ -170,10 +185,11 @@ impl Page {
                     .await?;
                 let id: RemoteObjectId =
                     serde_json::from_value(response["object"]["objectId"].clone())?;
-                Ok(Element(Arc::new(RemoteNode {
-                    session: page.session.clone(),
+                Ok(Element::from_object_id(
+                    page.session.clone(),
                     id,
-                })))
+                    page.context_lease.clone(),
+                ))
             })
             .await?
     }
@@ -196,10 +212,7 @@ impl Page {
             .spawn(async move {
                 let result = page.evaluate_remote(&expression, false).await?;
                 Ok(result.object_id.map(|id| {
-                    Element(Arc::new(RemoteNode {
-                        session: page.session.clone(),
-                        id,
-                    }))
+                    Element::from_object_id(page.session.clone(), id, page.context_lease.clone())
                 }))
             })
             .await?
@@ -413,11 +426,31 @@ impl Page {
             {
                 Ok(_) => {
                     if matched == index {
-                        return Page::from_session(
-                            connection.attach(target.target_id).await?,
-                            self.context.clone(),
-                        )
-                        .await;
+                        let parent = self.clone();
+                        let timeout = connection.command_timeout();
+                        let task = connection.runtime().spawn(async move {
+                            let session = parent
+                                .session
+                                .connection()
+                                .clone()
+                                .with_command_timeout(None)
+                                .attach(target.target_id)
+                                .await?
+                                .with_command_timeout(timeout);
+                            let mut page =
+                                Page::from_session(session, parent.context.clone()).await?;
+                            page.context_lease = parent.context_lease.clone();
+                            drop(parent);
+                            Ok(page)
+                        });
+                        let joined = if let Some(timeout) = timeout {
+                            tokio::time::timeout(timeout, task)
+                                .await
+                                .map_err(|_| Error::Timeout("attaching frame".into()))?
+                        } else {
+                            task.await
+                        };
+                        return joined?;
                     }
                     matched += 1;
                 }

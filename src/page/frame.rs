@@ -134,9 +134,13 @@ impl Frame {
             .runtime()
             .spawn(async move {
                 let result = frame.evaluate_remote(&expression, false).await?;
-                Ok(result
-                    .object_id
-                    .map(|id| Element::from_object_id(frame.page.session.clone(), id)))
+                Ok(result.object_id.map(|id| {
+                    Element::from_object_id(
+                        frame.page.session.clone(),
+                        id,
+                        frame.page.context_lease.clone(),
+                    )
+                }))
             })
             .await?
     }
