@@ -28,6 +28,18 @@ with `Browser::connect` or `Connection::connect`.
 
 ## Browser and page
 
+To use this checkout from another application, add these dependencies to that
+application's `Cargo.toml`, adjusting the local path:
+
+```toml
+[dependencies]
+rustcdp = { path = "../rustcdp" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+Your application owns the Tokio runtime. The example applications are not needed
+as dependencies.
+
 ```rust
 use rustcdp::{Browser, Page, Result, launcher::LaunchOptions};
 use std::time::Duration;
@@ -171,10 +183,14 @@ async fn load_through_proxy(context: &BrowserContext, url: &str) -> Result<()> {
 }
 ```
 
-Use `Browser::launch_with_proxy` for a process-wide proxy. `Preflight` (the enum's
-default) checks readiness via `https://www.example.com/` before setup returns.
-`OnDemand` handles challenges as requests occur. `wait_for_proxy_ready` succeeds
-when a request completes without an observed authentication failure. Inspect
+Use `Browser::launch_with_proxy` for a process-wide proxy. When proxy credentials
+are configured, an authentication worker is started. `Preflight` (the enum's
+default) checks readiness via `https://www.example.com/` before setup returns;
+`OnDemand` handles challenges as requests occur. With that worker,
+`wait_for_proxy_ready` succeeds when a request completes without an observed
+authentication failure. Without configured credentials, no worker or preflight
+runs, `proxy_auth_status()` returns `None`, and `wait_for_proxy_ready` returns
+immediately without checking traffic. Inspect
 `proxy_auth_status()` to distinguish `Authenticated` from `Unchallenged`: cached
 credentials, bypassed traffic, and proxies without authentication can all produce
 an unchallenged response. Readiness does not prove that traffic traversed the proxy
