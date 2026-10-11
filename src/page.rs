@@ -28,7 +28,7 @@ pub struct Page {
     session: Session,
     _page_events: std::sync::Arc<crate::session::DomainGuard>,
     context: Option<BrowserContextId>,
-    pub(crate) target_lease: Option<std::sync::Arc<crate::browser::TargetLease>>,
+    pub(crate) context_lease: Option<std::sync::Arc<crate::browser::ContextLease>>,
 }
 
 impl Page {
@@ -41,7 +41,7 @@ impl Page {
             session,
             _page_events: std::sync::Arc::new(page_events),
             context,
-            target_lease: None,
+            context_lease: None,
         })
     }
 
@@ -57,7 +57,7 @@ impl Page {
             session,
             _page_events: std::sync::Arc::new(page_events),
             context: Some(context),
-            target_lease: None,
+            context_lease: None,
         })
     }
 

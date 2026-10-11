@@ -1,6 +1,6 @@
 use crate::{
     Connection, Error, Page, Result,
-    cdp::{browser::BrowserContextId, target::TargetId},
+    cdp::browser::BrowserContextId,
     error::with_cleanup,
     launcher::{BrowserProcess, LaunchOptions},
 };
@@ -8,8 +8,7 @@ use serde_json::{Value, json};
 
 mod proxy;
 mod resource;
-use resource::ContextLease;
-pub(crate) use resource::TargetLease;
+pub(crate) use resource::ContextLease;
 
 /// A browser connection, its initial page, and optionally an owned Chrome process.
 pub struct Browser {
@@ -73,7 +72,9 @@ impl Browser {
             let session = connection.attach(target.target_id).await?;
             Page::from_session(session, context).await
         } else {
-            create_fallback_page(connection).await
+            Ok(BrowserContext::create(connection, json!({}))
+                .await?
+                .into_owned_page())
         }
     }
 
@@ -96,13 +97,13 @@ impl Browser {
     }
 
     pub async fn close(&mut self) -> Result<()> {
-        let auth_result = if let Some(auth) = &mut self.auth {
+        let page_result = if let Some(lease) = &self.page.context_lease {
+            lease
+                .close_with_auth(self.auth.take())
+                .await
+                .unwrap_or_else(|error| Err(error.into()))
+        } else if let Some(auth) = &mut self.auth {
             auth.stop().await
-        } else {
-            Ok(())
-        };
-        let page_result = if let Some(lease) = &self.page.target_lease {
-            lease.close().await
         } else {
             Ok(())
         };
@@ -112,7 +113,7 @@ impl Browser {
         } else {
             Ok(())
         };
-        with_cleanup(with_cleanup(auth_result, page_result), process_result)
+        with_cleanup(page_result, process_result)
     }
 }
 
@@ -123,7 +124,7 @@ impl Drop for Browser {
 }
 
 pub struct BrowserContext {
-    lease: ContextLease,
+    lease: Option<ContextLease>,
     page: Page,
     auth: Option<crate::proxy_auth::ProxyAuth>,
 }
@@ -181,7 +182,7 @@ impl BrowserContext {
         .unwrap_or_else(|_| Err(Error::Timeout("creating browser context".into())));
         match result {
             Ok(page) => Ok(Self {
-                lease: lease.expect("context ownership precedes page creation"),
+                lease: Some(lease.expect("context ownership precedes page creation")),
                 page: page.with_command_timeout(connection.command_timeout()),
                 auth: None,
             }),
@@ -206,10 +207,20 @@ impl BrowserContext {
 
     /// The context ID, or `None` after disposal has been acknowledged.
     pub fn id(&self) -> Option<&BrowserContextId> {
-        self.lease.id()
+        self.lease.as_ref().and_then(ContextLease::id)
     }
     pub fn page(&self) -> &Page {
         &self.page
+    }
+
+    // Only the fallback page takes context ownership. Ordinary context pages
+    // deliberately do not keep their context alive after BrowserContext drops.
+    fn into_owned_page(mut self) -> Page {
+        let mut page = self.page.clone();
+        let lease = self.lease.take().expect("context owns its lease");
+        lease.register_auth(self.auth.take());
+        page.context_lease = Some(std::sync::Arc::new(lease));
+        page
     }
 
     /// Stop authentication and dispose this context in an owned runtime task.
@@ -217,29 +228,18 @@ impl BrowserContext {
     /// timeout, capped at 30 seconds for the disposal command. An uncertain
     /// timeout closes the connection; protocol errors remain retryable.
     pub async fn close(&mut self) -> Result<()> {
-        self.lease.close_with_auth(self.auth.take()).await?
+        if let Some(lease) = &self.lease {
+            lease.close_with_auth(self.auth.take()).await?
+        } else {
+            Ok(())
+        }
     }
 }
 
 impl Drop for BrowserContext {
     fn drop(&mut self) {
-        self.lease.register_auth(self.auth.take());
-    }
-}
-
-async fn create_fallback_page(connection: &Connection) -> Result<Page> {
-    let response = connection
-        .execute_raw("Target.createTarget", json!({"url":"about:blank"}))
-        .await?;
-    let target: TargetId = serde_json::from_value(response["targetId"].clone())?;
-    let lease = TargetLease::new(connection.clone(), target.clone());
-    let result =
-        async { Page::from_session(connection.attach(target.clone()).await?, None).await }.await;
-    match result {
-        Ok(mut page) => {
-            page.target_lease = Some(std::sync::Arc::new(lease));
-            Ok(page)
+        if let Some(lease) = &self.lease {
+            lease.register_auth(self.auth.take());
         }
-        Err(error) => with_cleanup(Err(error), lease.close().await),
     }
 }

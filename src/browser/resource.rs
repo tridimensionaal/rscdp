@@ -1,10 +1,8 @@
 use crate::{
-    Connection, Error, Result,
-    cdp::{browser::BrowserContextId, target::TargetId},
-    error::with_cleanup,
+    Connection, Error, Result, cdp::browser::BrowserContextId, error::with_cleanup,
     proxy_auth::ProxyAuth,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     sync::{
         Arc,
@@ -21,7 +19,7 @@ struct Cleanup {
     pending_auth: std::sync::Mutex<Option<ProxyAuth>>,
 }
 
-pub(super) struct ContextLease {
+pub(crate) struct ContextLease {
     connection: Connection,
     id: BrowserContextId,
     cleanup: Arc<Cleanup>,
@@ -46,11 +44,10 @@ impl ContextLease {
 
     pub(super) fn close_with_auth(&self, auth: Option<ProxyAuth>) -> JoinHandle<Result<()>> {
         self.register_auth(auth);
-        self.connection.runtime().spawn(close_resource(
+        self.connection.runtime().spawn(dispose_context(
             self.connection.clone(),
             self.cleanup.clone(),
-            "Target.disposeBrowserContext",
-            json!({"browserContextId":self.id}),
+            self.id.clone(),
         ))
     }
 
@@ -75,48 +72,10 @@ impl Drop for ContextLease {
     }
 }
 
-pub(crate) struct TargetLease {
-    connection: Connection,
-    target: TargetId,
-    cleanup: Arc<Cleanup>,
-}
-
-impl TargetLease {
-    pub(super) fn new(connection: Connection, target: TargetId) -> Self {
-        Self {
-            connection,
-            target,
-            cleanup: Arc::default(),
-        }
-    }
-
-    fn start_close(&self) -> JoinHandle<Result<()>> {
-        self.connection.runtime().spawn(close_resource(
-            self.connection.clone(),
-            self.cleanup.clone(),
-            "Target.closeTarget",
-            json!({"targetId":self.target}),
-        ))
-    }
-
-    pub(super) async fn close(&self) -> Result<()> {
-        self.start_close().await?
-    }
-}
-
-impl Drop for TargetLease {
-    fn drop(&mut self) {
-        if !self.cleanup.closed.load(Ordering::Acquire) {
-            self.start_close();
-        }
-    }
-}
-
-async fn close_resource(
+async fn dispose_context(
     connection: Connection,
     cleanup: Arc<Cleanup>,
-    method: &'static str,
-    params: Value,
+    id: BrowserContextId,
 ) -> Result<()> {
     let _gate = cleanup.gate.lock().await;
     let mut auth = cleanup
@@ -135,10 +94,13 @@ async fn close_resource(
         }
         let result = tokio::time::timeout(
             Duration::from_secs(30),
-            connection.execute_raw(method, params),
+            connection.execute_raw(
+                "Target.disposeBrowserContext",
+                json!({"browserContextId":id}),
+            ),
         )
         .await
-        .unwrap_or_else(|_| Err(Error::Timeout(method.into())));
+        .unwrap_or_else(|_| Err(Error::Timeout("Target.disposeBrowserContext".into())));
         if matches!(&result, Err(Error::Timeout(_))) && !connection.is_closed() {
             connection.close().await;
         }

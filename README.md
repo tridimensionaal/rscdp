@@ -226,14 +226,25 @@ when ordinary command timeouts are disabled.
 ## Ownership and development
 
 Call `close().await` to confirm cleanup. Closing a context does not close its parent
-browser. Closing an externally connected browser disconnects and closes any fallback
-tab created by this library; it does not kill the external process. Temporary profiles
-are removed after child reaping; supplied fixed profiles are retained. On Unix,
+browser. Closing an externally connected browser disposes any fallback context
+created by this library and disconnects; it does not kill the external process.
+Temporary profiles are removed after child reaping; supplied fixed profiles are
+retained. On Unix,
 shutdown allows three seconds after TERM before forcing termination. Drop provides
 best-effort fallbacks. A timeout cannot undo a command Chrome already received.
 
-Context disposal and library-created target closure run on the owning runtime,
-serialize concurrent cleanup, and continue if their caller cancels. Context close
+When no existing page is available, the library creates a visible fallback page
+in a fresh isolated context. It does not share the default profile's cookies or
+storage. Existing tabs continue to be used without acquiring context ownership.
+For an externally connected browser, dropping Browser keeps the fallback context
+alive while Page clones remain and the connection stays open.
+Dropping the last Page schedules disposal; explicit `Browser::close()` disposes
+the context and invalidates those clones. Dropping Browser stops proxy
+authentication even if Page clones keep the context alive. Elements, session listeners,
+and separately attached OOPIF Pages do not acquire this context lease.
+
+Context disposal runs on the owning runtime, serializes concurrent cleanup,
+and continues if its caller cancels. Context close
 and Drop register authentication cleanup before scheduling disposal, so whichever
 task runs first stops authentication before disposing the context. Explicit
 `detach_proxy_auth()` remains the opt-out for unresponsive contexts. Each cleanup
@@ -244,8 +255,8 @@ returned and remain retryable; Drop cleanup is best-effort. Acknowledged cleanup
 prevents duplicate commands, and `BrowserContext::id()` becomes `None` after
 acknowledged disposal even if the caller canceled its wait. The context guard
 starts as soon as its ID is decoded, before page setup. Dropping a context still
-disposes it even if Page clones remain; target ownership stays shared by Pages.
-Disconnecting alone does not guarantee closure of a visible default-context tab.
+disposes it even if Page clones remain; only the fallback page receives shared
+context ownership.
 
 Context acquisition and cleanup continue after caller cancellation or timeout.
 Acquisition has one 30-second limit covering context creation and page setup.
