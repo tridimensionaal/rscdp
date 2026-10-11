@@ -66,7 +66,7 @@ exposes the same API. `cookies` and `set_cookies` operate in that context. A con
 created without a proxy explicitly bypasses a proxy configured on the parent browser.
 
 Page interaction includes `element_by_selector`, `wait_for_selector`,
-`element_by_xpath`, `nodes_by_xpath`, `resolve_node`,
+`element_by_xpath`, `search_dom`, `resolve_node`,
 `wait_for_xpath`, `click_xpath`, `click_position`, `press_escape`, `go_back`, and
 `flash_point`. `Element` supports scrolling, position, focus, text insertion, and CDP or
 JavaScript clicks. Use `Page::insert_text` for Unicode text and `press_key` or
