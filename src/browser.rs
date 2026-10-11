@@ -7,6 +7,9 @@ use crate::{
 use serde_json::{Value, json};
 
 mod proxy;
+mod resource;
+use resource::ContextLease;
+pub(crate) use resource::TargetLease;
 
 /// A browser connection, its initial page, and optionally an owned Chrome process.
 pub struct Browser {
@@ -120,8 +123,7 @@ impl Drop for Browser {
 }
 
 pub struct BrowserContext {
-    connection: Connection,
-    id: Option<BrowserContextId>,
+    lease: ContextLease,
     page: Page,
     auth: Option<crate::proxy_auth::ProxyAuth>,
 }
@@ -142,73 +144,37 @@ impl BrowserContext {
             .execute_raw("Target.createBrowserContext", params)
             .await?;
         let id: BrowserContextId = serde_json::from_value(response["browserContextId"].clone())?;
-        match create_page(connection, Some(id.clone())).await {
+        let lease = ContextLease::new(connection.clone(), id.clone());
+        match create_page(connection, Some(id)).await {
             Ok(page) => Ok(Self {
-                connection: connection.clone(),
-                id: Some(id),
+                lease,
                 page,
                 auth: None,
             }),
-            Err(error) => {
-                let cleanup = connection
-                    .execute_raw(
-                        "Target.disposeBrowserContext",
-                        json!({"browserContextId":id}),
-                    )
-                    .await
-                    .map(|_| ());
-                with_cleanup(Err(error), cleanup)
-            }
+            Err(error) => with_cleanup(Err(error), lease.close().await),
         }
     }
 
+    /// The context ID, or `None` after disposal has been acknowledged.
     pub fn id(&self) -> Option<&BrowserContextId> {
-        self.id.as_ref()
+        self.lease.id()
     }
     pub fn page(&self) -> &Page {
         &self.page
     }
 
+    /// Stop authentication and dispose this context in an owned runtime task.
+    /// Cancellation does not stop cleanup. Disposal uses the configured command
+    /// timeout, capped at 30 seconds for the disposal command. An uncertain
+    /// timeout closes the connection; protocol errors remain retryable.
     pub async fn close(&mut self) -> Result<()> {
-        let auth_result = if let Some(auth) = &mut self.auth {
-            auth.stop().await
-        } else {
-            Ok(())
-        };
-        let context_result = if let Some(id) = &self.id {
-            let result = self
-                .connection
-                .execute_raw(
-                    "Target.disposeBrowserContext",
-                    json!({"browserContextId":id}),
-                )
-                .await
-                .map(|_| ());
-            if result.is_ok() {
-                self.id = None;
-            }
-            result
-        } else {
-            Ok(())
-        };
-        with_cleanup(auth_result, context_result)
+        self.lease.close_with_auth(self.auth.take()).await?
     }
 }
 
 impl Drop for BrowserContext {
     fn drop(&mut self) {
-        self.detach_proxy_auth();
-        if let Some(id) = self.id.take() {
-            let connection = self.connection.clone();
-            self.connection.runtime().spawn(async move {
-                let _ = connection
-                    .execute_raw(
-                        "Target.disposeBrowserContext",
-                        json!({"browserContextId":id}),
-                    )
-                    .await;
-            });
-        }
+        self.lease.register_auth(self.auth.take());
     }
 }
 
@@ -221,11 +187,7 @@ async fn create_page(connection: &Connection, context: Option<BrowserContextId>)
         .execute_raw("Target.createTarget", params)
         .await?;
     let target: TargetId = serde_json::from_value(response["targetId"].clone())?;
-    let lease = TargetLease {
-        connection: connection.clone(),
-        target: Some(target.clone()),
-        closed: std::sync::atomic::AtomicBool::new(false),
-    };
+    let lease = TargetLease::new(connection.clone(), target.clone());
     let result =
         async { Page::from_session(connection.attach(target.clone()).await?, context).await }.await;
     match result {
@@ -234,41 +196,5 @@ async fn create_page(connection: &Connection, context: Option<BrowserContextId>)
             Ok(page)
         }
         Err(error) => with_cleanup(Err(error), lease.close().await),
-    }
-}
-
-pub(crate) struct TargetLease {
-    connection: Connection,
-    target: Option<TargetId>,
-    closed: std::sync::atomic::AtomicBool,
-}
-
-impl TargetLease {
-    async fn close(&self) -> Result<()> {
-        if !self.closed.load(std::sync::atomic::Ordering::Acquire)
-            && let Some(target) = &self.target
-        {
-            self.connection
-                .execute_raw("Target.closeTarget", json!({"targetId":target}))
-                .await?;
-            self.closed
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-        Ok(())
-    }
-}
-
-impl Drop for TargetLease {
-    fn drop(&mut self) {
-        if !self.closed.load(std::sync::atomic::Ordering::Acquire)
-            && let Some(target) = self.target.take()
-        {
-            let connection = self.connection.clone();
-            self.connection.runtime().spawn(async move {
-                let _ = connection
-                    .execute_raw("Target.closeTarget", json!({"targetId":target}))
-                    .await;
-            });
-        }
     }
 }

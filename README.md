@@ -232,6 +232,21 @@ are removed after child reaping; supplied fixed profiles are retained. On Unix,
 shutdown allows three seconds after TERM before forcing termination. Drop provides
 best-effort fallbacks. A timeout cannot undo a command Chrome already received.
 
+Context disposal and library-created target closure run on the owning runtime,
+serialize concurrent cleanup, and continue if their caller cancels. Context close
+and Drop register authentication cleanup before scheduling disposal, so whichever
+task runs first stops authentication before disposing the context. Explicit
+`detach_proxy_auth()` remains the opt-out for unresponsive contexts. Each cleanup
+command preserves a shorter configured timeout and has a 30-second upper bound
+even with timeouts disabled. An uncertain timeout closes the connection unless
+it is already closed; teardown can take additional time. Protocol errors are
+returned and remain retryable; Drop cleanup is best-effort. Acknowledged cleanup
+prevents duplicate commands, and `BrowserContext::id()` becomes `None` after
+acknowledged disposal even if the caller canceled its wait. The context guard
+starts as soon as its ID is decoded, before page setup. Dropping a context still
+disposes it even if Page clones remain; target ownership stays shared by Pages.
+Disconnecting alone does not guarantee closure of a visible default-context tab.
+
 `Connection::attach` owns its attachment. Session clones, wrappers for the same ID,
 session event listeners, and Page/Element/domain handles retain that shared
 ownership. Dropping the last owner schedules detach on the connection runtime,
