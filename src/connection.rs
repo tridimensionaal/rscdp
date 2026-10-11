@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    future::poll_fn,
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
@@ -146,11 +147,34 @@ impl Connection {
             let (mut sink, mut stream) = socket.split();
             let mut pending = HashMap::<u64, Request>::new();
             let mut id = 0u64;
+            let mut outbound = None;
+            let mut write_deadline = None;
             let mut cleanup = tokio::time::interval(Duration::from_secs(1));
             let outcome: Result<()> = async {
                 loop {
                     tokio::select! {
                         _ = stop.changed() => break,
+                        result = poll_fn(|cx| {
+                            // All write progress lives in the sink and outbound slot,
+                            // so selecting a read does not restart a partial send.
+                            if outbound.is_some()
+                                && !pending.get(&id).is_some_and(|request| !request.reply.is_closed())
+                            {
+                                outbound = None;
+                            }
+                            if outbound.is_some() {
+                                std::task::ready!(sink.poll_ready_unpin(cx))?;
+                                sink.start_send_unpin(outbound.take().expect("outbound message"))?;
+                            }
+                            sink.poll_flush_unpin(cx)
+                        }), if write_deadline.is_some() => {
+                            result?;
+                            write_deadline = None;
+                        }
+                        _ = tokio::time::sleep_until(write_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                            if write_deadline.is_some() => {
+                            return Err(Error::Timeout("writing to CDP socket".into()));
+                        }
                         message = stream.next() => {
                             let Some(message) = message else { break; };
                             match message? {
@@ -199,18 +223,15 @@ impl Connection {
                                 }
                                 Message::Close(_) => break,
                                 Message::Ping(_) => {
-                                    tokio::select! {
-                                        _ = stop.changed() => break,
-                                        result = tokio::time::timeout(TIMEOUT, sink.flush()) => {
-                                            result.map_err(|_| Error::Timeout("writing WebSocket pong".into()))??;
-                                        }
-                                    }
+                                    // Tungstenite queues the pong while reading. Flush it
+                                    // without suspending reads or extending an active write.
+                                    write_deadline.get_or_insert_with(|| tokio::time::Instant::now() + TIMEOUT);
                                 }
                                 Message::Pong(_) => {}
                                 _ => return Err(Error::ConnectionClosed("non-text CDP frame".into())),
                             }
                         }
-                        request = incoming.recv() => {
+                        request = incoming.recv(), if write_deadline.is_none() => {
                             let Some(request) = request else { break; };
                             pending.retain(|_, p| !p.reply.is_closed());
                             if request.reply.is_closed() { continue; }
@@ -224,13 +245,8 @@ impl Connection {
                             let mut message = json!({"id":id,"method":request.method,"params":request.params});
                             if let Some(session_id) = &request.session_id { message["sessionId"] = session_id.clone().into(); }
                             pending.insert(id, request);
-                            let send = sink.send(Message::Text(serde_json::to_string(&message)?.into()));
-                            tokio::select! {
-                                _ = stop.changed() => break,
-                                result = tokio::time::timeout(TIMEOUT, send) => {
-                                    result.map_err(|_| Error::Timeout("writing CDP command".into()))??;
-                                }
-                            }
+                            outbound = Some(Message::Text(serde_json::to_string(&message)?.into()));
+                            write_deadline = Some(tokio::time::Instant::now() + TIMEOUT);
                         }
                         _ = cleanup.tick() => pending.retain(|_, p| !p.reply.is_closed()),
                     }
