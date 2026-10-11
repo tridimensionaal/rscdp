@@ -148,6 +148,11 @@ Typed subscriptions filter by session and method before buffering. Each holds 25
 events and reports `Error::Lagged` on overflow. `connection.subscribe()` exposes
 raw events across sessions. Use ordinary Tokio tasks to run event handlers.
 Session detachment wakes pending operations and listeners, including descendants.
+`session.detach().await` continues cleanup if its caller is canceled. Calls for the
+same session are serialized. After earlier calls finish, the command uses the handle's
+timeout with a 30-second upper bound, even when ordinary timeouts are disabled.
+If it times out without confirmed session closure, the connection is closed to
+resolve the uncertain state.
 
 `Session::enable_dom()` and `enable_page()` return shared, reference-counted
 `DomainGuard` values. The first guard enables the domain; closing the last disables

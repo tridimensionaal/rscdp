@@ -55,6 +55,7 @@ struct SessionEntry {
     closed: watch::Sender<bool>,
     auth_owner: Arc<std::sync::atomic::AtomicBool>,
     domains: Arc<[tokio::sync::Mutex<usize>; 2]>,
+    detach: Arc<tokio::sync::Mutex<()>>,
 }
 
 type EventKey = (Option<String>, String);
@@ -66,6 +67,7 @@ pub(crate) struct SessionState {
     pub(crate) target_id: Option<String>,
     pub(crate) auth_owner: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) domains: Arc<[tokio::sync::Mutex<usize>; 2]>,
+    pub(crate) detach: Arc<tokio::sync::Mutex<()>>,
 }
 
 type SessionRegistry = Arc<Mutex<HashMap<String, SessionEntry>>>;
@@ -83,6 +85,7 @@ fn register_session(
         closed: watch::channel(false).0,
         auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         domains: Arc::default(),
+        detach: Arc::default(),
     });
     // The first known identity is authoritative, even if a later report conflicts.
     if entry.target_id.is_none() {
@@ -108,6 +111,31 @@ fn close_sessions(registry: &SessionRegistry, id: &str) -> Vec<String> {
         index += 1;
     }
     removed
+}
+
+fn close_session_requests(
+    registry: &SessionRegistry,
+    pending: &mut HashMap<u64, Request>,
+    id: &str,
+) {
+    let removed = close_sessions(registry, id);
+    let cancelled: Vec<_> = pending
+        .iter()
+        .filter(|(_, request)| {
+            request
+                .session_id
+                .as_ref()
+                .is_some_and(|id| removed.contains(id))
+        })
+        .map(|(&id, _)| id)
+        .collect();
+    for id in cancelled {
+        if let Some(request) = pending.remove(&id) {
+            let _ = request.reply.send(Err(Error::SessionClosed(
+                request.session_id.unwrap_or_default(),
+            )));
+        }
+    }
 }
 
 impl Drop for Inner {
@@ -220,6 +248,12 @@ impl Connection {
                                                 };
                                                 register_session(&active_sessions, id, request.session_id.clone(), target_id);
                                             }
+                                            if request.method == "Target.detachFromTarget"
+                                                && result.is_ok()
+                                                && let Some(id) = request.params["sessionId"].as_str()
+                                            {
+                                                close_session_requests(&active_sessions, &mut pending, id);
+                                            }
                                             let _ = request.reply.send(result);
                                         }
                                     } else {
@@ -228,13 +262,7 @@ impl Connection {
                                             if event.method == "Target.attachedToTarget" {
                                                 register_session(&active_sessions, id, event.session_id.clone(), event.params["targetInfo"]["targetId"].as_str());
                                             } else if event.method == "Target.detachedFromTarget" {
-                                                let removed = close_sessions(&active_sessions, id);
-                                                let cancelled: Vec<_> = pending.keys().copied().filter(|key| pending[key].session_id.as_ref().is_some_and(|id| removed.contains(id))).collect();
-                                                for key in cancelled {
-                                                    if let Some(request) = pending.remove(&key) {
-                                                        let _ = request.reply.send(Err(Error::SessionClosed(request.session_id.unwrap_or_default())));
-                                                    }
-                                                }
+                                                close_session_requests(&active_sessions, &mut pending, id);
                                             }
                                         }
                                         // No subscribers is normal; subscribed readers detect lag explicitly.
@@ -359,6 +387,7 @@ impl Connection {
                 target_id: entry.target_id.clone(),
                 auth_owner: entry.auth_owner.clone(),
                 domains: entry.domains.clone(),
+                detach: entry.detach.clone(),
             })
             .ok_or_else(|| Error::SessionClosed(id.into()))
     }

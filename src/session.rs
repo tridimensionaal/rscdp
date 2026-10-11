@@ -21,6 +21,7 @@ pub struct Session {
     parent: Option<String>,
     auth_owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
     domains: std::sync::Arc<[tokio::sync::Mutex<usize>; 2]>,
+    detach: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Connection {
@@ -59,6 +60,7 @@ impl Connection {
             parent: state.parent,
             auth_owner: state.auth_owner,
             domains: state.domains,
+            detach: state.detach,
         })
     }
 
@@ -146,18 +148,44 @@ impl Session {
         }
     }
 
+    /// Detach this session and its descendants.
+    ///
+    /// Once polled, detachment continues in an owned task if the caller cancels.
+    /// Calls for the same session are serialized and recheck closure after waiting.
+    /// The command uses this handle's timeout, capped at 30 seconds after acquiring
+    /// the detach gate (including when command timeouts are disabled).
+    /// On either timeout, an already closed session counts as success. Otherwise,
+    /// the connection is closed to resolve uncertain detachment before returning
+    /// `Error::Timeout`; connection teardown may take additional time.
+    /// Protocol errors leave the session retryable unless it detached asynchronously.
     pub async fn detach(&self) -> Result<()> {
-        if self.is_closed() {
-            return Ok(());
-        }
+        let session = self.clone();
         self.connection
-            .execute_session(
-                "Target.detachFromTarget",
-                json!({"sessionId":self.id}),
-                self.parent.clone(),
-            )
-            .await?;
-        Ok(())
+            .runtime()
+            .spawn(async move {
+                let _gate = session.detach.lock().await;
+                if session.is_closed() {
+                    return Ok(());
+                }
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    session.connection.execute_session(
+                        "Target.detachFromTarget",
+                        json!({"sessionId":session.id}),
+                        session.parent.clone(),
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| Err(Error::Timeout("Target.detachFromTarget".into())));
+                if matches!(&result, Err(Error::Timeout(_))) {
+                    if session.is_closed() {
+                        return Ok(());
+                    }
+                    session.connection.close().await;
+                }
+                result.map(|_| ())
+            })
+            .await?
     }
 }
 
