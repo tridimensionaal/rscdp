@@ -28,6 +28,31 @@ impl Session {
         self.enable_domain(1).await
     }
 
+    /// Only for setup whose enclosing ContextLease owns all failure recovery.
+    /// The caller must use a session with command timeouts disabled, bound setup
+    /// with its own deadline, and dispose the context on error or cancellation:
+    /// a canceled Page.enable may have taken effect without incrementing the count.
+    /// Acquisition deliberately has no spawned task or independent recovery.
+    pub(crate) async fn enable_page_in_context(&self) -> Result<DomainGuard> {
+        let counts = self.domains.clone();
+        let mut users = counts[1].lock().await;
+        if self.is_closed() {
+            return Err(Error::SessionClosed(self.id.0.clone()));
+        }
+        if *users == 0 {
+            self.execute_raw("Page.enable", json!({})).await?;
+        }
+        *users += 1;
+        drop(users);
+        Ok(DomainGuard {
+            session: self.clone().with_command_timeout(None),
+            counts,
+            index: 1,
+            active: true,
+            runtime: self.connection.runtime(),
+        })
+    }
+
     async fn enable_domain(&self, index: usize) -> Result<DomainGuard> {
         if self.is_closed() {
             return Err(Error::SessionClosed(self.id.0.clone()));

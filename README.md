@@ -247,6 +247,14 @@ starts as soon as its ID is decoded, before page setup. Dropping a context still
 disposes it even if Page clones remain; target ownership stays shared by Pages.
 Disconnecting alone does not guarantee closure of a visible default-context tab.
 
+Context acquisition and cleanup continue after caller cancellation or timeout.
+Acquisition has one 30-second limit covering context creation and page setup.
+A known context is disposed if
+setup fails or times out. Failed disposal, or an unknown context ID after an
+uncertain creation, closes the connection; contexts are always created with
+`disposeOnDetach`. A protocol rejection of context creation leaves the connection
+usable. An unclaimed completed context is dropped and disposed.
+
 `Connection::attach` owns its attachment. Session clones, wrappers for the same ID,
 session event listeners, and Page/Element/domain handles retain that shared
 ownership. Dropping the last owner schedules detach on the connection runtime,

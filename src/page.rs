@@ -45,6 +45,22 @@ impl Page {
         })
     }
 
+    /// Only for setup under an enclosing ContextLease that disposes the context
+    /// on failure or cancellation. The session must have command timeouts
+    /// disabled; the enclosing acquisition owns the setup deadline and recovery.
+    pub(crate) async fn from_session_in_context(
+        session: Session,
+        context: BrowserContextId,
+    ) -> Result<Self> {
+        let page_events = session.enable_page_in_context().await?;
+        Ok(Self {
+            session,
+            _page_events: std::sync::Arc::new(page_events),
+            context: Some(context),
+            target_lease: None,
+        })
+    }
+
     #[must_use]
     pub fn with_command_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.session = self.session.with_command_timeout(timeout);

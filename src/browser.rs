@@ -1,5 +1,5 @@
 use crate::{
-    Connection, Page, Result,
+    Connection, Error, Page, Result,
     cdp::{browser::BrowserContextId, target::TargetId},
     error::with_cleanup,
     launcher::{BrowserProcess, LaunchOptions},
@@ -73,7 +73,7 @@ impl Browser {
             let session = connection.attach(target.target_id).await?;
             Page::from_session(session, context).await
         } else {
-            create_page(connection, None).await
+            create_fallback_page(connection).await
         }
     }
 
@@ -130,28 +130,77 @@ pub struct BrowserContext {
 
 impl BrowserContext {
     pub(crate) async fn create(connection: &Connection, params: Value) -> Result<Self> {
+        let timeout = connection.command_timeout();
         let connection = connection.clone();
         // Finish acquiring ownership even if the caller cancels. An unclaimed
         // result is dropped by Tokio and disposes its context.
-        connection
+        let task = connection
             .runtime()
-            .spawn(async move { Self::create_owned(&connection, params).await })
-            .await?
+            .spawn(async move { Self::create_owned(&connection, params).await });
+        let joined = if let Some(timeout) = timeout {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("creating browser context".into()))?
+        } else {
+            task.await
+        };
+        joined?
     }
 
-    async fn create_owned(connection: &Connection, params: Value) -> Result<Self> {
-        let response = connection
-            .execute_raw("Target.createBrowserContext", params)
-            .await?;
-        let id: BrowserContextId = serde_json::from_value(response["browserContextId"].clone())?;
-        let lease = ContextLease::new(connection.clone(), id.clone());
-        match create_page(connection, Some(id)).await {
+    async fn create_owned(connection: &Connection, mut params: Value) -> Result<Self> {
+        // Disconnection must resolve ownership even if the creation reply is lost.
+        params["disposeOnDetach"] = true.into();
+        let commands = connection.clone().with_command_timeout(None);
+        let mut lease = None;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let response = commands
+                .execute_raw("Target.createBrowserContext", params)
+                .await?;
+            let id: BrowserContextId =
+                serde_json::from_value(response["browserContextId"].clone())?;
+            lease = Some(ContextLease::new(connection.clone(), id.clone()));
+            // The context guard owns every resource acquired here. Keep setup in
+            // this task so disposal cannot be followed by a nested task's recovery.
+            let target = commands
+                .execute(
+                    &crate::cdp::target::commands::CreateTarget::new("about:blank")
+                        .with_browser_context_id(id.clone()),
+                )
+                .await?
+                .target_id;
+            let attached = commands
+                .execute(
+                    &crate::cdp::target::commands::AttachToTarget::new(target.clone())
+                        .with_flatten(true),
+                )
+                .await?;
+            let session = commands.session(attached.session_id, target)?;
+            Page::from_session_in_context(session, id).await
+        })
+        .await
+        .unwrap_or_else(|_| Err(Error::Timeout("creating browser context".into())));
+        match result {
             Ok(page) => Ok(Self {
-                lease,
-                page,
+                lease: lease.expect("context ownership precedes page creation"),
+                page: page.with_command_timeout(connection.command_timeout()),
                 auth: None,
             }),
-            Err(error) => with_cleanup(Err(error), lease.close().await),
+            Err(error) => {
+                if let Some(lease) = lease {
+                    let cleanup = lease.close().await;
+                    if cleanup.is_err() {
+                        connection.close().await;
+                    }
+                    with_cleanup(Err(error), cleanup)
+                } else {
+                    // A protocol rejection confirms that creation failed.
+                    // Other failures can leave an unknown context on the server.
+                    if !matches!(&error, Error::Protocol(_)) {
+                        connection.close().await;
+                    }
+                    Err(error)
+                }
+            }
         }
     }
 
@@ -178,18 +227,14 @@ impl Drop for BrowserContext {
     }
 }
 
-async fn create_page(connection: &Connection, context: Option<BrowserContextId>) -> Result<Page> {
-    let mut params = json!({"url":"about:blank"});
-    if let Some(id) = &context {
-        params["browserContextId"] = serde_json::to_value(id)?;
-    }
+async fn create_fallback_page(connection: &Connection) -> Result<Page> {
     let response = connection
-        .execute_raw("Target.createTarget", params)
+        .execute_raw("Target.createTarget", json!({"url":"about:blank"}))
         .await?;
     let target: TargetId = serde_json::from_value(response["targetId"].clone())?;
     let lease = TargetLease::new(connection.clone(), target.clone());
     let result =
-        async { Page::from_session(connection.attach(target.clone()).await?, context).await }.await;
+        async { Page::from_session(connection.attach(target.clone()).await?, None).await }.await;
     match result {
         Ok(mut page) => {
             page.target_lease = Some(std::sync::Arc::new(lease));

@@ -241,6 +241,7 @@ impl Connection {
                                                 Ok(value.get("result").cloned().ok_or_else(|| Error::ConnectionClosed("response missing result".into()))?)
                                             };
                                             if matches!(request.method.as_str(), "Target.attachToTarget" | "Target.attachToBrowserTarget")
+                                                && !request.reply.is_closed()
                                                 && let Ok(result) = &result
                                                 && let Some(id) = result["sessionId"].as_str()
                                             {
