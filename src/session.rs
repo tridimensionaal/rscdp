@@ -35,16 +35,30 @@ impl Connection {
     }
 
     /// Adopt a session reported by `Target.attachedToTarget` (auto-attach).
+    ///
+    /// The supplied target must match the session's known target identity.
+    /// If the identity is unknown (for example, after `Target.attachToBrowserTarget`),
+    /// the caller is responsible for supplying the correct target. The supplied
+    /// identity is retained on this handle but does not establish the registry's
+    /// identity; a later attach event can establish it for future adoptions.
     pub fn session(&self, id: SessionId, target: TargetId) -> Result<Session> {
-        let (closed, parent, auth_owner, domains) = self.session_state(&id.0)?;
+        let state = self.session_state(&id.0)?;
+        if let Some(known_target) = &state.target_id
+            && known_target != &target.0
+        {
+            return Err(Error::InvalidArgument(format!(
+                "session {} belongs to target {}, not {}",
+                id.0, known_target, target.0
+            )));
+        }
         Ok(Session {
             connection: self.clone(),
             id,
             target,
-            closed,
-            parent,
-            auth_owner,
-            domains,
+            closed: state.closed,
+            parent: state.parent,
+            auth_owner: state.auth_owner,
+            domains: state.domains,
         })
     }
 

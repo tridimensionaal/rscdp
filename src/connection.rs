@@ -51,6 +51,7 @@ struct Inner {
 
 struct SessionEntry {
     parent: Option<String>,
+    target_id: Option<String>,
     closed: watch::Sender<bool>,
     auth_owner: Arc<std::sync::atomic::AtomicBool>,
     domains: Arc<[tokio::sync::Mutex<usize>; 2]>,
@@ -59,14 +60,35 @@ struct SessionEntry {
 type EventKey = (Option<String>, String);
 type Subscriptions = Arc<Mutex<HashMap<EventKey, Vec<Weak<broadcast::Sender<RawEvent>>>>>>;
 
-pub(crate) type SessionState = (
-    watch::Receiver<bool>,
-    Option<String>,
-    Arc<std::sync::atomic::AtomicBool>,
-    Arc<[tokio::sync::Mutex<usize>; 2]>,
-);
+pub(crate) struct SessionState {
+    pub(crate) closed: watch::Receiver<bool>,
+    pub(crate) parent: Option<String>,
+    pub(crate) target_id: Option<String>,
+    pub(crate) auth_owner: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) domains: Arc<[tokio::sync::Mutex<usize>; 2]>,
+}
 
 type SessionRegistry = Arc<Mutex<HashMap<String, SessionEntry>>>;
+
+fn register_session(
+    registry: &SessionRegistry,
+    id: &str,
+    parent: Option<String>,
+    target_id: Option<&str>,
+) {
+    let mut registry = registry.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = registry.entry(id.into()).or_insert_with(|| SessionEntry {
+        parent,
+        target_id: None,
+        closed: watch::channel(false).0,
+        auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        domains: Arc::default(),
+    });
+    // The first known identity is authoritative, even if a later report conflicts.
+    if entry.target_id.is_none() {
+        entry.target_id = target_id.map(str::to_owned);
+    }
+}
 
 fn close_sessions(registry: &SessionRegistry, id: &str) -> Vec<String> {
     let mut registry = registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -191,8 +213,12 @@ impl Connection {
                                                 && let Ok(result) = &result
                                                 && let Some(id) = result["sessionId"].as_str()
                                             {
-                                                active_sessions.lock().unwrap_or_else(|e| e.into_inner())
-                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: request.session_id.clone(), closed: watch::channel(false).0, auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)), domains: Arc::default() });
+                                                let target_id = if request.method == "Target.attachToTarget" {
+                                                    request.params["targetId"].as_str()
+                                                } else {
+                                                    None
+                                                };
+                                                register_session(&active_sessions, id, request.session_id.clone(), target_id);
                                             }
                                             let _ = request.reply.send(result);
                                         }
@@ -200,8 +226,7 @@ impl Connection {
                                         let event: RawEvent = serde_json::from_value(value)?;
                                         if let Some(id) = event.params["sessionId"].as_str() {
                                             if event.method == "Target.attachedToTarget" {
-                                                active_sessions.lock().unwrap_or_else(|e| e.into_inner())
-                                                    .entry(id.into()).or_insert_with(|| SessionEntry { parent: event.session_id.clone(), closed: watch::channel(false).0, auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)), domains: Arc::default() });
+                                                register_session(&active_sessions, id, event.session_id.clone(), event.params["targetInfo"]["targetId"].as_str());
                                             } else if event.method == "Target.detachedFromTarget" {
                                                 let removed = close_sessions(&active_sessions, id);
                                                 let cancelled: Vec<_> = pending.keys().copied().filter(|key| pending[key].session_id.as_ref().is_some_and(|id| removed.contains(id))).collect();
@@ -328,13 +353,12 @@ impl Connection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(id)
-            .map(|entry| {
-                (
-                    entry.closed.subscribe(),
-                    entry.parent.clone(),
-                    entry.auth_owner.clone(),
-                    entry.domains.clone(),
-                )
+            .map(|entry| SessionState {
+                closed: entry.closed.subscribe(),
+                parent: entry.parent.clone(),
+                target_id: entry.target_id.clone(),
+                auth_owner: entry.auth_owner.clone(),
+                domains: entry.domains.clone(),
             })
             .ok_or_else(|| Error::SessionClosed(id.into()))
     }
@@ -355,7 +379,7 @@ impl Connection {
         }
         let mut session_closed = session_id
             .as_deref()
-            .map(|id| self.session_state(id).map(|state| state.0))
+            .map(|id| self.session_state(id).map(|state| state.closed))
             .transpose()?;
         #[cfg(feature = "tracing")]
         let mut diagnostic = crate::diagnostics::Command::new(method);
