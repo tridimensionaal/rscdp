@@ -232,6 +232,18 @@ are removed after child reaping; supplied fixed profiles are retained. On Unix,
 shutdown allows three seconds after TERM before forcing termination. Drop provides
 best-effort fallbacks. A timeout cannot undo a command Chrome already received.
 
+`Connection::attach` owns its attachment. Session clones, wrappers for the same ID,
+session event listeners, and Page/Element/domain handles retain that shared
+ownership. Dropping the last owner schedules detach on the connection runtime,
+using a 30-second command limit; confirmed closure prevents duplicate detach.
+Drop cleanup is best-effort: protocol errors are ignored, while an uncertain
+timeout closes the connection. Await `session.detach()` to observe errors.
+Wrapping a raw-command or auto-attached session with `Connection::session` does
+not acquire cleanup ownership unless it shares a high-level attachment; otherwise
+the caller must detach explicitly. An expired owned attachment cannot be wrapped
+again while cleanup runs or after it fails. This does not solve cancellation
+before high-level attach returns or lost late attach responses.
+
 The pinned CDP schemas in `protocol/` generate Rust bindings through `build.rs`.
 Generation runs locally without network access.
 

@@ -4,27 +4,37 @@ use crate::{
     connection::EventStream,
     protocol::{Command, Event},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::marker::PhantomData;
 use tokio::sync::watch;
 
 mod domain;
 pub use domain::DomainGuard;
+mod attachment;
+pub(crate) use attachment::Attachment;
 
 /// A flattened CDP session multiplexed over its parent connection.
+///
+/// Sessions returned by [`Connection::attach`] share attachment ownership with
+/// their clones, wrappers for the same ID, and session-scoped event listeners.
+/// Dropping the last owner schedules best-effort detachment on the connection's
+/// runtime. Protocol errors during Drop cleanup are ignored; an uncertain timeout
+/// closes the connection. Use [`Session::detach`] to observe the cleanup result.
 #[derive(Clone)]
 pub struct Session {
     connection: Connection,
     id: SessionId,
     target: TargetId,
     closed: watch::Receiver<bool>,
-    parent: Option<String>,
     auth_owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
     domains: std::sync::Arc<[tokio::sync::Mutex<usize>; 2]>,
-    detach: std::sync::Arc<tokio::sync::Mutex<()>>,
+    attachment: std::sync::Arc<Attachment>,
 }
 
 impl Connection {
+    /// Attach with shared ownership: the last session handle or session listener
+    /// schedules detachment. Cancellation before this method returns and late
+    /// attach responses are not covered by this ownership guarantee.
     pub async fn attach(&self, target: TargetId) -> Result<Session> {
         let response = self
             .execute(&crate::cdp::target::commands::AttachToTarget {
@@ -32,10 +42,18 @@ impl Connection {
                 flatten: Some(true),
             })
             .await?;
-        self.session(response.session_id, target)
+        let session = self.session(response.session_id, target)?;
+        session.attachment.arm();
+        Ok(session)
     }
 
-    /// Adopt a session reported by `Target.attachedToTarget` (auto-attach).
+    /// Wrap a registered session, including one reported by auto-attach.
+    ///
+    /// Wrapping a raw-command or auto-attached session does not acquire cleanup
+    /// ownership: the caller must explicitly detach it. Wrappers of a session
+    /// owned by [`Connection::attach`] share that ownership, including wrappers
+    /// created from an event before the high-level attach completes.
+    /// Closed sessions and expired owned attachments cannot be wrapped again.
     ///
     /// The supplied target must match the session's known target identity.
     /// If the identity is unknown (for example, after `Target.attachToBrowserTarget`),
@@ -57,10 +75,9 @@ impl Connection {
             id,
             target,
             closed: state.closed,
-            parent: state.parent,
             auth_owner: state.auth_owner,
             domains: state.domains,
-            detach: state.detach,
+            attachment: state.attachment,
         })
     }
 
@@ -70,6 +87,7 @@ impl Connection {
             stream: self.subscribe_typed(E::METHOD, None),
             session_id: None,
             closed: None,
+            _attachment: None,
             marker: PhantomData,
         }
     }
@@ -144,6 +162,7 @@ impl Session {
                 .subscribe_typed(E::METHOD, Some(self.id.0.clone())),
             session_id: Some(self.id.0.clone()),
             closed: Some(self.closed.clone()),
+            _attachment: Some(self.attachment.clone()),
             marker: PhantomData,
         }
     }
@@ -162,29 +181,7 @@ impl Session {
         let session = self.clone();
         self.connection
             .runtime()
-            .spawn(async move {
-                let _gate = session.detach.lock().await;
-                if session.is_closed() {
-                    return Ok(());
-                }
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    session.connection.execute_session(
-                        "Target.detachFromTarget",
-                        json!({"sessionId":session.id}),
-                        session.parent.clone(),
-                    ),
-                )
-                .await
-                .unwrap_or_else(|_| Err(Error::Timeout("Target.detachFromTarget".into())));
-                if matches!(&result, Err(Error::Timeout(_))) {
-                    if session.is_closed() {
-                        return Ok(());
-                    }
-                    session.connection.close().await;
-                }
-                result.map(|_| ())
-            })
+            .spawn(async move { session.attachment.detach(session.connection.clone()).await })
             .await?
     }
 }
@@ -193,6 +190,7 @@ pub struct TypedEvents<E> {
     stream: EventStream,
     session_id: Option<String>,
     closed: Option<watch::Receiver<bool>>,
+    _attachment: Option<std::sync::Arc<Attachment>>,
     marker: PhantomData<E>,
 }
 

@@ -1,4 +1,4 @@
-use crate::{Error, Result, error::ProtocolError, protocol::Command};
+use crate::{Error, Result, error::ProtocolError, protocol::Command, session::Attachment};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -56,6 +56,8 @@ struct SessionEntry {
     auth_owner: Arc<std::sync::atomic::AtomicBool>,
     domains: Arc<[tokio::sync::Mutex<usize>; 2]>,
     detach: Arc<tokio::sync::Mutex<()>>,
+    attachment: Weak<Attachment>,
+    attachment_owned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 type EventKey = (Option<String>, String);
@@ -63,11 +65,10 @@ type Subscriptions = Arc<Mutex<HashMap<EventKey, Vec<Weak<broadcast::Sender<RawE
 
 pub(crate) struct SessionState {
     pub(crate) closed: watch::Receiver<bool>,
-    pub(crate) parent: Option<String>,
     pub(crate) target_id: Option<String>,
     pub(crate) auth_owner: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) domains: Arc<[tokio::sync::Mutex<usize>; 2]>,
-    pub(crate) detach: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) attachment: Arc<Attachment>,
 }
 
 type SessionRegistry = Arc<Mutex<HashMap<String, SessionEntry>>>;
@@ -86,6 +87,8 @@ fn register_session(
         auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         domains: Arc::default(),
         detach: Arc::default(),
+        attachment: Weak::new(),
+        attachment_owned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     // The first known identity is authoritative, even if a later report conflicts.
     if entry.target_id.is_none() {
@@ -375,21 +378,53 @@ impl Connection {
         self.execute_session(method, params, None).await
     }
 
-    pub(crate) fn session_state(&self, id: &str) -> Result<SessionState> {
+    fn session_closed(&self, id: &str) -> Result<watch::Receiver<bool>> {
         self.0
             .sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(id)
-            .map(|entry| SessionState {
-                closed: entry.closed.subscribe(),
-                parent: entry.parent.clone(),
-                target_id: entry.target_id.clone(),
-                auth_owner: entry.auth_owner.clone(),
-                domains: entry.domains.clone(),
-                detach: entry.detach.clone(),
-            })
+            .map(|entry| entry.closed.subscribe())
             .ok_or_else(|| Error::SessionClosed(id.into()))
+    }
+
+    pub(crate) fn session_state(&self, id: &str) -> Result<SessionState> {
+        let mut sessions = self.0.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = sessions
+            .get_mut(id)
+            .ok_or_else(|| Error::SessionClosed(id.into()))?;
+        if self.is_closed() || *entry.closed.borrow() {
+            return Err(Error::SessionClosed(id.into()));
+        }
+        let attachment = if let Some(attachment) = entry.attachment.upgrade() {
+            attachment
+        } else {
+            // An owned lease whose last handle was dropped must not be resurrected
+            // while its asynchronous detach is pending (or after cleanup failed).
+            if entry
+                .attachment_owned
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(Error::SessionClosed(id.into()));
+            }
+            let attachment = Arc::new(Attachment::new(
+                self.clone(),
+                id.into(),
+                entry.parent.clone(),
+                entry.closed.subscribe(),
+                entry.detach.clone(),
+                entry.attachment_owned.clone(),
+            ));
+            entry.attachment = Arc::downgrade(&attachment);
+            attachment
+        };
+        Ok(SessionState {
+            closed: entry.closed.subscribe(),
+            target_id: entry.target_id.clone(),
+            auth_owner: entry.auth_owner.clone(),
+            domains: entry.domains.clone(),
+            attachment,
+        })
     }
 
     pub(crate) async fn execute_session(
@@ -408,7 +443,7 @@ impl Connection {
         }
         let mut session_closed = session_id
             .as_deref()
-            .map(|id| self.session_state(id).map(|state| state.closed))
+            .map(|id| self.session_closed(id))
             .transpose()?;
         #[cfg(feature = "tracing")]
         let mut diagnostic = crate::diagnostics::Command::new(method);
