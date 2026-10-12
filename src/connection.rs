@@ -3,7 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::poll_fn,
     sync::{Arc, Mutex, Weak},
     time::Duration,
@@ -395,40 +395,61 @@ impl Connection {
 
     pub(crate) fn session_state(&self, id: &str) -> Result<SessionState> {
         let mut sessions = self.0.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = sessions
-            .get_mut(id)
-            .ok_or_else(|| Error::SessionClosed(id.into()))?;
-        if self.is_closed() || *entry.closed.borrow() {
+        if self.is_closed() {
             return Err(Error::SessionClosed(id.into()));
         }
-        let attachment = if let Some(attachment) = entry.attachment.upgrade() {
-            attachment
-        } else {
-            // An owned lease whose last handle was dropped must not be resurrected
-            // while its asynchronous detach is pending (or after cleanup failed).
-            if entry
-                .attachment_owned
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                return Err(Error::SessionClosed(id.into()));
+        // Validate the entire route before publishing any leases. Keep upgraded
+        // ancestors alive so validation and construction use the same ownership.
+        let mut chain = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = Some(id.to_owned());
+        while let Some(id) = current {
+            if !visited.insert(id.clone()) {
+                return Err(Error::InvalidArgument(format!(
+                    "cyclic session ancestry at {id}"
+                )));
             }
-            let attachment = Arc::new(Attachment::new(
-                self.clone(),
-                id.into(),
-                entry.parent.clone(),
-                entry.closed.subscribe(),
-                entry.detach.clone(),
-                entry.attachment_owned.clone(),
-            ));
-            entry.attachment = Arc::downgrade(&attachment);
-            attachment
-        };
+            let entry = sessions
+                .get(&id)
+                .ok_or_else(|| Error::SessionClosed(id.clone()))?;
+            let attachment = entry.attachment.upgrade();
+            if *entry.closed.borrow()
+                || (attachment.is_none()
+                    && entry
+                        .attachment_owned
+                        .load(std::sync::atomic::Ordering::Acquire))
+            {
+                return Err(Error::SessionClosed(id));
+            }
+            current = entry.parent.clone();
+            chain.push((id, attachment));
+        }
+        let mut parent_attachment = None;
+        for (id, existing) in chain.into_iter().rev() {
+            let attachment = if let Some(attachment) = existing {
+                attachment
+            } else {
+                let entry = sessions.get_mut(&id).expect("validated session ancestry");
+                let attachment = Arc::new(Attachment::new(
+                    self.clone(),
+                    id,
+                    entry.closed.subscribe(),
+                    entry.detach.clone(),
+                    entry.attachment_owned.clone(),
+                    parent_attachment.take(),
+                ));
+                entry.attachment = Arc::downgrade(&attachment);
+                attachment
+            };
+            parent_attachment = Some(attachment);
+        }
+        let entry = sessions.get(id).expect("validated session");
         Ok(SessionState {
             closed: entry.closed.subscribe(),
             target_id: entry.target_id.clone(),
             auth_owner: entry.auth_owner.clone(),
             domains: entry.domains.clone(),
-            attachment,
+            attachment: parent_attachment.expect("session ancestry includes requested session"),
         })
     }
 
@@ -543,9 +564,13 @@ impl Connection {
         }
     }
 
+    pub(crate) fn signal_shutdown(&self) {
+        self.0.shutdown.send_replace(true);
+    }
+
     /// Disconnect and await transport teardown. A canceled wait can be resumed.
     pub async fn close(&self) {
-        self.0.shutdown.send_replace(true);
+        self.signal_shutdown();
         let mut task = self.0.task.lock().await;
         if let Some(pending) = &mut *task {
             let _ = pending.await;

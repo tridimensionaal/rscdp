@@ -286,6 +286,14 @@ not acquire cleanup ownership unless it shares a high-level attachment; otherwis
 the caller must detach explicitly. An expired owned attachment cannot be wrapped
 again while cleanup runs or after it fails.
 
+Nested protocol sessions retain their ancestor attachments, including while only
+a child session listener remains. Child detach cleanup keeps its parent routing
+attachment alive until the attempt finishes. Wrapping a child does not make its
+raw/auto-attached parent automatically detach on Drop. If a high-level parent
+attach completes later, the child shares its ownership. Wrapping rejects missing,
+closed, cyclic, or expired owned ancestry. Explicit parent detach still closes
+its descendants. These references retain protocol attachments, not browser contexts.
+
 High-level attach acquisition continues after caller cancellation or timeout.
 An unclaimed session is detached when its reply arrives. The handle's command
 timeout limits the caller's wait; acquisition has an independent 30-second limit,

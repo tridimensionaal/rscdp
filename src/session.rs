@@ -17,6 +17,8 @@ pub(crate) use attachment::Attachment;
 ///
 /// Sessions returned by [`Connection::attach`] share attachment ownership with
 /// their clones, wrappers for the same ID, and session-scoped event listeners.
+/// Descendant sessions and their listeners retain ancestor attachments, but an
+/// explicit ancestor detach still closes those descendants.
 /// Dropping the last owner schedules best-effort detachment on the connection's
 /// runtime. Protocol errors during Drop cleanup are ignored; an uncertain timeout
 /// closes the connection. Use [`Session::detach`] to observe the cleanup result.
@@ -85,6 +87,8 @@ impl Connection {
     /// ownership: the caller must explicitly detach it. Wrappers of a session
     /// owned by [`Connection::attach`] share that ownership, including wrappers
     /// created from an event before the high-level attach completes.
+    /// The wrapper retains its protocol ancestor attachments; explicitly detaching
+    /// an ancestor still closes the wrapper and other descendants.
     /// Closed sessions and expired owned attachments cannot be wrapped again.
     ///
     /// The supplied target must match the session's known target identity.
