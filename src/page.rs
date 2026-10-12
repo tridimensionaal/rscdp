@@ -204,7 +204,7 @@ impl Page {
                         .await
                         .unwrap_or_else(|_| Err(Error::Timeout("reading document HTML".into())));
                 if result.as_ref().is_err_and(dom_timeout) {
-                    page.recover_dom_transaction().await;
+                    page.recover_session().await;
                 }
                 drop(gate);
                 result
@@ -223,9 +223,9 @@ impl Page {
         }
     }
 
-    // Called while holding the DOM gate: no subsequent transaction may run on
-    // this session until uncertain commands and cleanup have been invalidated.
-    async fn recover_dom_transaction(&self) {
+    // Resolve uncertain resource ownership. DOM transactions retain their gate
+    // until this completes; other acquisitions retain their Page owner.
+    async fn recover_session(&self) {
         if self.session.is_closed() {
             return;
         }

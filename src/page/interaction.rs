@@ -1,7 +1,11 @@
 use super::{Page, dom_timeout};
 use crate::{
     Error, Result, Session,
-    cdp::{dom::Node, runtime::RemoteObjectId},
+    cdp::{
+        dom::Node,
+        page::FrameId,
+        runtime::{RemoteObject, RemoteObjectId},
+    },
     error::with_cleanup,
 };
 use serde_json::{Value, json};
@@ -189,31 +193,54 @@ impl Page {
     /// identity, so their origin and freshness are the caller's responsibility.
     /// Before returning, this verifies that the resolved object belongs to the
     /// isolated world's unique execution context.
-    /// Validation is capped at 30 seconds, preserving a shorter command timeout.
+    /// Acquisition, including context setup and validation, has an owned 30-second
+    /// limit; the handle deadline separately limits the caller's wait. Validation
+    /// and release preserve a shorter handle deadline. Unknown acquisition outcomes
+    /// detach the session, falling back to connection closure. Validation timeout
+    /// with an owned node only schedules best-effort release: late exception handles
+    /// whose IDs were not received cannot be individually released.
     pub async fn resolve_node(&self, node: &Node) -> Result<Element> {
+        let timeout = self.session.connection().command_timeout();
         let page = self.clone();
         let backend_id = node.backend_node_id.clone();
-        self.session
-            .connection()
-            .runtime()
-            .spawn(async move {
-                let context = page.isolated_context().await?;
-                let response = page
+        let task = self.session.connection().runtime().spawn(async move {
+            let commands = page.clone().with_command_timeout(None);
+            let mut unknown_resource = false;
+            let result = tokio::time::timeout(Duration::from_secs(30), async {
+                let context = commands.isolated_context().await?;
+                unknown_resource = true;
+                let response = match commands
                     .session
                     .execute_raw(
                         "DOM.resolveNode",
-                        json!({"backendNodeId":backend_id,"executionContextId":context.numeric}),
+                        json!({
+                            "backendNodeId": backend_id,
+                            "executionContextId": context.numeric,
+                        }),
                     )
-                    .await?;
-                let id: RemoteObjectId =
-                    serde_json::from_value(response["object"]["objectId"].clone())?;
-                // Own the remote reference before any further await so every
-                // failure (including an abandoned owner) schedules its release.
-                let element =
-                    Element::from_object_id(page.session.clone(), id, page.context_lease.clone());
-                let validation = tokio::time::timeout(
-                    Duration::from_secs(30),
-                    page.session.execute_raw(
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error @ Error::Protocol(_)) => {
+                        unknown_resource = false;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                };
+                let mut objects = Vec::new();
+                unknown_resource =
+                    !page.own_response_objects(&response, "object", false, &mut objects);
+                if let Some(error) = response.get("exceptionDetails") {
+                    return Err(Error::JavaScript(error.clone()));
+                }
+                let element = node_result(&response["object"], &objects)?.ok_or_else(|| {
+                    Error::InvalidArgument("DOM.resolveNode returned null".into())
+                })?;
+                // The node is now owned. Validation uses the original shorter
+                // command deadline; owner expiry releases it without detachment.
+                let validation = page
+                    .session
+                    .execute_raw(
                         "Runtime.callFunctionOn",
                         json!({
                             "uniqueContextId": context.unique,
@@ -222,17 +249,23 @@ impl Page {
                             "returnByValue": true,
                             "silent": true,
                         }),
-                    ),
-                )
-                .await
-                .map_err(|_| {
-                    Error::Timeout("validating resolved node execution context".into())
-                })??;
+                    )
+                    .await?;
+                // By-value results need no handle. Still own any IDs actually
+                // received, deduplicating against the provisional node as well.
+                unknown_resource =
+                    !page.own_response_objects(&validation, "result", true, &mut objects);
                 if let Some(error) = validation.get("exceptionDetails") {
                     return Err(Error::JavaScript(error.clone()));
                 }
+                if unknown_resource {
+                    return Err(Error::InvalidArgument(
+                        "invalid remote object ID in node validation".into(),
+                    ));
+                }
                 if validation["result"]["type"].as_str() != Some("boolean")
                     || validation["result"]["value"].as_bool() != Some(true)
+                    || validation["result"].get("objectId").is_some()
                 {
                     return Err(Error::InvalidArgument(
                         "unexpected resolved node context validation result".into(),
@@ -240,10 +273,28 @@ impl Page {
                 }
                 Ok(element)
             })
-            .await?
+            .await
+            .unwrap_or_else(|_| Err(Error::Timeout("resolving DOM node".into())));
+            if unknown_resource {
+                page.recover_session().await;
+            }
+            drop(page);
+            result
+        });
+        if let Some(timeout) = timeout {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("waiting for resolved DOM node".into()))??
+        } else {
+            task.await?
+        }
     }
 
     /// Find the first matching CSS element. Invalid selectors return a JavaScript error.
+    /// Acquisition continues after caller cancellation under its own 30-second limit.
+    /// Uncertain object acquisition detaches the session or closes the connection.
+    /// Only a node or null is accepted; received exception object IDs are released
+    /// best-effort and remain diagnostic data, not live handles, in the error.
     pub async fn element_by_selector(&self, selector: &str) -> Result<Option<Element>> {
         let selector = serde_json::to_string(selector)?;
         self.element_for_expression(format!("document.querySelector({selector})"))
@@ -254,19 +305,116 @@ impl Page {
         &self,
         expression: String,
     ) -> Result<Option<Element>> {
-        let page = self.clone();
-        self.session
-            .connection()
-            .runtime()
-            .spawn(async move {
-                let result = page.evaluate_remote(&expression, false).await?;
-                Ok(result.object_id.map(|id| {
-                    Element::from_object_id(page.session.clone(), id, page.context_lease.clone())
-                }))
-            })
-            .await?
+        self.element_for_expression_in_frame(expression, None).await
     }
 
+    pub(super) async fn element_for_expression_in_frame(
+        &self,
+        expression: String,
+        frame: Option<FrameId>,
+    ) -> Result<Option<Element>> {
+        let timeout = self.session.connection().command_timeout();
+        let page = self.clone();
+        let task = self.session.connection().runtime().spawn(async move {
+            let commands = page.clone().with_command_timeout(None);
+            let mut unknown_resource = false;
+            let result = tokio::time::timeout(Duration::from_secs(30), async {
+                let context = match &frame {
+                    Some(frame) => commands.isolated_context_for(frame).await?,
+                    None => commands.isolated_context().await?,
+                };
+                unknown_resource = true;
+                let response = match commands
+                    .session
+                    .execute_raw(
+                        "Runtime.evaluate",
+                        json!({"expression":expression,"uniqueContextId":context.unique,
+                        "silent":true,"returnByValue":false,"awaitPromise":true}),
+                    )
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error @ Error::Protocol(_)) => {
+                        unknown_resource = false;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                };
+                let mut objects = Vec::new();
+                unknown_resource =
+                    !page.own_response_objects(&response, "result", false, &mut objects);
+                if let Some(error) = response.get("exceptionDetails") {
+                    return Err(Error::JavaScript(error.clone()));
+                }
+                node_result(&response["result"], &objects)
+            })
+            .await
+            .unwrap_or_else(|_| Err(Error::Timeout("acquiring selector element".into())));
+            if unknown_resource {
+                page.recover_session().await;
+            }
+            drop(page);
+            result
+        });
+        if let Some(timeout) = timeout {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("waiting for selector element".into()))??
+        } else {
+            task.await?
+        }
+    }
+
+    // Capture every usable ID before decoding other fields. Exception and result
+    // may refer to the same object, so share one release owner per distinct ID.
+    fn own_response_objects(
+        &self,
+        response: &Value,
+        result_key: &str,
+        result_by_value: bool,
+        objects: &mut Vec<Element>,
+    ) -> bool {
+        let result = &response[result_key];
+        let mut known = if result_by_value && result.get("objectId").is_none() {
+            true
+        } else {
+            self.own_remote_object(result, objects)
+        };
+        if let Some(details) = response.get("exceptionDetails") {
+            if let Some(exception) = details.get("exception") {
+                known &= self.own_remote_object(exception, objects);
+            } else if !details.is_object() {
+                known = false;
+            }
+        }
+        known
+    }
+
+    fn own_remote_object(&self, object: &Value, objects: &mut Vec<Element>) -> bool {
+        if let Some(id) = object.get("objectId") {
+            let Some(id) = id.as_str().filter(|id| !id.is_empty()) else {
+                return false;
+            };
+            if !objects.iter().any(|owned| owned.object_id().0 == id) {
+                objects.push(Element::from_object_id(
+                    self.session.clone(),
+                    RemoteObjectId(id.to_owned()),
+                    self.context_lease.clone(),
+                ));
+            }
+            return true;
+        }
+        // By-reference objects/functions/symbols require an ID. Only recognized
+        // primitives and null conclusively contain no remote reference.
+        serde_json::from_value::<RemoteObject>(object.clone()).is_ok()
+            && (matches!(
+                object["type"].as_str(),
+                Some("undefined" | "string" | "number" | "boolean" | "bigint")
+            ) || is_null_object(object))
+    }
+
+    /// Find the first XPath node, with the same ownership and deadline policy as
+    /// [`Self::element_by_selector`].
     pub async fn element_by_xpath(&self, xpath: &str) -> Result<Option<Element>> {
         let xpath = serde_json::to_string(xpath)?;
         self.element_for_expression(format!("document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue")).await
@@ -312,7 +460,7 @@ impl Page {
                 .await
                 .unwrap_or_else(|_| Err(Error::Timeout("searching DOM".into())));
                 if recovery_required || result.as_ref().is_err_and(dom_timeout) {
-                    page.recover_dom_transaction().await;
+                    page.recover_session().await;
                 }
                 drop(gate);
                 result
@@ -573,6 +721,31 @@ impl Page {
         self.evaluate_remote(&format!("(() => {{ const d = document.createElement('div'); Object.assign(d.style, {{position:'fixed',pointerEvents:'none',zIndex:2147483647,left:'{}px',top:'{}px',width:'{size}px',height:'{size}px',borderRadius:'50%',background:'red'}}); document.documentElement.appendChild(d); d.animate([{{opacity:1,transform:'scale(1)'}},{{opacity:0,transform:'scale(3)'}}],{{duration:{millis}}}); setTimeout(() => d.remove(), {millis}); }})()",x-size/2.0,y-size/2.0),true).await?;
         Ok(())
     }
+}
+
+fn is_null_object(object: &Value) -> bool {
+    object["type"] == "object"
+        && object["subtype"] == "null"
+        && object.get("objectId").is_none()
+        && object.get("value").is_none_or(Value::is_null)
+}
+
+fn node_result(object: &Value, objects: &[Element]) -> Result<Option<Element>> {
+    let _: RemoteObject = serde_json::from_value(object.clone())?;
+    if is_null_object(object) {
+        return Ok(None);
+    }
+    if object["type"] == "object"
+        && object["subtype"] == "node"
+        && let Some(element) = objects
+            .iter()
+            .find(|owned| object["objectId"].as_str() == Some(owned.object_id().0.as_str()))
+    {
+        return Ok(Some(element.clone()));
+    }
+    Err(Error::InvalidArgument(
+        "element acquisition did not return a node or null".into(),
+    ))
 }
 
 fn is_context_change(error: &Error) -> bool {

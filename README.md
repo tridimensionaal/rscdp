@@ -86,10 +86,12 @@ operation; recovery can create a fresh world without the previous world's global
 The public `create_isolated_world` returns a raw numeric ID that may be reused
 after navigation. `resolve_node` uses the numeric ID required by DOM resolution,
 then validates the returned object's membership in the isolated world's unique
-execution context before returning an Element. Validation is capped at 30 seconds
-and preserves a shorter command timeout; failure schedules a bounded release
-attempt. The raw Node must come from the same Page's target, and its originating
-document must not have been replaced. It carries no session or document identity,
+execution context before returning an Element. Validation is included in the
+acquisition owner's 30-second limit and preserves a shorter command timeout.
+A validation timeout with an already owned node schedules best-effort release,
+without detachment; late exception handles whose IDs were not received cannot
+be individually released. The raw Node must come from the same Page's target,
+and its originating document must not have been replaced. It carries no session or document identity,
 so its origin and freshness remain the caller's responsibility.
 
 `browser.new_context().await?` creates an isolated `BrowserContext`. Its `page()`
@@ -103,6 +105,20 @@ Page interaction includes `element_by_selector`, `wait_for_selector`,
 JavaScript clicks. Use `Page::insert_text` for Unicode text and `press_key` or
 `press_key_with_modifiers` for keyboard events.
 `WaitOptions` controls timeout, polling, count stability, and post-success delay.
+
+Page/Frame CSS and XPath element lookup and `resolve_node` retain the Page in an
+owned task for up to 30 seconds of acquisition work, including context setup and
+node validation. The handle's timeout separately limits the caller's wait;
+cancellation leaves the owner running. An unknown object acquisition outcome
+triggers a one-second detach attempt, then connection closure if needed. A timeout
+before the object request does not detach the session. Known objects retain the
+original handle deadline for bounded release. Selector lookup accepts only nodes
+or null; primitive and other object results are errors. Received result and
+exception object IDs are deduplicated and owned before decoding other fields.
+Exception IDs in these helpers' errors are diagnostic data, not live handles;
+their release is best-effort. Public `evaluate_remote` returns raw RemoteObject
+values; this element-helper cleanup policy does not apply to those values.
+
 `frame(index)` attaches to an out-of-process iframe owned by the current target;
 it does not select another tab's iframe. For same-process frames, use `main_frame`,
 `frames`, and `Frame::children`. Each `Frame` scopes evaluation and CSS/XPath lookup

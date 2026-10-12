@@ -115,33 +115,24 @@ impl Frame {
             .map_err(Into::into)
     }
 
+    /// Find a node in this frame with the owned acquisition and cleanup policy
+    /// of [`Page::element_by_selector`].
     pub async fn element_by_selector(&self, selector: &str) -> Result<Option<Element>> {
         let selector = serde_json::to_string(selector)?;
         self.element_for_expression(format!("document.querySelector({selector})"))
             .await
     }
 
+    /// Find an XPath node in this frame with the owned acquisition and cleanup
+    /// policy of [`Page::element_by_xpath`].
     pub async fn element_by_xpath(&self, xpath: &str) -> Result<Option<Element>> {
         let xpath = serde_json::to_string(xpath)?;
         self.element_for_expression(format!("document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue")).await
     }
 
     async fn element_for_expression(&self, expression: String) -> Result<Option<Element>> {
-        let frame = self.clone();
         self.page
-            .session
-            .connection()
-            .runtime()
-            .spawn(async move {
-                let result = frame.evaluate_remote(&expression, false).await?;
-                Ok(result.object_id.map(|id| {
-                    Element::from_object_id(
-                        frame.page.session.clone(),
-                        id,
-                        frame.page.context_lease.clone(),
-                    )
-                }))
-            })
-            .await?
+            .element_for_expression_in_frame(expression, Some(self.id.clone()))
+            .await
     }
 }
