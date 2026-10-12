@@ -277,6 +277,11 @@ impl Page {
     /// Acquire an `enable_dom()` guard before searching and retain it while using
     /// the returned frontend node IDs.
     /// `resolve_node()` uses backend IDs and does not require that extra guard.
+    ///
+    /// Once a search ID is known, cleanup makes one owned discard attempt capped
+    /// at 30 seconds, preserving a shorter command timeout. Normal completion
+    /// awaits cleanup and reports failures; Drop schedules the same attempt
+    /// best-effort, without retrying a failed explicit cleanup.
     pub async fn search_dom(&self, query: &str, include_shadow_dom: bool) -> Result<Vec<Node>> {
         let page = self.clone();
         let query = query.to_owned();
@@ -306,12 +311,18 @@ impl Page {
             )
             .await?;
         let search_id: String = serde_json::from_value(search["searchId"].clone())?;
-        let count: i64 = serde_json::from_value(search["resultCount"].clone())?;
         let guard = Search {
             session: self.session.clone(),
             id: Some(search_id.clone()),
+            context_lease: self.context_lease.clone(),
         };
         let result = async {
+            let count: i64 = serde_json::from_value(search["resultCount"].clone())?;
+            if count < 0 {
+                return Err(Error::InvalidArgument(
+                    "search result count must be nonnegative".into(),
+                ));
+            }
             let mut nodes = Vec::new();
             if count > 0 {
                 let response = self
@@ -538,27 +549,36 @@ fn is_context_change(error: &Error) -> bool {
 struct Search {
     session: Session,
     id: Option<String>,
+    context_lease: Option<Arc<crate::browser::ContextLease>>,
 }
 impl Search {
     async fn close(mut self) -> Result<()> {
-        if let Some(id) = &self.id {
-            self.session
-                .execute_raw("DOM.discardSearchResults", json!({"searchId":id}))
-                .await?;
+        if let Some(task) = self.discard() {
+            task.await?
+        } else {
+            Ok(())
         }
-        self.id = None;
-        Ok(())
+    }
+
+    fn discard(&mut self) -> Option<tokio::task::JoinHandle<Result<()>>> {
+        let id = self.id.take()?;
+        let session = self.session.clone();
+        let context_lease = self.context_lease.take();
+        Some(self.session.connection().runtime().spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                session.execute_raw("DOM.discardSearchResults", json!({"searchId":id})),
+            )
+            .await
+            .unwrap_or_else(|_| Err(Error::Timeout("DOM.discardSearchResults".into())))
+            .map(|_| ());
+            drop(context_lease);
+            result
+        }))
     }
 }
 impl Drop for Search {
     fn drop(&mut self) {
-        if let Some(id) = self.id.take() {
-            let session = self.session.clone();
-            self.session.connection().runtime().spawn(async move {
-                let _ = session
-                    .execute_raw("DOM.discardSearchResults", json!({"searchId":id}))
-                    .await;
-            });
-        }
+        drop(self.discard());
     }
 }
