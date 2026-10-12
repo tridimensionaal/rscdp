@@ -104,9 +104,9 @@ impl Frame {
         expression: &str,
         return_by_value: bool,
     ) -> Result<RemoteObject> {
-        let context = self.page.unique_context_for(&self.id).await?;
+        let context = self.page.isolated_context_for(&self.id).await?;
         self.page
-            .evaluate_with_context(context, expression, return_by_value)
+            .evaluate_with_context(context.unique, expression, return_by_value)
             .await
     }
 

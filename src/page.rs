@@ -167,15 +167,8 @@ impl Page {
         expression: &str,
         return_by_value: bool,
     ) -> Result<RemoteObject> {
-        let frame = self
-            .session
-            .execute(&GetFrameTree::default())
-            .await?
-            .frame_tree
-            .frame
-            .id;
-        let context = self.unique_context_for(&frame).await?;
-        self.evaluate_with_context(context, expression, return_by_value)
+        let context = self.isolated_context().await?;
+        self.evaluate_with_context(context.unique, expression, return_by_value)
             .await
     }
 

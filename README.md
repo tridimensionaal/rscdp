@@ -84,8 +84,13 @@ Canceling that wait does not abandon setup. Evaluations reuse their isolated
 world within a document. Lost or inconsistent context events fail the current
 operation; recovery can create a fresh world without the previous world's globals.
 The public `create_isolated_world` returns a raw numeric ID that may be reused
-after navigation. `resolve_node` uses a numeric context ID; it does not have the
-unique-context guarantee.
+after navigation. `resolve_node` uses the numeric ID required by DOM resolution,
+then validates the returned object's membership in the isolated world's unique
+execution context before returning an Element. Validation is capped at 30 seconds
+and preserves a shorter command timeout; failure schedules a bounded release
+attempt. The raw Node must come from the same Page's target, and its originating
+document must not have been replaced. It carries no session or document identity,
+so its origin and freshness remain the caller's responsibility.
 
 `browser.new_context().await?` creates an isolated `BrowserContext`. Its `page()`
 exposes the same API. `cookies` and `set_cookies` operate in that context. A context

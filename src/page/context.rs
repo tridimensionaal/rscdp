@@ -1,7 +1,7 @@
 use super::Page;
 use crate::{
     Error, Result, Session,
-    cdp::page::FrameId,
+    cdp::page::{FrameId, commands::GetFrameTree},
     connection::{EventStream, RawEvent},
 };
 use serde_json::json;
@@ -35,15 +35,15 @@ struct State {
 
 struct World {
     generation: u64,
-    candidate: Option<Identity>,
+    candidate: Option<ContextIdentity>,
     ready: bool,
     conflicted: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct Identity {
-    numeric: i64,
-    unique: String,
+pub(super) struct ContextIdentity {
+    pub(super) numeric: i64,
+    pub(super) unique: String,
 }
 
 fn subscribe(session: &Session) -> EventStream {
@@ -69,15 +69,26 @@ impl Worlds {
 }
 
 impl Page {
-    pub(super) async fn unique_context_for(&self, frame: &FrameId) -> Result<String> {
+    pub(super) async fn isolated_context(&self) -> Result<ContextIdentity> {
+        let frame = self
+            .session
+            .execute(&GetFrameTree::default())
+            .await?
+            .frame_tree
+            .frame
+            .id;
+        self.isolated_context_for(&frame).await
+    }
+
+    pub(super) async fn isolated_context_for(&self, frame: &FrameId) -> Result<ContextIdentity> {
         let caller_timeout = self.session.connection().command_timeout();
         let acquire = async {
             let mut state = tokio::select! {
                 state = self.worlds.0.clone().lock_owned() => state,
                 () = self.session.closed() => return Err(Error::SessionClosed(self.session.id().0.clone())),
             };
-            if let Some(unique) = state.prepare(&self.session, &frame.0)? {
-                return Ok(unique);
+            if let Some(identity) = state.prepare(&self.session, &frame.0)? {
+                return Ok(identity);
             }
             let generation = state.frames[&frame.0].generation;
             let page = self.clone();
@@ -150,7 +161,7 @@ impl State {
                 }
                 let frame = frame.to_owned();
                 let identity = match (context["id"].as_i64(), context["uniqueId"].as_str()) {
-                    (Some(numeric), Some(unique)) if !unique.is_empty() => Identity {
+                    (Some(numeric), Some(unique)) if !unique.is_empty() => ContextIdentity {
                         numeric,
                         unique: unique.into(),
                     },
@@ -219,7 +230,7 @@ impl State {
         }
     }
 
-    fn prepare(&mut self, session: &Session, frame: &str) -> Result<Option<String>> {
+    fn prepare(&mut self, session: &Session, frame: &str) -> Result<Option<ContextIdentity>> {
         self.ensure_namespace(session)?;
         self.drain(session)?;
         if !self.frames.contains_key(frame) {
@@ -244,7 +255,6 @@ impl State {
                     .candidate
                     .as_ref()
                     .expect("ready world identity")
-                    .unique
                     .clone(),
             ));
         }
@@ -265,7 +275,12 @@ impl State {
         Ok(())
     }
 
-    async fn resolve(&mut self, session: &Session, frame: &str, generation: u64) -> Result<String> {
+    async fn resolve(
+        &mut self,
+        session: &Session,
+        frame: &str,
+        generation: u64,
+    ) -> Result<ContextIdentity> {
         self.drain(session)?;
         self.check_generation(frame, generation)?;
         // Names survive normal navigation: Chrome retains named worlds per frame.
@@ -308,7 +323,7 @@ impl State {
                     return Err(invalid_context());
                 }
                 world.ready = true;
-                return Ok(identity.unique.clone());
+                return Ok(identity.clone());
             }
             let event = self
                 .events

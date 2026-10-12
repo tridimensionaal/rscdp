@@ -183,6 +183,13 @@ pub(super) async fn dispatch_pair(
 
 impl Page {
     /// Resolve a CDP DOM node into an owned element for geometry and clicking.
+    ///
+    /// The node must come from this Page's target, and its originating document
+    /// must not have been replaced. Raw CDP nodes carry no session or document
+    /// identity, so their origin and freshness are the caller's responsibility.
+    /// Before returning, this verifies that the resolved object belongs to the
+    /// isolated world's unique execution context.
+    /// Validation is capped at 30 seconds, preserving a shorter command timeout.
     pub async fn resolve_node(&self, node: &Node) -> Result<Element> {
         let page = self.clone();
         let backend_id = node.backend_node_id.clone();
@@ -190,21 +197,48 @@ impl Page {
             .connection()
             .runtime()
             .spawn(async move {
-                let context = page.create_isolated_world().await?;
+                let context = page.isolated_context().await?;
                 let response = page
                     .session
                     .execute_raw(
                         "DOM.resolveNode",
-                        json!({"backendNodeId":backend_id,"executionContextId":context}),
+                        json!({"backendNodeId":backend_id,"executionContextId":context.numeric}),
                     )
                     .await?;
                 let id: RemoteObjectId =
                     serde_json::from_value(response["object"]["objectId"].clone())?;
-                Ok(Element::from_object_id(
-                    page.session.clone(),
-                    id,
-                    page.context_lease.clone(),
-                ))
+                // Own the remote reference before any further await so every
+                // failure (including an abandoned owner) schedules its release.
+                let element =
+                    Element::from_object_id(page.session.clone(), id, page.context_lease.clone());
+                let validation = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    page.session.execute_raw(
+                        "Runtime.callFunctionOn",
+                        json!({
+                            "uniqueContextId": context.unique,
+                            "arguments": [{"objectId": element.object_id()}],
+                            "functionDeclaration": "function(node) { return true; }",
+                            "returnByValue": true,
+                            "silent": true,
+                        }),
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    Error::Timeout("validating resolved node execution context".into())
+                })??;
+                if let Some(error) = validation.get("exceptionDetails") {
+                    return Err(Error::JavaScript(error.clone()));
+                }
+                if validation["result"]["type"].as_str() != Some("boolean")
+                    || validation["result"]["value"].as_bool() != Some(true)
+                {
+                    return Err(Error::InvalidArgument(
+                        "unexpected resolved node context validation result".into(),
+                    ));
+                }
+                Ok(element)
             })
             .await?
     }
