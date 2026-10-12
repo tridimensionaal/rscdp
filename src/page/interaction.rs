@@ -334,20 +334,7 @@ impl Page {
                     Ok(value) => value.as_u64().ok_or_else(|| {
                         Error::InvalidArgument("selector count is not an integer".into())
                     })?,
-                    Err(Error::Protocol(error))
-                        if error.code == -32000
-                            && [
-                                "execution context was destroyed",
-                                "cannot find context",
-                                "no frame for given id",
-                                "frame with the given id was not found",
-                                "inspected target navigated",
-                            ]
-                            .iter()
-                            .any(|message| {
-                                error.message.to_ascii_lowercase().contains(message)
-                            }) =>
-                    {
+                    Err(error) if is_context_change(&error) => {
                         previous = 0;
                         stable = Instant::now();
                         tokio::time::sleep(options.polling_interval).await;
@@ -489,6 +476,28 @@ impl Page {
         let millis = duration.as_millis();
         self.evaluate_remote(&format!("(() => {{ const d = document.createElement('div'); Object.assign(d.style, {{position:'fixed',pointerEvents:'none',zIndex:2147483647,left:'{}px',top:'{}px',width:'{size}px',height:'{size}px',borderRadius:'50%',background:'red'}}); document.documentElement.appendChild(d); d.animate([{{opacity:1,transform:'scale(1)'}},{{opacity:0,transform:'scale(3)'}}],{{duration:{millis}}}); setTimeout(() => d.remove(), {millis}); }})()",x-size/2.0,y-size/2.0),true).await?;
         Ok(())
+    }
+}
+
+fn is_context_change(error: &Error) -> bool {
+    match error {
+        Error::ExecutionContextChanged => true,
+        Error::Protocol(error) if error.code == -32602 => {
+            error.message == "uniqueContextId not found"
+        }
+        Error::Protocol(error) if error.code == -32000 => {
+            let message = error.message.to_ascii_lowercase();
+            [
+                "execution context was destroyed",
+                "cannot find context",
+                "no frame for given id",
+                "frame with the given id was not found",
+                "inspected target navigated",
+            ]
+            .iter()
+            .any(|known| message.contains(known))
+        }
+        _ => false,
     }
 }
 

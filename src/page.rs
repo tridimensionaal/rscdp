@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 mod capture;
+mod context;
 mod frame;
 mod input;
 pub use frame::Frame;
@@ -26,7 +27,8 @@ pub use interaction::{ClickMethod, Element, ElementPosition, WaitOptions};
 #[derive(Clone)]
 pub struct Page {
     session: Session,
-    _page_events: std::sync::Arc<crate::session::DomainGuard>,
+    _events: std::sync::Arc<[crate::session::DomainGuard; 2]>,
+    worlds: context::Worlds,
     context: Option<BrowserContextId>,
     pub(crate) context_lease: Option<std::sync::Arc<crate::browser::ContextLease>>,
 }
@@ -36,10 +38,13 @@ impl Page {
         session: Session,
         context: Option<BrowserContextId>,
     ) -> Result<Self> {
+        let worlds = context::Worlds::new(&session);
         let page_events = session.enable_page().await?;
+        let runtime_events = session.enable_runtime().await?;
         Ok(Self {
             session,
-            _page_events: std::sync::Arc::new(page_events),
+            _events: std::sync::Arc::new([page_events, runtime_events]),
+            worlds,
             context,
             context_lease: None,
         })
@@ -52,10 +57,12 @@ impl Page {
         session: Session,
         context: BrowserContextId,
     ) -> Result<Self> {
-        let page_events = session.enable_page_in_context().await?;
+        let worlds = context::Worlds::new(&session);
+        let events = session.enable_page_runtime_in_context().await?;
         Ok(Self {
             session,
-            _page_events: std::sync::Arc::new(page_events),
+            _events: std::sync::Arc::new(events),
+            worlds,
             context: Some(context),
             context_lease: None,
         })
@@ -122,6 +129,8 @@ impl Page {
         ))
     }
 
+    /// Return a raw numeric context ID, which Chrome may reuse after navigation.
+    /// Prefer `evaluate` for evaluation protected against context-ID reuse.
     pub async fn create_isolated_world(&self) -> Result<ExecutionContextId> {
         let frame = self
             .session
@@ -147,7 +156,8 @@ impl Page {
         serde_json::from_value(response["executionContextId"].clone()).map_err(Into::into)
     }
 
-    /// Evaluate in a fresh/current isolated world; JavaScript exceptions are errors.
+    /// Evaluate in the current isolated world using its unique context identity.
+    /// Navigation races fail without retrying the expression; JavaScript exceptions are errors.
     pub async fn evaluate(&self, expression: &str) -> Result<Value> {
         json_value(self.evaluate_remote(expression, true).await?)
     }
@@ -157,18 +167,25 @@ impl Page {
         expression: &str,
         return_by_value: bool,
     ) -> Result<RemoteObject> {
-        let context = self.create_isolated_world().await?;
+        let frame = self
+            .session
+            .execute(&GetFrameTree::default())
+            .await?
+            .frame_tree
+            .frame
+            .id;
+        let context = self.unique_context_for(&frame).await?;
         self.evaluate_with_context(context, expression, return_by_value)
             .await
     }
 
     async fn evaluate_with_context(
         &self,
-        context: ExecutionContextId,
+        context: String,
         expression: &str,
         return_by_value: bool,
     ) -> Result<RemoteObject> {
-        let response = self.session.execute_raw("Runtime.evaluate", json!({"expression":expression,"contextId":context,"silent":true,"returnByValue":return_by_value,"awaitPromise":true})).await?;
+        let response = self.session.execute_raw("Runtime.evaluate", json!({"expression":expression,"uniqueContextId":context,"silent":true,"returnByValue":return_by_value,"awaitPromise":true})).await?;
         if let Some(error) = response.get("exceptionDetails") {
             return Err(Error::JavaScript(error.clone()));
         }

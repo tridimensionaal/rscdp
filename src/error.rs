@@ -31,6 +31,9 @@ pub enum Error {
     Timeout(String),
     #[error("event listener lost {0} events")]
     Lagged(u64),
+    /// The context disappeared or changed while preparing an operation.
+    #[error("execution context changed during acquisition")]
+    ExecutionContextChanged,
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     #[error(transparent)]

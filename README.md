@@ -68,10 +68,24 @@ async fn read_page(page: &Page) -> Result<()> {
 The operation runs in a named function so `?` can return an error while `main`
 still awaits browser cleanup. If both fail, the operation error is returned.
 
-`evaluate` uses an isolated world and returns JSON. JavaScript exceptions become
+`evaluate` uses an isolated world and returns JSON. Page and Frame evaluation
+(including CSS/XPath lookup) addresses the world by its unique execution-context
+identity, so a reused numeric ID cannot redirect evaluation to another document.
+Navigation or lost context events can fail an operation; user expressions passed
+to Page/Frame evaluation are never automatically retried. Selector count polling
+retries recognized navigation/context-loss errors. JavaScript exceptions become
 errors. Use `evaluate_remote` for object IDs, `undefined`, BigInt, and non-finite
 numbers. `navigate` starts navigation; `navigate_and_wait` matches its loader's
 load event. `current_url` preserves fragments.
+
+A world cache miss retains the Page in an owned task capped at 30 seconds; the
+handle's command timeout bounds the caller's combined lock and setup wait.
+Canceling that wait does not abandon setup. Evaluations reuse their isolated
+world within a document. Lost or inconsistent context events fail the current
+operation; recovery can create a fresh world without the previous world's globals.
+The public `create_isolated_world` returns a raw numeric ID that may be reused
+after navigation. `resolve_node` uses a numeric context ID; it does not have the
+unique-context guarantee.
 
 `browser.new_context().await?` creates an isolated `BrowserContext`. Its `page()`
 exposes the same API. `cookies` and `set_cookies` operate in that context. A context
@@ -156,7 +170,8 @@ resolve the uncertain state.
 
 `Session::enable_dom()`, `enable_page()`, and `enable_runtime()` return shared,
 reference-counted `DomainGuard` values. The first guard enables the domain;
-closing the last disables it. A `Page` owns its Page-domain guard.
+closing the last disables it. A `Page` owns Page- and Runtime-domain guards and
+subscribes to context events before enabling those domains.
 Call `guard.close().await` to await release.
 Retain a Runtime guard while listening for Runtime events. Guards for the same
 session share counts across handles; raw enable/disable commands do not participate
