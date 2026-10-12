@@ -1,9 +1,6 @@
 //! Collect structured console events from a local order-dispatch simulation.
 mod common;
-use rustcdp::{
-    Error, Page, Result,
-    cdp::runtime::{commands::Enable, events::ConsoleApiCalled},
-};
+use rustcdp::{Error, Page, Result, cdp::runtime::events::ConsoleApiCalled};
 use std::time::Duration;
 
 const DISPATCH: &str = r#"<!doctype html><title>Dispatch console</title><h1>Order #1042</h1>
@@ -27,8 +24,8 @@ async fn main() -> Result<()> {
 }
 
 async fn watch_dispatch(page: &Page) -> Result<()> {
-    page.session().execute(&Enable::new()).await?;
     let mut events = page.session().listen::<ConsoleApiCalled>();
+    let runtime = page.session().enable_runtime().await?;
     page.navigate(&common::html_url(DISPATCH)).await?;
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -36,7 +33,7 @@ async fn watch_dispatch(page: &Page) -> Result<()> {
     )
     .await
     .map_err(|_| Error::Timeout("waiting for dispatch events".into()))??;
-    Ok(())
+    runtime.close().await
 }
 
 async fn collect_dispatch_events(

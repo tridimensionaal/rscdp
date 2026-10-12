@@ -29,7 +29,7 @@ pub struct Session {
     target: TargetId,
     closed: watch::Receiver<bool>,
     auth_owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    domains: std::sync::Arc<[tokio::sync::Mutex<usize>; 2]>,
+    domains: std::sync::Arc<[tokio::sync::Mutex<usize>; 3]>,
     attachment: std::sync::Arc<Attachment>,
 }
 

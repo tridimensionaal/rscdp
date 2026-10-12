@@ -154,9 +154,13 @@ timeout with a 30-second upper bound, even when ordinary timeouts are disabled.
 If it times out without confirmed session closure, the connection is closed to
 resolve the uncertain state.
 
-`Session::enable_dom()` and `enable_page()` return shared, reference-counted
-`DomainGuard` values. The first guard enables the domain; closing the last disables
-it. A `Page` owns its Page-domain guard. Call `guard.close().await` to await release.
+`Session::enable_dom()`, `enable_page()`, and `enable_runtime()` return shared,
+reference-counted `DomainGuard` values. The first guard enables the domain;
+closing the last disables it. A `Page` owns its Page-domain guard.
+Call `guard.close().await` to await release.
+Retain a Runtime guard while listening for Runtime events. Guards for the same
+session share counts across handles; raw enable/disable commands do not participate
+in that ownership.
 Domain transitions run on the owning connection runtime so cancellation or a short
 caller deadline cannot leave a half-completed enable operation.
 Each transition has a 30-second limit. If it stalls, the library detaches the

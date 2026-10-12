@@ -4,11 +4,16 @@ use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
-type Counts = Arc<[Mutex<usize>; 2]>;
+type Counts = Arc<[Mutex<usize>; 3]>;
+const METHODS: [(&str, &str); 3] = [
+    ("DOM.enable", "DOM.disable"),
+    ("Page.enable", "Page.disable"),
+    ("Runtime.enable", "Runtime.disable"),
+];
 const TRANSITION_TIMEOUT: Duration = Duration::from_secs(30);
 const DETACH_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Shared ownership of an enabled DOM or Page domain.
+/// Shared ownership of an enabled DOM, Page, or Runtime domain.
 /// Await `close` to confirm the final disable; Drop schedules the same cleanup.
 /// A transition that stalls for 30 seconds triggers session detachment; failed
 /// detachment closes the connection to resolve the uncertain domain state.
@@ -26,6 +31,13 @@ impl Session {
     }
     pub async fn enable_page(&self) -> Result<DomainGuard> {
         self.enable_domain(1).await
+    }
+    /// Enable Runtime events until the last shared guard is released.
+    ///
+    /// Subscribe before acquiring the guard to receive existing-context events
+    /// emitted during enablement. Keep the guard while using those subscriptions.
+    pub async fn enable_runtime(&self) -> Result<DomainGuard> {
+        self.enable_domain(2).await
     }
 
     /// Only for setup whose enclosing ContextLease owns all failure recovery.
@@ -74,12 +86,7 @@ impl Session {
                 // This async mutex deliberately serializes the enable/disable
                 // transition with reference-count updates across all session handles.
                 if *users == 0 {
-                    let method = if index == 0 {
-                        "DOM.enable"
-                    } else {
-                        "Page.enable"
-                    };
-                    transition(&session, method).await?;
+                    transition(&session, METHODS[index].0).await?;
                 }
                 *users += 1;
                 drop(users);
@@ -115,12 +122,7 @@ async fn release(session: Session, counts: Counts, index: usize) -> Result<()> {
     }
     *users -= 1;
     if *users == 0 && !session.is_closed() {
-        let method = if index == 0 {
-            "DOM.disable"
-        } else {
-            "Page.disable"
-        };
-        transition(&session, method).await?;
+        transition(&session, METHODS[index].1).await?;
     }
     Ok(())
 }
