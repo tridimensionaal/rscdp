@@ -363,6 +363,10 @@ impl Connection {
         self.0.requests.is_closed() || *self.0.shutdown.borrow() || self.0.closed.borrow().is_some()
     }
 
+    pub(crate) async fn receiver_closed(&self) {
+        self.0.requests.closed().await;
+    }
+
     pub(crate) fn runtime(&self) -> tokio::runtime::Handle {
         self.0.runtime.clone()
     }

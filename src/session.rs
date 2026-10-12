@@ -165,11 +165,18 @@ impl Session {
         Ok(ProxyAuthLease(self.auth_owner.clone()))
     }
 
+    /// Wait for this session or its connection to close, including when the
+    /// connection's runtime shuts down.
     pub async fn closed(&self) {
         let mut closed = self.closed.clone();
         while !*closed.borrow() && !self.connection.is_closed() {
-            if closed.changed().await.is_err() {
-                break;
+            tokio::select! {
+                result = closed.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                () = self.connection.receiver_closed() => break,
             }
         }
     }
