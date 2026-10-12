@@ -176,6 +176,16 @@ and a 100 MiB incoming-message limit. Commands default to a 30-second timeout.
 Use `with_command_timeout(Some(duration))` on a connection, session, or page to
 change its handle's deadline, or `None` to disable it.
 
+A recorded connection-actor failure is delivered as
+`Error::ConnectionFailed(Arc<Error>)`. Pending commands, admission waiters,
+listeners, and later commands share the original cause. Match `cause.as_ref()`
+to inspect its typed `Error` variant, or traverse `std::error::Error::source()`
+and downcast to the native JSON/WebSocket error; do not depend on a particular
+first source layer. Buffered events and already-available command responses are
+returned before terminal failure. Normal closure, or actor termination without
+a recorded cause, uses `ConnectionClosed`; detachment on a live connection uses
+`SessionClosed`.
+
 Register typed events synchronously before the action that triggers them:
 
 ```rust

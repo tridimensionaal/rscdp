@@ -20,6 +20,29 @@ pub(crate) use auth_events::{AuthEvent, AuthEventKind, AuthEvents};
 const CAPACITY: usize = 256;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+// None is running; a terminal value distinguishes normal close from failure.
+type CloseState = Option<std::result::Result<(), Arc<Error>>>;
+
+fn close_error(state: &CloseState) -> Error {
+    match state {
+        Some(Err(cause)) => Error::ConnectionFailed(cause.clone()),
+        Some(Ok(())) => Error::ConnectionClosed("socket closed".into()),
+        None => Error::ConnectionClosed("connection actor stopped".into()),
+    }
+}
+
+async fn wait_closed_state(closed: &mut watch::Receiver<CloseState>) -> Error {
+    loop {
+        let state = closed.borrow_and_update().clone();
+        if state.is_some() {
+            return close_error(&state);
+        }
+        if closed.changed().await.is_err() {
+            return close_error(&closed.borrow());
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawEvent {
@@ -41,7 +64,7 @@ struct Inner {
     requests: mpsc::Sender<Request>,
     events: broadcast::Sender<RawEvent>,
     shutdown: watch::Sender<bool>,
-    closed: watch::Receiver<Option<String>>,
+    closed: watch::Receiver<CloseState>,
     task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     permits: Semaphore,
     sessions: SessionRegistry,
@@ -202,6 +225,7 @@ impl Connection {
         let task = tokio::spawn(async move {
             let (mut sink, mut stream) = socket.split();
             let mut pending = HashMap::<u64, Request>::new();
+            let mut admitting = None;
             let mut id = 0u64;
             let mut outbound = None;
             let mut write_deadline = None;
@@ -237,12 +261,15 @@ impl Connection {
                                 Message::Text(text) => {
                                     let value: Value = serde_json::from_str(&text)?;
                                     if let Some(id) = value["id"].as_u64() {
-                                        if let Some(request) = pending.remove(&id) {
+                                        if pending.contains_key(&id) {
                                             let result = if value.get("error").is_some() {
                                                 Err(serde_json::from_value::<ProtocolError>(value["error"].clone())?.into())
                                             } else {
                                                 Ok(value.get("result").cloned().ok_or_else(|| Error::ConnectionClosed("response missing result".into()))?)
                                             };
+                                            // Keep the reply sender alive until decoding succeeds;
+                                            // terminal failures must publish their cause first.
+                                            let request = pending.remove(&id).expect("pending response");
                                             if matches!(request.method.as_str(), "Target.attachToTarget" | "Target.attachToBrowserTarget")
                                                 && !request.reply.is_closed()
                                                 && let Ok(result) = &result
@@ -301,7 +328,10 @@ impl Connection {
                                 let _ = request.reply.send(Err(Error::SessionClosed(id.clone())));
                                 continue;
                             }
+                            // Preserve this sender too if allocating the command ID fails.
+                            admitting = Some(request);
                             id = id.checked_add(1).ok_or_else(|| Error::ConnectionClosed("command ID space exhausted".into()))?;
+                            let request = admitting.take().expect("admitted request");
                             let mut message = json!({"id":id,"method":request.method,"params":request.params});
                             if let Some(session_id) = &request.session_id { message["sessionId"] = session_id.clone().into(); }
                             pending.insert(id, request);
@@ -315,10 +345,8 @@ impl Connection {
             }.await;
             #[cfg(feature = "tracing")]
             tracing::debug!(target: "rustcdp", failed = outcome.is_err(), pending = pending.len(), "connection stopped");
-            let reason = outcome
-                .err()
-                .map_or_else(|| "socket closed".into(), |e| e.to_string());
-            closed_sender.send_replace(Some(reason.clone()));
+            let terminal = Some(outcome.map_err(Arc::new));
+            closed_sender.send_replace(terminal.clone());
             for (_, state) in active_sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -327,10 +355,11 @@ impl Connection {
                 state.closed.send_replace(true);
             }
             incoming.close();
+            if let Some(request) = admitting {
+                let _ = request.reply.send(Err(close_error(&terminal)));
+            }
             for (_, request) in pending {
-                let _ = request
-                    .reply
-                    .send(Err(Error::ConnectionClosed(reason.clone())));
+                let _ = request.reply.send(Err(close_error(&terminal)));
             }
             // Never let a peer that ignores close hold up shutdown.
             let _ = tokio::time::timeout(Duration::from_secs(1), sink.close()).await;
@@ -366,6 +395,20 @@ impl Connection {
         self.0.requests.is_closed() || *self.0.shutdown.borrow() || self.0.closed.borrow().is_some()
     }
 
+    pub(crate) fn closed_error(&self) -> Option<Error> {
+        if self.is_closed() {
+            // Read the cause after observing closure, not from an earlier
+            // snapshot that could predate its publication.
+            Some(self.stopped_error())
+        } else {
+            None
+        }
+    }
+
+    fn stopped_error(&self) -> Error {
+        close_error(&self.0.closed.borrow())
+    }
+
     pub(crate) async fn receiver_closed(&self) {
         self.0.requests.closed().await;
     }
@@ -397,13 +440,16 @@ impl Connection {
             .unwrap_or_else(|e| e.into_inner())
             .get(id)
             .map(|entry| entry.closed.subscribe())
-            .ok_or_else(|| Error::SessionClosed(id.into()))
+            .ok_or_else(|| {
+                self.closed_error()
+                    .unwrap_or_else(|| Error::SessionClosed(id.into()))
+            })
     }
 
     pub(crate) fn session_state(&self, id: &str) -> Result<SessionState> {
         let mut sessions = self.0.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if self.is_closed() {
-            return Err(Error::SessionClosed(id.into()));
+        if let Some(error) = self.closed_error() {
+            return Err(error);
         }
         // Validate the entire route before publishing any leases. Keep upgraded
         // ancestors alive so validation and construction use the same ownership.
@@ -467,8 +513,8 @@ impl Connection {
         params: Value,
         session_id: Option<String>,
     ) -> Result<Value> {
-        if self.is_closed() {
-            return Err(Error::ConnectionClosed("connection is closed".into()));
+        if let Some(error) = self.closed_error() {
+            return Err(error);
         }
         if !params.is_object() {
             return Err(Error::InvalidArgument(
@@ -489,23 +535,23 @@ impl Connection {
                     .permits
                     .acquire()
                     .await
-                    .map_err(|_| Error::ConnectionClosed("connection is closed".into()))?;
+                    .map_err(|_| self.stopped_error())?;
                 let slot = self
                     .0
                     .requests
                     .reserve()
                     .await
-                    .map_err(|_| Error::ConnectionClosed("reader stopped".into()))?;
+                    .map_err(|_| self.stopped_error())?;
                 Ok::<_, Error>((permit, slot))
             };
             let (_permit, slot) = tokio::select! {
                 result = admission => result?,
-                _ = connection_closed.changed() => return Err(Error::ConnectionClosed("reader stopped".into())),
+                error = wait_closed_state(&mut connection_closed) => return Err(error),
                 _ = async {
                     if let Some(state) = &mut session_closed {
                         if !*state.borrow() { let _ = state.changed().await; }
                     } else { std::future::pending::<()>().await; }
-                } => return Err(Error::SessionClosed(session_id.clone().unwrap_or_default())),
+                } => return Err(self.closed_error().unwrap_or_else(|| Error::SessionClosed(session_id.clone().unwrap_or_default()))),
             };
             let (reply, response) = oneshot::channel();
             slot.send(Request {
@@ -514,9 +560,11 @@ impl Connection {
                 session_id,
                 reply,
             });
-            response
-                .await
-                .map_err(|_| Error::ConnectionClosed("reader stopped".into()))?
+            tokio::select! {
+                biased;
+                result = response => result.map_err(|_| self.stopped_error())?,
+                error = wait_closed_state(&mut connection_closed) => Err(error),
+            }
         };
         let result = if let Some(timeout) = self.1 {
             tokio::time::timeout(timeout, execute)
@@ -591,46 +639,41 @@ impl Connection {
 pub struct EventStream {
     _sender: Option<Arc<broadcast::Sender<RawEvent>>>,
     receiver: broadcast::Receiver<RawEvent>,
-    closed: watch::Receiver<Option<String>>,
+    closed: watch::Receiver<CloseState>,
 }
 
 impl EventStream {
     pub(crate) fn try_recv(&mut self) -> Result<Option<RawEvent>> {
+        // Snapshot terminal state before draining: publication follows the final
+        // event, so a known terminal state cannot hide an earlier queued event.
+        let state = self.closed.borrow().clone();
+        let stopped = self.closed.has_changed().is_err();
         match self.receiver.try_recv() {
             Ok(event) => Ok(Some(event)),
-            Err(broadcast::error::TryRecvError::Empty) => Ok(None),
-            Err(broadcast::error::TryRecvError::Lagged(count)) => Err(Error::Lagged(count)),
-            Err(broadcast::error::TryRecvError::Closed) => {
-                Err(Error::ConnectionClosed("reader stopped".into()))
+            Err(broadcast::error::TryRecvError::Empty) => {
+                if state.is_some() {
+                    Err(close_error(&state))
+                } else if stopped {
+                    Err(close_error(&self.closed.borrow()))
+                } else {
+                    Ok(None)
+                }
             }
+            Err(broadcast::error::TryRecvError::Lagged(count)) => Err(Error::Lagged(count)),
+            Err(broadcast::error::TryRecvError::Closed) => Err(close_error(&self.closed.borrow())),
         }
     }
+
     pub async fn recv(&mut self) -> Result<RawEvent> {
-        loop {
-            // Observe closure before draining, so no final event can race this check.
-            let reason = self.closed.borrow().clone();
-            match self.receiver.try_recv() {
-                Ok(event) => return Ok(event),
-                Err(broadcast::error::TryRecvError::Lagged(count)) => {
-                    return Err(Error::Lagged(count));
-                }
-                Err(broadcast::error::TryRecvError::Closed) => {
-                    return Err(Error::ConnectionClosed("reader stopped".into()));
-                }
-                Err(broadcast::error::TryRecvError::Empty) => {}
-            }
-            if let Some(reason) = reason {
-                return Err(Error::ConnectionClosed(reason));
-            }
-            tokio::select! {
-                result = self.closed.changed() => {
-                    if result.is_err() { return Err(Error::ConnectionClosed("reader stopped".into())); }
-                },
-                event = self.receiver.recv() => return event.map_err(|error| match error {
-                    broadcast::error::RecvError::Closed => Error::ConnectionClosed("reader stopped".into()),
-                    broadcast::error::RecvError::Lagged(count) => Error::Lagged(count),
-                }),
-            }
+        if let Some(event) = self.try_recv()? {
+            return Ok(event);
+        }
+        tokio::select! {
+            error = wait_closed_state(&mut self.closed) => self.try_recv()?.ok_or(error),
+            event = self.receiver.recv() => event.map_err(|error| match error {
+                broadcast::error::RecvError::Closed => close_error(&self.closed.borrow()),
+                broadcast::error::RecvError::Lagged(count) => Error::Lagged(count),
+            }),
         }
     }
 }

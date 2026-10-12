@@ -17,7 +17,7 @@ pub struct ProtocolError {
 pub enum Error {
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
-    #[error(transparent)]
+    #[error("{0}")]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Base64(#[from] base64::DecodeError),
@@ -25,6 +25,11 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("connection closed: {0}")]
     ConnectionClosed(String),
+    /// The connection actor failed. Recipients share the original typed cause;
+    /// inspect it through the Arc or traverse `std::error::Error::source`.
+    /// Normal closure without a recorded failure uses `ConnectionClosed`.
+    #[error("connection failed: {0}")]
+    ConnectionFailed(#[source] std::sync::Arc<Error>),
     #[error("session closed: {0}")]
     SessionClosed(String),
     #[error("operation timed out: {0}")]
@@ -38,7 +43,7 @@ pub enum Error {
     InvalidArgument(String),
     #[error(transparent)]
     Http(#[from] reqwest::Error),
-    #[error(transparent)]
+    #[error("{0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("browser launch failed: {0}")]
     Launch(String),

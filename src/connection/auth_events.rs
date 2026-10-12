@@ -1,4 +1,4 @@
-use super::{Connection, EventKey, RawEvent};
+use super::{CloseState, Connection, EventKey, RawEvent, close_error, wait_closed_state};
 use crate::{Error, Result};
 use std::{
     collections::HashMap,
@@ -145,7 +145,7 @@ pub(crate) struct AuthEvents {
     receiver: mpsc::Receiver<QueuedEvent>,
     _sender: Arc<Sender>,
     failure: Failure,
-    closed: watch::Receiver<Option<String>>,
+    closed: watch::Receiver<CloseState>,
 }
 
 impl AuthEvents {
@@ -158,23 +158,30 @@ impl AuthEvents {
             if let Some(reason) = *self.failure.borrow() {
                 return Err(Error::ProxyAuthentication(reason.into()));
             }
-            let reason = self.closed.borrow().clone();
+            let terminal = self.closed.borrow().clone();
             match self.receiver.try_recv() {
                 Ok(queued) => return Ok(queued.event),
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    return Err(Error::ConnectionClosed("event sender stopped".into()));
+                    return Err(close_error(&self.closed.borrow()));
                 }
             }
-            if let Some(reason) = reason {
-                return Err(Error::ConnectionClosed(reason));
+            if terminal.is_some() {
+                return Err(close_error(&terminal));
             }
             tokio::select! {
                 _ = self.failure.changed() => {}
-                result = self.closed.changed() => {
-                    if result.is_err() { return Err(Error::ConnectionClosed("reader stopped".into())); }
+                error = wait_closed_state(&mut self.closed) => {
+                    // Drain a final queued event before reporting terminal state.
+                    if let Some(reason) = *self.failure.borrow() {
+                        return Err(Error::ProxyAuthentication(reason.into()));
+                    }
+                    return match self.receiver.try_recv() {
+                        Ok(queued) => Ok(queued.event),
+                        Err(_) => Err(error),
+                    };
                 }
-                event = self.receiver.recv() => return event.map(|queued| queued.event).ok_or_else(|| Error::ConnectionClosed("event sender stopped".into())),
+                event = self.receiver.recv() => return event.map(|queued| queued.event).ok_or_else(|| close_error(&self.closed.borrow())),
             }
         }
     }

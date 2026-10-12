@@ -23,6 +23,7 @@ impl<'a> Command<'a> {
             Err(Error::Timeout(_)) => "timeout",
             Err(Error::SessionClosed(_)) => "session_closed",
             Err(Error::ConnectionClosed(_)) => "connection_closed",
+            Err(Error::ConnectionFailed(_)) => "connection_failed",
             Err(Error::Protocol(_)) => "protocol_error",
             Err(_) => "error",
         };

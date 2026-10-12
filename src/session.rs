@@ -207,7 +207,10 @@ impl Session {
 
     pub async fn execute_raw(&self, method: &str, params: Value) -> Result<Value> {
         if self.is_closed() {
-            return Err(Error::SessionClosed(self.id.0.clone()));
+            return Err(self
+                .connection
+                .closed_error()
+                .unwrap_or_else(|| Error::SessionClosed(self.id.0.clone())));
         }
         self.connection
             .execute_session(method, params, Some(self.id.0.clone()))
