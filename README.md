@@ -109,6 +109,23 @@ it does not select another tab's iframe. For same-process frames, use `main_fram
 to its own document and resolves the current execution context for each operation.
 Reacquire frame handles after removal or a process swap.
 
+`Page::html` and `search_dom` serialize their DOM transactions across all handles
+for the same session. Owned tasks retain the Page after caller cancellation or
+expiration of its command timeout. Gate queueing and transaction work each have
+an independent 30-second limit; domain transitions and recovery are additional.
+Search discard keeps its separate 30-second cap and any shorter handle deadline.
+A transaction timeout (including a discard timeout), or a missing, malformed, or
+empty search ID, triggers recovery before releasing the gate: detach the session
+within one second, otherwise close the connection. Detachment invalidates all
+handles for that session and its descendants. Other result-decoding errors still
+await search cleanup and preserve both errors when cleanup also fails.
+
+A DOM guard prevents library-managed disable; it does not guarantee frontend
+NodeId stability. Another HTML read, search, raw document reset, or navigation can
+invalidate returned IDs. Raw commands and navigation do not participate in the
+transaction gate. Reacquire stale nodes and respect `resolve_node`'s origin and
+document-lifetime requirements.
+
 `screenshot(&CaptureScreenshot)` and `print_to_pdf(&PrintToPdf)` return decoded
 bytes. Both accept the generated CDP options, including their fluent setters.
 PDF stream transfer remains available through `Session::execute`.

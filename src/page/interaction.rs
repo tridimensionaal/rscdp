@@ -1,4 +1,4 @@
-use super::Page;
+use super::{Page, dom_timeout};
 use crate::{
     Error, Result, Session,
     cdp::{dom::Node, runtime::RemoteObjectId},
@@ -282,21 +282,62 @@ impl Page {
     /// at 30 seconds, preserving a shorter command timeout. Normal completion
     /// awaits cleanup and reports failures; Drop schedules the same attempt
     /// best-effort, without retrying a failed explicit cleanup.
+    ///
+    /// Transactions are serialized with `Page::html` across all handles for this
+    /// session. Caller cancellation or timeout leaves the owner running. Queueing
+    /// and transaction work each have a 30-second limit, excluding domain
+    /// transitions and recovery. Uncertain timeouts or an invalid search identity
+    /// detach the session and descendants, falling back to connection closure.
+    /// A DOM guard prevents disable, not frontend ID invalidation: another search,
+    /// HTML read, raw document reset, or navigation can invalidate returned IDs.
     pub async fn search_dom(&self, query: &str, include_shadow_dom: bool) -> Result<Vec<Node>> {
+        let timeout = self.session.connection().command_timeout();
         let page = self.clone();
         let query = query.to_owned();
-        self.session
-            .connection()
-            .runtime()
-            .spawn(async move {
-                let domain = page.session.enable_dom().await?;
-                let result = page.search_dom_owned(&query, include_shadow_dom).await;
-                with_cleanup(result, domain.close().await)
-            })
-            .await?
+        let task = self.session.connection().runtime().spawn(async move {
+            let domain = page.session.enable_dom().await?;
+            let result = async {
+                let gate = page.session.lock_dom_transaction().await?;
+                let commands = page.clone().with_command_timeout(None);
+                let mut recovery_required = false;
+                let result = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    commands.search_dom_owned(
+                        &query,
+                        include_shadow_dom,
+                        &page.session,
+                        &mut recovery_required,
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| Err(Error::Timeout("searching DOM".into())));
+                if recovery_required || result.as_ref().is_err_and(dom_timeout) {
+                    page.recover_dom_transaction().await;
+                }
+                drop(gate);
+                result
+            }
+            .await;
+            let result = with_cleanup(result, domain.close().await);
+            drop(page);
+            result
+        });
+        if let Some(timeout) = timeout {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("waiting for DOM search".into()))??
+        } else {
+            task.await?
+        }
     }
 
-    async fn search_dom_owned(&self, query: &str, include_shadow_dom: bool) -> Result<Vec<Node>> {
+    async fn search_dom_owned(
+        &self,
+        query: &str,
+        include_shadow_dom: bool,
+        cleanup_session: &Session,
+        recovery_required: &mut bool,
+    ) -> Result<Vec<Node>> {
         self.session
             .execute_raw(
                 "DOM.getDocument",
@@ -310,9 +351,19 @@ impl Page {
                 json!({"query":query,"includeUserAgentShadowDOM":include_shadow_dom}),
             )
             .await?;
-        let search_id: String = serde_json::from_value(search["searchId"].clone())?;
+        let search_id = match serde_json::from_value::<String>(search["searchId"].clone()) {
+            Ok(id) if !id.is_empty() => id,
+            invalid => {
+                let error = match invalid {
+                    Err(error) => Error::Json(error),
+                    Ok(_) => Error::InvalidArgument("empty DOM search ID".into()),
+                };
+                *recovery_required = true;
+                return Err(error);
+            }
+        };
         let guard = Search {
-            session: self.session.clone(),
+            session: cleanup_session.clone(),
             id: Some(search_id.clone()),
             context_lease: self.context_lease.clone(),
         };

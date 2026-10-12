@@ -31,6 +31,7 @@ pub struct Session {
     auth_owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
     domains: std::sync::Arc<[tokio::sync::Mutex<usize>; 3]>,
     attachment: std::sync::Arc<Attachment>,
+    dom_transaction: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Connection {
@@ -114,6 +115,7 @@ impl Connection {
             auth_owner: state.auth_owner,
             domains: state.domains,
             attachment: state.attachment,
+            dom_transaction: state.dom_transaction,
         })
     }
 
@@ -147,6 +149,20 @@ impl Session {
     }
     pub fn is_closed(&self) -> bool {
         *self.closed.borrow() || self.connection.is_closed()
+    }
+
+    pub(crate) async fn lock_dom_transaction(&self) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        let gate = tokio::select! {
+            result = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.dom_transaction.clone().lock_owned(),
+            ) => result.map_err(|_| Error::Timeout("waiting for DOM transaction".into()))?,
+            () = self.closed() => return Err(Error::SessionClosed(self.id.0.clone())),
+        };
+        if self.is_closed() {
+            return Err(Error::SessionClosed(self.id.0.clone()));
+        }
+        Ok(gate)
     }
 
     pub(crate) fn claim_proxy_auth(&self) -> Result<ProxyAuthLease> {

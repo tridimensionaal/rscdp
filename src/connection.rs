@@ -56,6 +56,7 @@ struct SessionEntry {
     auth_owner: Arc<std::sync::atomic::AtomicBool>,
     domains: Arc<[tokio::sync::Mutex<usize>; 3]>,
     detach: Arc<tokio::sync::Mutex<()>>,
+    dom_transaction: Arc<tokio::sync::Mutex<()>>,
     attachment: Weak<Attachment>,
     attachment_owned: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -69,6 +70,7 @@ pub(crate) struct SessionState {
     pub(crate) auth_owner: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) domains: Arc<[tokio::sync::Mutex<usize>; 3]>,
     pub(crate) attachment: Arc<Attachment>,
+    pub(crate) dom_transaction: Arc<tokio::sync::Mutex<()>>,
 }
 
 type SessionRegistry = Arc<Mutex<HashMap<String, SessionEntry>>>;
@@ -87,6 +89,7 @@ fn register_session(
         auth_owner: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         domains: Arc::default(),
         detach: Arc::default(),
+        dom_transaction: Arc::default(),
         attachment: Weak::new(),
         attachment_owned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
@@ -453,6 +456,7 @@ impl Connection {
             target_id: entry.target_id.clone(),
             auth_owner: entry.auth_owner.clone(),
             domains: entry.domains.clone(),
+            dom_transaction: entry.dom_transaction.clone(),
             attachment: parent_attachment.expect("session ancestry includes requested session"),
         })
     }

@@ -185,10 +185,56 @@ impl Page {
         serde_json::from_value(response["result"].clone()).map_err(Into::into)
     }
 
+    /// Read document HTML in a serialized, owned DOM transaction.
+    /// The caller's deadline limits waiting, not ownership. Queueing and transaction
+    /// work each have a 30-second limit, excluding domain transitions and recovery.
+    /// An uncertain transaction timeout detaches this session (and descendants),
+    /// or closes the connection if detachment cannot be confirmed.
+    /// This resets frontend node IDs; raw commands and navigation are not serialized.
     pub async fn html(&self) -> Result<String> {
-        let domain = self.session.enable_dom().await?;
-        let result = self.document_html().await;
-        with_cleanup(result, domain.close().await)
+        let timeout = self.session.connection().command_timeout();
+        let page = self.clone();
+        let task = self.session.connection().runtime().spawn(async move {
+            let domain = page.session.enable_dom().await?;
+            let result = async {
+                let gate = page.session.lock_dom_transaction().await?;
+                let commands = page.clone().with_command_timeout(None);
+                let result =
+                    tokio::time::timeout(Duration::from_secs(30), commands.document_html())
+                        .await
+                        .unwrap_or_else(|_| Err(Error::Timeout("reading document HTML".into())));
+                if result.as_ref().is_err_and(dom_timeout) {
+                    page.recover_dom_transaction().await;
+                }
+                drop(gate);
+                result
+            }
+            .await;
+            let result = with_cleanup(result, domain.close().await);
+            drop(page);
+            result
+        });
+        if let Some(timeout) = timeout {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("waiting for document HTML".into()))??
+        } else {
+            task.await?
+        }
+    }
+
+    // Called while holding the DOM gate: no subsequent transaction may run on
+    // this session until uncertain commands and cleanup have been invalidated.
+    async fn recover_dom_transaction(&self) {
+        if self.session.is_closed() {
+            return;
+        }
+        let session = self.session.clone().with_command_timeout(None);
+        let _ = tokio::time::timeout(Duration::from_secs(1), session.detach()).await;
+        // A detach event is conclusive even if the response was lost.
+        if !session.is_closed() {
+            session.connection().close().await;
+        }
     }
 
     async fn document_html(&self) -> Result<String> {
@@ -229,6 +275,14 @@ impl Page {
             .execute_raw("Storage.setCookies", params)
             .await?;
         Ok(())
+    }
+}
+
+fn dom_timeout(error: &Error) -> bool {
+    match error {
+        Error::Timeout(_) => true,
+        Error::Cleanup { source, cleanup } => dom_timeout(source) || dom_timeout(cleanup),
+        _ => false,
     }
 }
 
