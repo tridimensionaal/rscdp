@@ -15,11 +15,26 @@ pub enum ClickMethod {
     JavaScript,
 }
 
+/// Options for [`Page::wait_for_selector`] and [`Page::wait_for_xpath`].
+///
+/// Stability means the sampled number of matching elements stays nonzero and
+/// unchanged. It does not track element identity, visibility, or position.
 #[derive(Debug, Clone)]
 pub struct WaitOptions {
+    /// Deadline for observing a stable count. Defaults to 5 seconds.
+    ///
+    /// This excludes [`Self::delay_after`]. Expiration returns `Ok(false)`.
     pub timeout: Duration,
+    /// Delay between completed polls. Defaults to 100 milliseconds.
+    ///
+    /// A zero interval is rejected with [`Error::InvalidArgument`].
     pub polling_interval: Duration,
+    /// How long the sampled count must remain stable. Defaults to 2 seconds.
+    ///
+    /// A zero count, changed count, or recoverable navigation error resets this
+    /// interval. A zero duration accepts the first nonzero count.
     pub stability_time: Duration,
+    /// Additional delay after success, outside the timeout. Defaults to 1 second.
     pub delay_after: Duration,
 }
 

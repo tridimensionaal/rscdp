@@ -37,8 +37,8 @@ rustcdp = { path = "../rustcdp" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Your application owns the Tokio runtime. The example applications are not needed
-as dependencies.
+Your application owns the Tokio runtime. Keep it running until awaited cleanup
+finishes. The example applications are not needed as dependencies.
 
 ```rust
 use rustcdp::{Browser, Page, Result, launcher::LaunchOptions};
