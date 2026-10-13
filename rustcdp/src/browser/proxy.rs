@@ -3,8 +3,7 @@ use crate::{
     Error, Page, Result,
     error::with_cleanup,
     launcher::LaunchOptions,
-    proxy::{Proxy, ProxyAuthMode},
-    proxy_auth::{ProxyAuth, ProxyAuthStatus},
+    proxy::{Proxy, ProxyAuth, ProxyAuthMode, ProxyAuthStatus},
 };
 use serde_json::json;
 use std::time::Duration;

@@ -1,3 +1,6 @@
+pub mod auth;
+pub use auth::{ProxyAuth, ProxyAuthStatus};
+
 use crate::{Error, Result};
 use std::{fmt, str::FromStr};
 

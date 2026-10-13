@@ -15,7 +15,7 @@ pub struct Browser {
     connection: Connection,
     page: Page,
     process: Option<BrowserProcess>,
-    auth: Option<crate::proxy_auth::ProxyAuth>,
+    auth: Option<crate::proxy::ProxyAuth>,
 }
 
 impl Browser {
@@ -161,7 +161,7 @@ impl Drop for Browser {
 pub struct BrowserContext {
     lease: Option<ContextLease>,
     page: Page,
-    auth: Option<crate::proxy_auth::ProxyAuth>,
+    auth: Option<crate::proxy::ProxyAuth>,
 }
 
 impl BrowserContext {

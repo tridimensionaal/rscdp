@@ -1,6 +1,6 @@
 use crate::{
     Connection, Error, Result, cdp::browser::BrowserContextId, error::with_cleanup,
-    proxy_auth::ProxyAuth,
+    proxy::ProxyAuth,
 };
 use serde_json::json;
 use std::{

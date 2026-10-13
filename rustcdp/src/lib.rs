@@ -52,7 +52,7 @@ pub mod launcher;
 pub mod page;
 pub mod protocol;
 pub mod proxy;
-pub mod proxy_auth;
+pub use proxy::auth as proxy_auth;
 pub mod session;
 
 pub use browser::{Browser, BrowserContext};
