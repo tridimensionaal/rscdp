@@ -397,5 +397,8 @@ on success or failure.
 Enable the optional `tracing` Cargo feature and configure a tracing subscriber in
 your application to receive `rustcdp` events at debug level. Events report command
 names, elapsed time, outcome categories, connection shutdown and process cleanup.
+`CDP request finished` reports the request/response exchange before typed response
+decoding. Its `ok` outcome does not imply that decoding into the requested Rust
+response type succeeded. Each exchange produces one completion event.
 Command payloads, endpoint URLs and remote error messages are not logged by rustcdp.
 The library does not install a subscriber or change application logging settings.

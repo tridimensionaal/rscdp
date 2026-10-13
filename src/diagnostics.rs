@@ -2,13 +2,14 @@ use crate::{Error, Result};
 use std::time::Instant;
 
 // Never format params, results, endpoints or error text in diagnostics.
-pub(crate) struct Command<'a> {
+// This measures the CDP exchange; typed response decoding happens afterward.
+pub(crate) struct Request<'a> {
     method: &'a str,
     started: Instant,
     outcome: &'static str,
 }
 
-impl<'a> Command<'a> {
+impl<'a> Request<'a> {
     pub(crate) fn new(method: &'a str) -> Self {
         Self {
             method,
@@ -30,10 +31,10 @@ impl<'a> Command<'a> {
     }
 }
 
-impl Drop for Command<'_> {
+impl Drop for Request<'_> {
     fn drop(&mut self) {
         tracing::debug!(target: "rustcdp", method = self.method,
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0,
-            outcome = self.outcome, "command finished");
+            outcome = self.outcome, "CDP request finished");
     }
 }

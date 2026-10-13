@@ -526,7 +526,7 @@ impl Connection {
             .map(|id| self.session_closed(id))
             .transpose()?;
         #[cfg(feature = "tracing")]
-        let mut diagnostic = crate::diagnostics::Command::new(method);
+        let mut diagnostic = crate::diagnostics::Request::new(method);
         let mut connection_closed = self.0.closed.clone();
         let execute = async {
             let admission = async {
