@@ -8,11 +8,11 @@ and events, browser and context management, and page automation.
 Requires Rust 1.99.1 or newer; this repository pins 1.99.1 through rustup.
 Install Chrome/Chromium or set `CHROME_PATH` to its executable.
 
-Add these dependencies to your application's `Cargo.toml`, adjusting the local path:
+Add these dependencies to your application's `Cargo.toml`, adjusting the path to the library directory inside this checkout:
 
 ```toml
 [dependencies]
-rustcdp = { path = "../rustcdp" }
+rustcdp = { path = "../rustcdp/rustcdp" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -53,7 +53,7 @@ Tokio runtime; keep it running until awaited cleanup finishes.
 
 Use `Browser::connect` for an existing browser, or `Connection::connect` for direct
 CDP access. Both accept HTTP(S) discovery endpoints and WS(S) socket URLs.
-See [Browser](src/browser.rs) and [LaunchOptions](src/launcher.rs) for connection,
+See [Browser](rustcdp/src/browser.rs) and [LaunchOptions](rustcdp/src/launcher.rs) for connection,
 profile, and process-cleanup contracts.
 
 ## Try the examples
@@ -63,10 +63,10 @@ can follow `--` in each run command.
 
 | Example | Demonstrates | Run |
 | --- | --- | --- |
-| [checkout](examples/src/bin/checkout.rs) | Fill a checkout form with Unicode input, Tab, and Enter | `cargo run --manifest-path examples/Cargo.toml --bin checkout` |
-| [page_report](examples/src/bin/page_report.rs) | Export a workshop report as a full-page PNG and PDF | `cargo run --manifest-path examples/Cargo.toml --bin page_report` |
-| [frame_walk](examples/src/bin/frame_walk.rs) | Update inventory inside a nested dispatch-board iframe | `cargo run --manifest-path examples/Cargo.toml --bin frame_walk` |
-| [event_watch](examples/src/bin/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run --manifest-path examples/Cargo.toml --bin event_watch` |
+| [checkout](examples/src/bin/checkout.rs) | Fill a checkout form with Unicode input, Tab, and Enter | `cargo run -p rustcdp-examples --bin checkout` |
+| [page_report](examples/src/bin/page_report.rs) | Export a workshop report as a full-page PNG and PDF | `cargo run -p rustcdp-examples --bin page_report` |
+| [frame_walk](examples/src/bin/frame_walk.rs) | Update inventory inside a nested dispatch-board iframe | `cargo run -p rustcdp-examples --bin frame_walk` |
+| [event_watch](examples/src/bin/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run -p rustcdp-examples --bin event_watch` |
 
 The [examples package](examples/Cargo.toml) is separate, unpublished, and excluded
 from the library package. Its dependencies are not needed by library consumers.
@@ -75,19 +75,19 @@ Each example awaits browser cleanup on success or failure. Report files go to
 
 ## Choose an API
 
-- [Browser and BrowserContext](src/browser.rs): launch/connect, isolated contexts,
+- [Browser and BrowserContext](rustcdp/src/browser.rs): launch/connect, isolated contexts,
   and explicit cleanup. `new_context()` bypasses the parent browser's proxy;
-  [proxy methods](src/browser/proxy.rs) configure a process or context proxy.
-- [Page](src/page.rs): navigation, isolated-world JSON evaluation, HTML, and cookies.
-  [Interaction](src/page/interaction.rs) provides CSS/XPath lookup, waits, DOM search,
-  and owned Elements; [input](src/page/input.rs) provides keyboard and Unicode input.
-- [Frame](src/page/frame.rs): same-process frame traversal and scoped evaluation.
+  [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
+- [Page](rustcdp/src/page.rs): navigation, isolated-world JSON evaluation, HTML, and cookies.
+  [Interaction](rustcdp/src/page/interaction.rs) provides CSS/XPath lookup, waits, DOM search,
+  and owned Elements; [input](rustcdp/src/page/input.rs) provides keyboard and Unicode input.
+- [Frame](rustcdp/src/page/frame.rs): same-process frame traversal and scoped evaluation.
   `Page::frame(index)` attaches to an out-of-process frame belonging to that page.
-- [Capture](src/page/capture.rs): screenshot and PDF bytes using generated CDP options.
-- [Connection](src/connection.rs) and [Session](src/session.rs): typed `execute`,
+- [Capture](rustcdp/src/page/capture.rs): screenshot and PDF bytes using generated CDP options.
+- [Connection](rustcdp/src/connection.rs) and [Session](rustcdp/src/session.rs): typed `execute`,
   JSON `execute_raw`, and event subscriptions for lower-level protocol access.
 
-The [generated `cdp` API](src/lib.rs) groups types, commands, and events by domain.
+The [generated `cdp` API](rustcdp/src/lib.rs) groups types, commands, and events by domain.
 Commands implement `protocol::Command` with an associated response type. Commands
 and named objects with schema-defined fields have `new(required_fields)` and
 optional `with_*` setters, such as `CookieParam::new("name", "value").with_secure(true)`.
@@ -97,7 +97,7 @@ Register `session.listen::<Event>()` before the action that emits the event, the
 await `recv()` or handle events in a Tokio task. Typed subscriptions filter by
 session and method before buffering; `connection.subscribe()` receives raw events
 across sessions. Overflow reports `Error::Lagged`. Keep the appropriate
-[domain guard](src/session/domain.rs) while listening for domain events.
+[domain guard](rustcdp/src/session/domain.rs) while listening for domain events.
 
 ## Ownership and cancellation
 
@@ -118,13 +118,13 @@ Keep a context owner alongside standalone Sessions or listeners.
 Evaluation uses unique context identities and does not retry user expressions.
 Successful `evaluate_remote` object IDs are caller-owned; release them with
 `Runtime.releaseObject`. Value-only evaluation and evaluation errors release known
-IDs best-effort. See [Page evaluation](src/page.rs) for world reuse and cancellation.
+IDs best-effort. See [Page evaluation](rustcdp/src/page.rs) for world reuse and cancellation.
 
 Recorded transport failures share their typed cause through
 `Error::ConnectionFailed(Arc<Error>)`; inspect the Arc or the standard error source
-chain. See [Connection](src/connection.rs) and [Error](src/error.rs) for delivery rules.
+chain. See [Connection](rustcdp/src/connection.rs) and [Error](rustcdp/src/error.rs) for delivery rules.
 Proxy readiness is not proof of proxy traversal or credential use; see
-[ProxyAuthMode](src/proxy.rs) and [authentication](src/proxy_auth.rs).
+[ProxyAuthMode](rustcdp/src/proxy.rs) and [authentication](rustcdp/src/proxy_auth.rs).
 
 ## Diagnostics
 
@@ -137,16 +137,19 @@ error text are not logged. The library does not install a subscriber.
 
 ## Development
 
-The root `build.rs` calls the generator in `codegen/` to produce bindings from the
-pinned schemas in `protocol/`, without network access.
-Build the local API reference with `cargo doc`; the source
-links above identify the owners of the detailed contracts.
+The root is a Cargo workspace. The library lives in `rustcdp/`, and `examples/`
+is an unpublished workspace member. Both share the root lockfile and `target/`
+directory. Plain `cargo build` selects the library; `--workspace` selects both.
+
+`rustcdp/build.rs` calls the generator in `rustcdp/codegen/` to produce bindings
+from the pinned schemas in `rustcdp/protocol/`, without network access. Build the
+local API reference with `cargo doc -p rustcdp`; the source links above identify
+the owners of the detailed contracts.
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-cargo fmt --manifest-path examples/Cargo.toml --check
-cargo clippy --manifest-path examples/Cargo.toml --all-targets --all-features -- -D warnings
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p rustcdp --doc --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc -p rustcdp --no-deps --all-features
+cargo package -p rustcdp
 ```
