@@ -7,15 +7,25 @@ use std::{
 };
 use tempfile::TempDir;
 
+/// Chrome executable, arguments, profile location, and startup deadline.
+/// The launcher selects a debugging port through Chrome and makes up to three
+/// attempts for retryable startup failures. Use [`crate::Browser::connect`] for
+/// an existing fixed endpoint. Headless mode is not enabled automatically.
 #[derive(Debug, Clone)]
 pub struct LaunchOptions {
+    /// Explicit executable; otherwise discover Chrome, honoring `CHROME_PATH`.
     pub executable: Option<PathBuf>,
+    /// Additional Chrome flags, for example `--headless=new`.
+    /// Profile and remote-debugging flags are reserved for the launcher.
     pub args: Vec<OsString>,
     /// A fixed profile is retained after shutdown.
     pub profile_dir: Option<PathBuf>,
+    /// Parent of temporary profiles; defaults to `.temp_chrome_profiles`.
     pub base_temp_dir: PathBuf,
     /// `None` uses "tmp"; an empty prefix is preserved.
     pub dir_prefix: Option<String>,
+    /// Per-attempt connection-establishment timeout after process spawn; 15 seconds
+    /// by default. Profile preparation and spawning are outside this timeout.
     pub startup_timeout: Duration,
 }
 
@@ -178,6 +188,9 @@ impl BrowserProcess {
         self.child.as_ref().map(Child::id)
     }
 
+    /// Reap the child before removing its temporary profile. Fixed profiles remain.
+    /// On Unix, allow up to three seconds after TERM before forcing termination.
+    /// Canceling the wait leaves cleanup running; a later call can await it.
     pub async fn close(&mut self) -> Result<()> {
         if let Some(child) = self.child.take() {
             let cleanup = Cleanup {

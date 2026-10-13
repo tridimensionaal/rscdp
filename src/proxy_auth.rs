@@ -43,6 +43,20 @@ enum Stop {
     Detach,
 }
 
+/// An owned authentication worker for one session.
+///
+/// Credentials are sent only for challenges matching the configured proxy's
+/// scheme, host, and port; mismatches are canceled. The cold request burst is
+/// serialized and credential rejection stays latched. Unchallenged traffic leaves
+/// Fetch enabled for later challenges; verified authentication disables it.
+/// Network failures do not establish credential rejection. If cached credentials
+/// later expire, retire the context rather than expecting automatic rearming.
+///
+/// The event queue holds at most 4,096 compact events and 4 MiB of request-ID/origin
+/// text, without headers or bodies. Held requests and challenges are each capped
+/// at 256; excess work is aborted or canceled. Queue overflow fails authentication
+/// and triggers recovery rather than silently losing paused requests.
+/// See the module documentation for recovery behavior.
 pub struct ProxyAuth {
     stop: watch::Sender<Stop>,
     task: Option<JoinHandle<Result<()>>>,
@@ -172,7 +186,10 @@ impl ProxyAuth {
     }
 
     /// Wait for a successful request, with or without an observed proxy challenge.
-    /// Inspect `status()` to distinguish verified authentication from unchallenged traffic.
+    /// Inspect [`Self::status`] to distinguish verified authentication from
+    /// unchallenged traffic. Cached credentials, bypasses, or a proxy without
+    /// authentication can yield an unchallenged response; readiness proves neither
+    /// proxy traversal nor use of the supplied credentials.
     pub async fn wait_ready(&self, timeout: Duration) -> Result<()> {
         let mut status = self.status.clone();
         tokio::time::timeout(timeout, async {
@@ -199,6 +216,9 @@ impl ProxyAuth {
         .map_err(|_| Error::Timeout("proxy readiness".into()))?
     }
 
+    /// Stop the worker and await cleanup. Fetch disable has a one-second limit
+    /// before recovery, even when ordinary command timeouts are disabled.
+    /// Use [`Self::detach`] only immediately before disposing an unresponsive target.
     pub async fn stop(&mut self) -> Result<()> {
         self.stop.send_replace(Stop::Shutdown);
         if let Some(task) = &mut self.task {

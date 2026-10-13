@@ -61,7 +61,20 @@ pub use page::Page;
 pub use connection::Connection;
 pub use session::Session;
 
-/// Bindings generated from the pinned Chrome DevTools Protocol schemas.
+/// Bindings generated locally, without network access, from the pinned CDP schemas.
+/// Each domain contains named types and `commands`/`events` modules. Commands
+/// implement [`crate::protocol::Command`] with an associated response type.
+///
+/// Required fields are explicit; optional fields use `Option`. Types with only
+/// optional fields implement `Default`, and identifiers are transparent newtypes.
+/// Commands and named objects with schema-defined fields have `new(required_fields)`
+/// and chainable `with_*` setters for optional fields. Protocol descriptions and
+/// experimental/deprecated status come from the pinned schema.
+///
+/// Enums contain only values in the pinned schema. A different browser version
+/// can return new variants or shapes that fail typed deserialization even after
+/// a successful CDP exchange. Use [`Connection::execute_raw`] or
+/// [`Session::execute_raw`] to inspect such responses without typed decoding.
 #[allow(clippy::large_enum_variant)]
 pub mod cdp {
     include!(concat!(env!("OUT_DIR"), "/cdp.rs"));

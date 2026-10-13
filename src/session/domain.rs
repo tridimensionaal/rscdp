@@ -17,6 +17,10 @@ const DETACH_TIMEOUT: Duration = Duration::from_secs(1);
 /// Await `close` to confirm the final disable; Drop schedules the same cleanup.
 /// A transition that stalls for 30 seconds triggers session detachment; failed
 /// detachment closes the connection to resolve the uncertain domain state.
+/// Counts are shared across handles of the same session; raw enable/disable
+/// commands do not participate. The first guard enables and the last disables.
+/// Transitions run on the connection runtime independently of caller cancellation
+/// and command timeouts, with a one-second detach attempt during timeout recovery.
 pub struct DomainGuard {
     session: Session,
     counts: Counts,

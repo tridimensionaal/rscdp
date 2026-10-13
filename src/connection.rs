@@ -174,6 +174,18 @@ impl Drop for Inner {
 }
 
 /// A cloneable handle to one CDP socket. The reader task starts automatically.
+///
+/// Commands share 256 in-flight slots; incoming messages are limited to 100 MiB.
+/// The default command timeout is 30 seconds, including admission. Configure it
+/// per handle with [`Self::with_command_timeout`]. Cancellation cannot undo a
+/// command Chrome has already received.
+///
+/// Recorded actor failures reach pending commands, admission waiters, listeners,
+/// and later commands as [`Error::ConnectionFailed`] with a shared typed cause.
+/// Already-available command responses and buffered events precede terminal failure.
+/// Normal closure or termination without a recorded cause uses
+/// [`Error::ConnectionClosed`]; detachment on a live connection uses
+/// [`Error::SessionClosed`].
 #[derive(Clone)]
 pub struct Connection(Arc<Inner>, Option<Duration>);
 
@@ -635,7 +647,9 @@ impl Connection {
     }
 }
 
-/// Bounded stream of raw events. Lag is reported, never silently ignored.
+/// Raw events across sessions, buffered up to 256 events per subscription.
+/// Overflow reports [`Error::Lagged`]; buffered events are drained before terminal
+/// connection failure. Use ordinary Tokio tasks to run event handlers.
 pub struct EventStream {
     _sender: Option<Arc<broadcast::Sender<RawEvent>>>,
     receiver: broadcast::Receiver<RawEvent>,

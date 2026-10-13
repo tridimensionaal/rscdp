@@ -24,6 +24,9 @@ pub use input::KeyModifiers;
 pub use interaction::{ClickMethod, Element, ElementPosition, WaitOptions};
 
 /// Page operations are shared by the initial browser page and isolated contexts.
+/// A Page retains shared Page- and Runtime-domain guards for its lifetime and
+/// subscribes to context events before enabling them. See [`Self::evaluate`] for
+/// isolated-world behavior and [`crate::Browser::connect`] for fallback lifetime.
 #[derive(Clone)]
 pub struct Page {
     session: Session,
@@ -94,6 +97,10 @@ impl Page {
         Ok(response)
     }
 
+    /// Navigate and wait for the returned loader's load event within `timeout`.
+    /// A same-document navigation with no new loader completes immediately.
+    /// Unlike listening for an arbitrary load event, this matches the requested
+    /// navigation. Downloads and reported navigation failures are errors.
     pub async fn navigate_and_wait(&self, url: &str, timeout: Duration) -> Result<()> {
         tokio::time::timeout(timeout, async {
             self.session
@@ -115,6 +122,7 @@ impl Page {
         .map_err(|_| Error::Timeout(format!("navigating to {url}")))?
     }
 
+    /// Return the main frame's current URL, including its fragment.
     pub async fn current_url(&self) -> Result<String> {
         let frame = self
             .session
@@ -156,8 +164,21 @@ impl Page {
         serde_json::from_value(response["executionContextId"].clone()).map_err(Into::into)
     }
 
-    /// Evaluate in the current isolated world using its unique context identity.
-    /// Navigation races fail without retrying the expression; JavaScript exceptions are errors.
+    /// Evaluate in the current isolated world and return its JSON value.
+    ///
+    /// Page/Frame evaluation uses a unique execution-context identity, so reused
+    /// numeric IDs cannot redirect an expression to another document. Expressions
+    /// are never automatically retried; navigation races and JavaScript exceptions
+    /// are errors. Worlds are reused within a document, but recovery after lost or
+    /// inconsistent context events can create a fresh world without prior globals.
+    ///
+    /// A cache miss retains the Page in an owned setup task capped at 30 seconds.
+    /// The handle timeout bounds the caller's combined world-lock and setup wait;
+    /// canceling that wait does not abandon setup.
+    ///
+    /// Use [`Self::evaluate_remote`] for object IDs, `undefined`, BigInt, or
+    /// non-finite numbers. This value-only method schedules best-effort release of
+    /// any received object ID, including when no JSON value is available.
     pub async fn evaluate(&self, expression: &str) -> Result<Value> {
         self.json_value(self.evaluate_remote(expression, true).await?)
     }
@@ -166,6 +187,9 @@ impl Page {
     /// Release returned object IDs with `Runtime.releaseObject` when finished.
     /// On errors, received result and exception handles are released best-effort;
     /// IDs in JavaScript error details are diagnostic, not owned live references.
+    /// Result and exception IDs are deduplicated before release. Cancellation
+    /// before receiving a response cannot release unseen IDs. The world identity
+    /// and setup behavior are the same as [`Self::evaluate`].
     pub async fn evaluate_remote(
         &self,
         expression: &str,
@@ -270,6 +294,7 @@ impl Page {
         serde_json::from_value(response["outerHTML"].clone()).map_err(Into::into)
     }
 
+    /// Read cookies from this page's browser context.
     pub async fn cookies(&self) -> Result<Vec<Cookie>> {
         let mut params = json!({});
         if let Some(id) = &self.context {
@@ -283,6 +308,7 @@ impl Page {
         serde_json::from_value(response["cookies"].clone()).map_err(Into::into)
     }
 
+    /// Set cookies in this page's browser context.
     pub async fn set_cookies(&self, cookies: &[CookieParam]) -> Result<()> {
         let mut params = json!({"cookies":cookies});
         if let Some(id) = &self.context {

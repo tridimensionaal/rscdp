@@ -10,6 +10,10 @@ use serde_json::json;
 use std::time::Duration;
 
 impl Browser {
+    /// Launch with a process-wide proxy and optional credential worker.
+    /// [`ProxyAuthMode`] selects preflight or on-demand authentication when
+    /// credentials are configured. Without credentials, neither worker nor
+    /// preflight runs. See [`Self::wait_for_proxy_ready`] for readiness semantics.
     pub async fn launch_with_proxy(
         mut options: LaunchOptions,
         proxy: Proxy,
@@ -37,6 +41,11 @@ impl Browser {
         }
     }
 
+    /// Create an isolated context with its own proxy configuration.
+    /// Context acquisition follows [`BrowserContext`]'s ownership contract.
+    /// Credentials start a worker using `mode`; without credentials, no worker
+    /// or preflight runs. Inspect [`BrowserContext::proxy_auth_status`] for evidence
+    /// of authentication, rather than assuming readiness proves proxy traversal.
     pub async fn new_context_with_proxy(
         &self,
         proxy: Proxy,
@@ -56,11 +65,16 @@ impl Browser {
         }
     }
 
+    /// Worker status, or `None` when no credential worker is configured.
     pub fn proxy_auth_status(&self) -> Option<ProxyAuthStatus> {
         self.auth.as_ref().map(ProxyAuth::status)
     }
 
-    /// Wait for request readiness; inspect `proxy_auth_status()` for authentication evidence.
+    /// Wait for a successful request without an observed authentication failure.
+    /// Without a credential worker, returns immediately without checking traffic.
+    /// Inspect [`Self::proxy_auth_status`] to distinguish verified authentication
+    /// from unchallenged traffic; readiness does not prove proxy traversal or that
+    /// supplied credentials were used.
     pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<()> {
         if let Some(auth) = &self.auth {
             auth.wait_ready(timeout).await?;
@@ -77,11 +91,16 @@ impl Browser {
 }
 
 impl BrowserContext {
+    /// Worker status, or `None` when no credential worker is configured.
     pub fn proxy_auth_status(&self) -> Option<ProxyAuthStatus> {
         self.auth.as_ref().map(ProxyAuth::status)
     }
 
-    /// Wait for request readiness; inspect `proxy_auth_status()` for authentication evidence.
+    /// Wait for a successful request without an observed authentication failure.
+    /// Without a credential worker, returns immediately without checking traffic.
+    /// Inspect [`Self::proxy_auth_status`] to distinguish verified authentication
+    /// from unchallenged traffic; readiness does not prove proxy traversal or that
+    /// supplied credentials were used.
     pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<()> {
         if let Some(auth) = &self.auth {
             auth.wait_ready(timeout).await?;

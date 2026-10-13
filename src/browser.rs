@@ -19,6 +19,9 @@ pub struct Browser {
 }
 
 impl Browser {
+    /// Launch Chrome with the supplied options and attach to its initial page.
+    /// Headless mode is opt-in through [`LaunchOptions::args`]. See
+    /// [`Self::connect`] for initial-page selection and fallback ownership.
     pub async fn launch(options: LaunchOptions) -> Result<Self> {
         let (mut process, connection) = BrowserProcess::launch(options).await?;
         match Self::initial_page(&connection).await {
@@ -35,7 +38,18 @@ impl Browser {
         }
     }
 
-    /// Connect to an existing browser. Closing this handle disconnects without killing it.
+    /// Connect to an existing browser without owning its process.
+    ///
+    /// Uses an existing page when available, without taking ownership of its
+    /// browser context. Otherwise creates a visible page in a fresh isolated
+    /// context, separate from the default profile's cookies and storage.
+    ///
+    /// For an externally connected browser, dropping `Browser` leaves that fallback
+    /// context alive while the connection stays open and dependent Page/Frame,
+    /// Element, or out-of-process-frame Page handles remain. The last dependent
+    /// schedules disposal; explicit [`Self::close`] invalidates all dependents.
+    /// Standalone Sessions and listeners do not retain the context. Browser Drop
+    /// stops proxy authentication even when dependents keep the context alive.
     pub async fn connect(endpoint: &str) -> Result<Self> {
         let connection = Connection::connect(endpoint).await?;
         match Self::initial_page(&connection).await {
@@ -88,6 +102,9 @@ impl Browser {
         self.process.as_ref()
     }
 
+    /// Create an isolated context that explicitly bypasses the browser's proxy.
+    /// See [`BrowserContext`] for acquisition and lifetime guarantees, or
+    /// [`Self::new_context_with_proxy`] to configure a context-specific proxy.
     pub async fn new_context(&self) -> Result<BrowserContext> {
         BrowserContext::create(
             &self.connection,
@@ -96,6 +113,10 @@ impl Browser {
         .await
     }
 
+    /// Stop authentication, dispose any owned fallback context, and disconnect.
+    /// An owned Chrome process is also reaped; an external process is not killed.
+    /// Connection and process cleanup are attempted even if earlier cleanup fails.
+    /// Keep the owning Tokio runtime running until this completes.
     pub async fn close(&mut self) -> Result<()> {
         let page_result = if let Some(lease) = &self.page.context_lease {
             lease
@@ -123,6 +144,20 @@ impl Drop for Browser {
     }
 }
 
+/// An isolated browser context with its initial page and optional proxy worker.
+///
+/// Acquisition continues after caller cancellation or its command deadline. One
+/// independent 30-second limit covers context creation and page setup, even with
+/// command timeouts disabled. Ownership starts when the context ID is decoded.
+/// Failed setup disposes a known context; failed disposal or an uncertain creation
+/// with no known ID closes the connection. A protocol rejection of creation leaves
+/// the connection usable. Contexts use `disposeOnDetach`; unclaimed results are
+/// dropped and disposed.
+///
+/// Closing or dropping this guard disposes its context even while Page clones
+/// remain, without closing the parent browser on successful cleanup. Only the
+/// fallback page created by [`Browser::connect`] shares context ownership with
+/// its dependents. Await [`Self::close`] to observe cleanup errors.
 pub struct BrowserContext {
     lease: Option<ContextLease>,
     page: Page,
@@ -227,6 +262,13 @@ impl BrowserContext {
     /// Cancellation does not stop cleanup. Disposal uses the configured command
     /// timeout, capped at 30 seconds for the disposal command. An uncertain
     /// timeout closes the connection; protocol errors remain retryable.
+    ///
+    /// Concurrent cleanup is serialized. Authentication cleanup precedes disposal,
+    /// including after caller cancellation or Drop. [`Self::detach_proxy_auth`]
+    /// explicitly skips authentication cleanup.
+    /// Acknowledged disposal prevents duplicate commands and makes [`Self::id`]
+    /// return `None`, even if the caller canceled its wait. Drop is best-effort;
+    /// connection teardown after an uncertain timeout can take additional time.
     pub async fn close(&mut self) -> Result<()> {
         if let Some(lease) = &self.lease {
             lease.close_with_auth(self.auth.take()).await?

@@ -293,6 +293,10 @@ impl Page {
     /// Find the first matching CSS element. Invalid selectors return a JavaScript error.
     /// Acquisition continues after caller cancellation under its own 30-second limit.
     /// Uncertain object acquisition detaches the session or closes the connection.
+    /// Recovery attempts detach for one second before closing the connection;
+    /// a timeout before the object request does not detach. Known IDs are owned
+    /// before decoding and deduplicated; discarded handles schedule bounded
+    /// release preserving a shorter original handle timeout.
     /// Only a node or null is accepted; received exception object IDs are released
     /// best-effort and remain diagnostic data, not live handles, in the error.
     pub async fn element_by_selector(&self, selector: &str) -> Result<Option<Element>> {
@@ -443,6 +447,9 @@ impl Page {
     /// detach the session and descendants, falling back to connection closure.
     /// A DOM guard prevents disable, not frontend ID invalidation: another search,
     /// HTML read, raw document reset, or navigation can invalidate returned IDs.
+    /// Recovery runs before releasing the transaction gate, with a one-second
+    /// detach attempt before connection closure. Other decoding errors still await
+    /// discard; [`Error::Cleanup`] preserves both errors if discard also fails.
     pub async fn search_dom(&self, query: &str, include_shadow_dom: bool) -> Result<Vec<Node>> {
         let timeout = self.session.connection().command_timeout();
         let page = self.clone();
@@ -551,6 +558,7 @@ impl Page {
         with_cleanup(result, guard.close().await)
     }
 
+    /// Wait for a stable, nonzero XPath match count, as in [`Self::wait_for_selector`].
     pub async fn wait_for_xpath(&self, xpath: &str, options: WaitOptions) -> Result<bool> {
         let xpath = serde_json::to_string(xpath)?;
         let expression = format!(
@@ -560,6 +568,8 @@ impl Page {
     }
 
     /// Wait for a stable, nonzero number of CSS matches. Returns false on timeout.
+    /// Polling retries recognized navigation/context-loss errors and resets the
+    /// stability interval; other errors propagate. See [`WaitOptions`] for sampling.
     pub async fn wait_for_selector(&self, selector: &str, options: WaitOptions) -> Result<bool> {
         let selector = serde_json::to_string(selector)?;
         self.wait_for_count(
@@ -660,7 +670,13 @@ impl Page {
         Ok(true)
     }
 
-    /// Attach to an out-of-process frame target owned by this page.
+    /// Attach to an out-of-process frame target owned by this page, not another tab.
+    /// For same-process frames use [`Self::main_frame`] or [`Self::frames`].
+    /// After target selection, an owned task retains the parent Page through attach
+    /// and domain setup, even if the caller cancels or its handle timeout expires.
+    /// The child restores that handle timeout. With `None`, the caller waits for
+    /// setup while the independent attachment and domain-transition limits remain.
+    /// The returned Page shares any fallback-context ownership with its parent.
     pub async fn frame(&self, index: usize) -> Result<Page> {
         let connection = self.session.connection();
         let targets = connection

@@ -1,16 +1,22 @@
 use crate::{Error, Result};
 use std::{fmt, str::FromStr};
 
-/// Validated proxy configuration. Formatting never includes credentials.
+/// A validated HTTP, HTTPS, SOCKS4, or SOCKS5 proxy URL.
+/// [`std::fmt::Display`] and [`std::fmt::Debug`] never include credentials.
+/// Chrome Fetch authentication supports HTTP proxy credentials; SOCKS URLs with
+/// credentials are rejected.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Proxy {
     server: String,
     credentials: Option<(String, String)>,
 }
 
+/// Authentication timing for browser/context proxy setup.
+/// Without configured credentials, neither mode starts a worker or preflight.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProxyAuthMode {
-    /// Check proxy readiness using a synthetic navigation before returning the browser.
+    /// Check readiness at `https://www.example.com/` before setup returns.
+    /// This is the default for a configured authentication worker.
     #[default]
     Preflight,
     /// Handle challenges as requests occur; disable interception after verified authentication.
