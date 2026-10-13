@@ -209,14 +209,21 @@ impl Generator {
         out.push_str(&extra);
     }
 
-    fn constructor(&self, domain: &str, name: &str, fields: &[Value], out: &mut String) {
+    fn constructor(
+        &self,
+        domain: &str,
+        owner: &str,
+        name: &str,
+        fields: &[Value],
+        out: &mut String,
+    ) {
         let types: Vec<_> = fields
             .iter()
             .map(|field| {
                 let wire = field["name"].as_str().expect("field name");
                 let ty = self.rust_type(
                     domain,
-                    "",
+                    owner,
                     &format!("{name}{}", type_name(wire)),
                     field,
                     &mut String::new(),
@@ -229,7 +236,7 @@ impl Generator {
             .filter(|(field, _, _)| field["optional"] != true)
             .collect();
         out.push_str(&format!("impl {name} {{\n"));
-        out.push_str("/// Construct a command with its required parameters. Optional fields are omitted.\n#[must_use]\n");
+        out.push_str("/// Construct a value with its required fields. Optional fields are omitted.\n#[must_use]\n");
         if required.len() > 7 {
             out.push_str("#[allow(clippy::too_many_arguments)]\n");
         }
@@ -266,6 +273,9 @@ impl Generator {
             let name = type_name(id);
             let owner = format!("{domain_name}.{id}");
             let ty = self.rust_type(domain_name, &owner, &name, value, out);
+            if value["type"] == "object" && value["properties"].is_array() {
+                self.constructor(domain_name, &owner, &name, items(value, "properties"), out);
+            }
             if ty != name {
                 documentation(value, out);
                 // Transparent newtypes keep protocol identifiers distinct.
@@ -283,7 +293,7 @@ impl Generator {
             let name = type_name(wire);
             documentation(command, out);
             self.structure(domain_name, "", &name, items(command, "parameters"), out);
-            self.constructor(domain_name, &name, items(command, "parameters"), out);
+            self.constructor(domain_name, "", &name, items(command, "parameters"), out);
             self.structure(
                 domain_name,
                 "",

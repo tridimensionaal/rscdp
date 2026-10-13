@@ -164,8 +164,10 @@ Each `cdp::<domain>` contains types and `commands`/`events` modules. Commands
 implement `protocol::Command` with an associated response type. Required fields
 are explicit struct fields; optional fields use `Option`. Types with only optional
 fields implement `Default`. Identifier types are transparent newtypes.
-Commands also provide `new(required_parameters)` and chainable `with_*` setters
-for optional parameters, for example `Navigate::new(url).with_referrer(referrer)`.
+Commands and named object types with schema-defined fields provide
+`new(required_fields)` and chainable `with_*` setters for optional fields, for example
+`Navigate::new(url).with_referrer(referrer)` or
+`CookieParam::new("name", "value").with_url("https://example.com")`.
 Generated Rust documentation includes protocol descriptions and experimental or
 deprecated status from the pinned schema.
 
