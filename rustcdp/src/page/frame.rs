@@ -6,7 +6,7 @@ use crate::{
         runtime::RemoteObject,
     },
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// A frame within a CDP target. Clones share the page's resource ownership.
 /// Each evaluation resolves the frame's current isolated execution context.
@@ -29,6 +29,70 @@ fn find<'a>(tree: &'a FrameTree, id: &FrameId) -> Option<&'a FrameTree> {
 }
 
 impl Page {
+    /// Attach to an out-of-process frame target owned by this page, not another tab.
+    /// For same-process frames use [`Self::main_frame`] or [`Self::frames`].
+    /// After target selection, an owned task retains the parent Page through attach
+    /// and domain setup, even if the caller cancels or its handle timeout expires.
+    /// The child restores that handle timeout. With `None`, the caller waits for
+    /// setup while the independent attachment and domain-transition limits remain.
+    /// The returned Page shares any fallback-context ownership with its parent.
+    pub async fn frame(&self, index: usize) -> Result<Page> {
+        let connection = self.session.connection();
+        let targets = connection
+            .execute(&crate::cdp::target::commands::GetTargets::default())
+            .await?;
+        let mut matched = 0;
+        for target in targets.target_infos.into_iter().filter(|target| {
+            target.type_ == "iframe" && target.target_id != *self.session.target_id()
+        }) {
+            match self
+                .session
+                .execute_raw("DOM.getFrameOwner", json!({"frameId":target.target_id}))
+                .await
+            {
+                Ok(_) => {
+                    if matched == index {
+                        let parent = self.clone();
+                        let timeout = connection.command_timeout();
+                        let task = connection.runtime().spawn(async move {
+                            let session = parent
+                                .session
+                                .connection()
+                                .clone()
+                                .with_command_timeout(None)
+                                .attach(target.target_id)
+                                .await?
+                                .with_command_timeout(timeout);
+                            let mut page =
+                                Page::from_session(session, parent.context.clone()).await?;
+                            page.context_lease = parent.context_lease.clone();
+                            drop(parent);
+                            Ok(page)
+                        });
+                        let joined = if let Some(timeout) = timeout {
+                            tokio::time::timeout(timeout, task)
+                                .await
+                                .map_err(|_| Error::Timeout("attaching frame".into()))?
+                        } else {
+                            task.await
+                        };
+                        return joined?;
+                    }
+                    matched += 1;
+                }
+                Err(Error::Protocol(error))
+                    if error.code == -32000
+                        && (error.message == "Frame with the given id was not found."
+                            || error.message
+                                == "Frame with the given id does not belong to the target.") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(Error::InvalidArgument(
+            "frame target index out of bounds".into(),
+        ))
+    }
+
     pub async fn main_frame(&self) -> Result<Frame> {
         let tree = self.session.execute(&GetFrameTree::new()).await?.frame_tree;
         Ok(Frame {

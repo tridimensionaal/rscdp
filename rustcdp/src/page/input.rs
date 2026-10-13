@@ -1,6 +1,7 @@
-use super::{Element, Page, interaction::dispatch_pair};
-use crate::{Error, Result, Session, cdp::input::commands::InsertText};
-use serde_json::json;
+use super::{ClickMethod, Element, Page};
+use crate::{Error, Result, Session, cdp::input::commands::InsertText, error::with_cleanup};
+use serde_json::{Value, json};
+use std::time::Duration;
 
 /// Modifier flags applied to both key-down and key-up events.
 #[derive(Debug, Clone, Copy, Default)]
@@ -122,5 +123,68 @@ impl Element {
     pub async fn type_text(&self, text: &str) -> Result<()> {
         self.focus().await?;
         insert_text(&self.0.session, text).await
+    }
+}
+
+pub(super) async fn click_cdp(session: &Session, x: f64, y: f64) -> Result<()> {
+    if !x.is_finite() || !y.is_finite() {
+        return Err(Error::InvalidArgument(
+            "click coordinates must be finite".into(),
+        ));
+    }
+    dispatch_pair(
+        session,
+        "Input.dispatchMouseEvent",
+        json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1}),
+        json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":1}),
+    )
+    .await
+}
+
+async fn dispatch_pair(
+    session: &Session,
+    method: &'static str,
+    press: Value,
+    release: Value,
+) -> Result<()> {
+    let session = session.clone();
+    session
+        .connection()
+        .runtime()
+        .spawn(async move {
+            let pressed = session.execute_raw(method, press).await;
+            let released = session.execute_raw(method, release).await;
+            with_cleanup(pressed.map(|_| ()), released.map(|_| ()))
+        })
+        .await?
+}
+
+impl Page {
+    pub async fn click_position(&self, x: f64, y: f64, method: ClickMethod) -> Result<()> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(Error::InvalidArgument(
+                "click coordinates must be finite".into(),
+            ));
+        }
+        match method {
+            ClickMethod::Cdp => click_cdp(&self.session, x, y).await,
+            ClickMethod::JavaScript => {
+                self.evaluate_remote(&format!("(() => {{ const e = document.elementFromPoint({x},{y}); if (!e) throw new Error('No element at point'); e.dispatchEvent(new MouseEvent('click', {{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}})); }})()"),true).await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn press_escape(&self) -> Result<()> {
+        self.press_key("Escape").await
+    }
+
+    pub async fn flash_point(&self, x: f64, y: f64, duration: Duration, size: f64) -> Result<()> {
+        if !x.is_finite() || !y.is_finite() || !size.is_finite() || size <= 0.0 {
+            return Err(Error::InvalidArgument("invalid flash geometry".into()));
+        }
+        let millis = duration.as_millis();
+        self.evaluate_remote(&format!("(() => {{ const d = document.createElement('div'); Object.assign(d.style, {{position:'fixed',pointerEvents:'none',zIndex:2147483647,left:'{}px',top:'{}px',width:'{size}px',height:'{size}px',borderRadius:'50%',background:'red'}}); document.documentElement.appendChild(d); d.animate([{{opacity:1,transform:'scale(1)'}},{{opacity:0,transform:'scale(3)'}}],{{duration:{millis}}}); setTimeout(() => d.remove(), {millis}); }})()",x-size/2.0,y-size/2.0),true).await?;
+        Ok(())
     }
 }

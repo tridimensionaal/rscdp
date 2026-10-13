@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 mod capture;
-mod context;
+mod execution_context;
 mod frame;
 mod input;
 pub use frame::Frame;
@@ -31,7 +31,7 @@ pub use interaction::{ClickMethod, Element, ElementPosition, WaitOptions};
 pub struct Page {
     session: Session,
     _events: std::sync::Arc<[crate::session::DomainGuard; 2]>,
-    worlds: context::Worlds,
+    worlds: execution_context::Worlds,
     context: Option<BrowserContextId>,
     pub(crate) context_lease: Option<std::sync::Arc<crate::browser::ContextLease>>,
 }
@@ -41,7 +41,7 @@ impl Page {
         session: Session,
         context: Option<BrowserContextId>,
     ) -> Result<Self> {
-        let worlds = context::Worlds::new(&session);
+        let worlds = execution_context::Worlds::new(&session);
         let page_events = session.enable_page().await?;
         let runtime_events = session.enable_runtime().await?;
         Ok(Self {
@@ -60,7 +60,7 @@ impl Page {
         session: Session,
         context: BrowserContextId,
     ) -> Result<Self> {
-        let worlds = context::Worlds::new(&session);
+        let worlds = execution_context::Worlds::new(&session);
         let events = session.enable_page_runtime_in_context().await?;
         Ok(Self {
             session,
@@ -120,6 +120,27 @@ impl Page {
         })
         .await
         .map_err(|_| Error::Timeout(format!("navigating to {url}")))?
+    }
+
+    pub async fn go_back(&self) -> Result<bool> {
+        let history = self
+            .session
+            .execute(&crate::cdp::page::commands::GetNavigationHistory::default())
+            .await?;
+        let Some(index) = history
+            .current_index
+            .checked_sub(1)
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return Ok(false);
+        };
+        let Some(entry) = history.entries.get(index) else {
+            return Ok(false);
+        };
+        self.session
+            .execute_raw("Page.navigateToHistoryEntry", json!({"entryId":entry.id}))
+            .await?;
+        Ok(true)
     }
 
     /// Return the main frame's current URL, including its fragment.

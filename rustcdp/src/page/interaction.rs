@@ -1,4 +1,4 @@
-use super::{Page, dom_timeout};
+use super::{Page, dom_timeout, input::click_cdp};
 use crate::{
     Error, Result, Session,
     cdp::{
@@ -150,39 +150,6 @@ impl Element {
             }
         }
     }
-}
-
-async fn click_cdp(session: &Session, x: f64, y: f64) -> Result<()> {
-    if !x.is_finite() || !y.is_finite() {
-        return Err(Error::InvalidArgument(
-            "click coordinates must be finite".into(),
-        ));
-    }
-    dispatch_pair(
-        session,
-        "Input.dispatchMouseEvent",
-        json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1}),
-        json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":1}),
-    )
-    .await
-}
-
-pub(super) async fn dispatch_pair(
-    session: &Session,
-    method: &'static str,
-    press: Value,
-    release: Value,
-) -> Result<()> {
-    let session = session.clone();
-    session
-        .connection()
-        .runtime()
-        .spawn(async move {
-            let pressed = session.execute_raw(method, press).await;
-            let released = session.execute_raw(method, release).await;
-            with_cleanup(pressed.map(|_| ()), released.map(|_| ()))
-        })
-        .await?
 }
 
 impl Page {
@@ -628,119 +595,6 @@ impl Page {
             .ok_or_else(|| Error::InvalidArgument(format!("element not found: {xpath}")))?
             .click(method, scroll)
             .await
-    }
-
-    pub async fn click_position(&self, x: f64, y: f64, method: ClickMethod) -> Result<()> {
-        if !x.is_finite() || !y.is_finite() {
-            return Err(Error::InvalidArgument(
-                "click coordinates must be finite".into(),
-            ));
-        }
-        match method {
-            ClickMethod::Cdp => click_cdp(&self.session, x, y).await,
-            ClickMethod::JavaScript => {
-                self.evaluate_remote(&format!("(() => {{ const e = document.elementFromPoint({x},{y}); if (!e) throw new Error('No element at point'); e.dispatchEvent(new MouseEvent('click', {{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}})); }})()"),true).await?;
-                Ok(())
-            }
-        }
-    }
-
-    pub async fn press_escape(&self) -> Result<()> {
-        self.press_key("Escape").await
-    }
-
-    pub async fn go_back(&self) -> Result<bool> {
-        let history = self
-            .session
-            .execute(&crate::cdp::page::commands::GetNavigationHistory::default())
-            .await?;
-        let Some(index) = history
-            .current_index
-            .checked_sub(1)
-            .and_then(|n| usize::try_from(n).ok())
-        else {
-            return Ok(false);
-        };
-        let Some(entry) = history.entries.get(index) else {
-            return Ok(false);
-        };
-        self.session
-            .execute_raw("Page.navigateToHistoryEntry", json!({"entryId":entry.id}))
-            .await?;
-        Ok(true)
-    }
-
-    /// Attach to an out-of-process frame target owned by this page, not another tab.
-    /// For same-process frames use [`Self::main_frame`] or [`Self::frames`].
-    /// After target selection, an owned task retains the parent Page through attach
-    /// and domain setup, even if the caller cancels or its handle timeout expires.
-    /// The child restores that handle timeout. With `None`, the caller waits for
-    /// setup while the independent attachment and domain-transition limits remain.
-    /// The returned Page shares any fallback-context ownership with its parent.
-    pub async fn frame(&self, index: usize) -> Result<Page> {
-        let connection = self.session.connection();
-        let targets = connection
-            .execute(&crate::cdp::target::commands::GetTargets::default())
-            .await?;
-        let mut matched = 0;
-        for target in targets.target_infos.into_iter().filter(|target| {
-            target.type_ == "iframe" && target.target_id != *self.session.target_id()
-        }) {
-            match self
-                .session
-                .execute_raw("DOM.getFrameOwner", json!({"frameId":target.target_id}))
-                .await
-            {
-                Ok(_) => {
-                    if matched == index {
-                        let parent = self.clone();
-                        let timeout = connection.command_timeout();
-                        let task = connection.runtime().spawn(async move {
-                            let session = parent
-                                .session
-                                .connection()
-                                .clone()
-                                .with_command_timeout(None)
-                                .attach(target.target_id)
-                                .await?
-                                .with_command_timeout(timeout);
-                            let mut page =
-                                Page::from_session(session, parent.context.clone()).await?;
-                            page.context_lease = parent.context_lease.clone();
-                            drop(parent);
-                            Ok(page)
-                        });
-                        let joined = if let Some(timeout) = timeout {
-                            tokio::time::timeout(timeout, task)
-                                .await
-                                .map_err(|_| Error::Timeout("attaching frame".into()))?
-                        } else {
-                            task.await
-                        };
-                        return joined?;
-                    }
-                    matched += 1;
-                }
-                Err(Error::Protocol(error))
-                    if error.code == -32000
-                        && (error.message == "Frame with the given id was not found."
-                            || error.message
-                                == "Frame with the given id does not belong to the target.") => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Err(Error::InvalidArgument(
-            "frame target index out of bounds".into(),
-        ))
-    }
-
-    pub async fn flash_point(&self, x: f64, y: f64, duration: Duration, size: f64) -> Result<()> {
-        if !x.is_finite() || !y.is_finite() || !size.is_finite() || size <= 0.0 {
-            return Err(Error::InvalidArgument("invalid flash geometry".into()));
-        }
-        let millis = duration.as_millis();
-        self.evaluate_remote(&format!("(() => {{ const d = document.createElement('div'); Object.assign(d.style, {{position:'fixed',pointerEvents:'none',zIndex:2147483647,left:'{}px',top:'{}px',width:'{size}px',height:'{size}px',borderRadius:'50%',background:'red'}}); document.documentElement.appendChild(d); d.animate([{{opacity:1,transform:'scale(1)'}},{{opacity:0,transform:'scale(3)'}}],{{duration:{millis}}}); setTimeout(() => d.remove(), {millis}); }})()",x-size/2.0,y-size/2.0),true).await?;
-        Ok(())
     }
 }
 
