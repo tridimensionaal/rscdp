@@ -75,7 +75,8 @@ Each example awaits browser cleanup on success or failure. Report files go to
 
 ## Choose an API
 
-- [Browser and BrowserContext](rustcdp/src/browser.rs): launch/connect, isolated contexts,
+- [Browser](rustcdp/src/browser.rs) and [BrowserContext](rustcdp/src/browser/context.rs):
+  launch/connect, isolated contexts,
   and explicit cleanup. `new_context()` bypasses the parent browser's proxy;
   [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
 - [Page](rustcdp/src/page.rs): navigation, isolated-world JSON evaluation, HTML, and cookies.
