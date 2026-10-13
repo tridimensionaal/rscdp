@@ -159,9 +159,13 @@ impl Page {
     /// Evaluate in the current isolated world using its unique context identity.
     /// Navigation races fail without retrying the expression; JavaScript exceptions are errors.
     pub async fn evaluate(&self, expression: &str) -> Result<Value> {
-        json_value(self.evaluate_remote(expression, true).await?)
+        self.json_value(self.evaluate_remote(expression, true).await?)
     }
 
+    /// Evaluate with caller-owned remote objects on success.
+    /// Release returned object IDs with `Runtime.releaseObject` when finished.
+    /// On errors, received result and exception handles are released best-effort;
+    /// IDs in JavaScript error details are diagnostic, not owned live references.
     pub async fn evaluate_remote(
         &self,
         expression: &str,
@@ -180,9 +184,23 @@ impl Page {
     ) -> Result<RemoteObject> {
         let response = self.session.execute_raw("Runtime.evaluate", json!({"expression":expression,"uniqueContextId":context,"silent":true,"returnByValue":return_by_value,"awaitPromise":true})).await?;
         if let Some(error) = response.get("exceptionDetails") {
+            self.release_response_objects(&response);
             return Err(Error::JavaScript(error.clone()));
         }
-        serde_json::from_value(response["result"].clone()).map_err(Into::into)
+        match serde_json::from_value(response["result"].clone()) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                self.release_response_objects(&response);
+                Err(error.into())
+            }
+        }
+    }
+
+    fn json_value(&self, result: RemoteObject) -> Result<Value> {
+        let _object = result.object_id.filter(|id| !id.0.is_empty()).map(|id| {
+            Element::from_object_id(self.session.clone(), id, self.context_lease.clone())
+        });
+        result.value.ok_or_else(|| Error::InvalidArgument("JavaScript result has no JSON value; use evaluate_remote for undefined, BigInt and non-finite numbers".into()))
     }
 
     /// Read document HTML in a serialized, owned DOM transaction.
@@ -284,8 +302,4 @@ fn dom_timeout(error: &Error) -> bool {
         Error::Cleanup { source, cleanup } => dom_timeout(source) || dom_timeout(cleanup),
         _ => false,
     }
-}
-
-fn json_value(result: RemoteObject) -> Result<Value> {
-    result.value.ok_or_else(|| Error::InvalidArgument("JavaScript result has no JSON value; use evaluate_remote for undefined, BigInt and non-finite numbers".into()))
 }

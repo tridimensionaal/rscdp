@@ -1,4 +1,4 @@
-use super::{Element, Page, json_value};
+use super::{Element, Page};
 use crate::{
     Error, Result,
     cdp::{
@@ -96,9 +96,12 @@ impl Frame {
     }
 
     pub async fn evaluate(&self, expression: &str) -> Result<Value> {
-        json_value(self.evaluate_remote(expression, true).await?)
+        self.page
+            .json_value(self.evaluate_remote(expression, true).await?)
     }
 
+    /// Evaluate in this frame, with the same remote object ownership as
+    /// [`Page::evaluate_remote`].
     pub async fn evaluate_remote(
         &self,
         expression: &str,

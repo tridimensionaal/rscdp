@@ -116,8 +116,11 @@ original handle deadline for bounded release. Selector lookup accepts only nodes
 or null; primitive and other object results are errors. Received result and
 exception object IDs are deduplicated and owned before decoding other fields.
 Exception IDs in these helpers' errors are diagnostic data, not live handles;
-their release is best-effort. Public `evaluate_remote` returns raw RemoteObject
-values; this element-helper cleanup policy does not apply to those values.
+their release is best-effort. Successful `evaluate_remote` results are caller-owned:
+release their object IDs with `Runtime.releaseObject` when finished. Evaluation
+errors release received result and exception IDs best-effort, so IDs in error
+details are diagnostic data. Value-only `evaluate` also releases any received
+object ID. Cancellation before receiving a response cannot clean up unseen IDs.
 
 `frame(index)` attaches to an out-of-process iframe owned by the current target;
 it does not select another tab's iframe. For same-process frames, use `main_frame`,

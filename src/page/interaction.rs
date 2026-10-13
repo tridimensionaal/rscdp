@@ -365,6 +365,11 @@ impl Page {
         }
     }
 
+    pub(super) fn release_response_objects(&self, response: &Value) {
+        let mut objects = Vec::new();
+        self.own_response_objects(response, "result", true, &mut objects);
+    }
+
     // Capture every usable ID before decoding other fields. Exception and result
     // may refer to the same object, so share one release owner per distinct ID.
     fn own_response_objects(
