@@ -7,7 +7,7 @@ keywords = ["cdp", "chrome", "browser", "automation"]
 edition = "2024"
 rust-version = "1.99.1"
 autoexamples = false
-include = ["/src/**", "/protocol/**", "/build.rs", "/Cargo.toml", "/Cargo.lock", "/README.md"]
+include = ["/src/**", "/codegen/**", "/protocol/**", "/build.rs", "/Cargo.toml", "/Cargo.lock", "/README.md"]
 
 [features]
 default = []

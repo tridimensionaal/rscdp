@@ -3,8 +3,9 @@
 Both JSON files match the upstream Chrome DevTools Protocol snapshot at
 [`07f7b8278cde19db07bed2abe72a0aa7c1656fb3`](https://github.com/ChromeDevTools/devtools-protocol/commit/07f7b8278cde19db07bed2abe72a0aa7c1656fb3)
 (2026-03-10, “Roll protocol to r1596832”) byte-for-byte.
-`build.rs` generates Rust bindings from them without network access. Update the
-snapshots deliberately when updating protocol support, not on every build.
+The generator in `codegen/`, invoked by `build.rs`, produces Rust bindings without
+network access. Update the snapshots deliberately when updating protocol support,
+not on every build.
 
 Immutable source files and SHA-256 hashes:
 

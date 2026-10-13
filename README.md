@@ -137,8 +137,9 @@ error text are not logged. The library does not install a subscriber.
 
 ## Development
 
-Bindings are generated locally by `build.rs` from the pinned schemas in `protocol/`,
-without network access. Build the local API reference with `cargo doc`; the source
+The root `build.rs` calls the generator in `codegen/` to produce bindings from the
+pinned schemas in `protocol/`, without network access.
+Build the local API reference with `cargo doc`; the source
 links above identify the owners of the detailed contracts.
 
 ```sh
