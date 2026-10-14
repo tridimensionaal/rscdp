@@ -9,21 +9,22 @@ use crate::{
         },
         runtime::{ExecutionContextId, RemoteObject},
     },
-    error::with_cleanup,
 };
 use serde_json::{Value, json};
 use std::time::Duration;
 
 mod capture;
+mod dom;
 mod element;
 mod execution_context;
 mod frame;
 mod input;
-pub use frame::Frame;
-mod interaction;
+mod selectors;
+
 pub use element::{ClickMethod, Element, ElementPosition};
+pub use frame::Frame;
 pub use input::KeyModifiers;
-pub use interaction::WaitOptions;
+pub use selectors::WaitOptions;
 
 /// Page operations are shared by the initial browser page and isolated contexts.
 /// A Page retains shared Page- and Runtime-domain guards for its lifetime and
@@ -250,44 +251,6 @@ impl Page {
         result.value.ok_or_else(|| Error::InvalidArgument("JavaScript result has no JSON value; use evaluate_remote for undefined, BigInt and non-finite numbers".into()))
     }
 
-    /// Read document HTML in a serialized, owned DOM transaction.
-    /// The caller's deadline limits waiting, not ownership. Queueing and transaction
-    /// work each have a 30-second limit, excluding domain transitions and recovery.
-    /// An uncertain transaction timeout detaches this session (and descendants),
-    /// or closes the connection if detachment cannot be confirmed.
-    /// This resets frontend node IDs; raw commands and navigation are not serialized.
-    pub async fn html(&self) -> Result<String> {
-        let timeout = self.session.connection().command_timeout();
-        let page = self.clone();
-        let task = self.session.connection().runtime().spawn(async move {
-            let domain = page.session.enable_dom().await?;
-            let result = async {
-                let gate = page.session.lock_dom_transaction().await?;
-                let commands = page.clone().with_command_timeout(None);
-                let result =
-                    tokio::time::timeout(Duration::from_secs(30), commands.document_html())
-                        .await
-                        .unwrap_or_else(|_| Err(Error::Timeout("reading document HTML".into())));
-                if result.as_ref().is_err_and(dom_timeout) {
-                    page.recover_session().await;
-                }
-                drop(gate);
-                result
-            }
-            .await;
-            let result = with_cleanup(result, domain.close().await);
-            drop(page);
-            result
-        });
-        if let Some(timeout) = timeout {
-            tokio::time::timeout(timeout, task)
-                .await
-                .map_err(|_| Error::Timeout("waiting for document HTML".into()))??
-        } else {
-            task.await?
-        }
-    }
-
     // Resolve uncertain resource ownership. DOM transactions retain their gate
     // until this completes; other acquisitions retain their Page owner.
     async fn recover_session(&self) {
@@ -300,21 +263,6 @@ impl Page {
         if !session.is_closed() {
             session.connection().close().await;
         }
-    }
-
-    async fn document_html(&self) -> Result<String> {
-        let response = self
-            .session
-            .execute_raw("DOM.getDocument", json!({}))
-            .await?;
-        let response = self
-            .session
-            .execute_raw(
-                "DOM.getOuterHTML",
-                json!({"nodeId":response["root"]["nodeId"]}),
-            )
-            .await?;
-        serde_json::from_value(response["outerHTML"].clone()).map_err(Into::into)
     }
 
     /// Read cookies from this page's browser context.
@@ -342,13 +290,5 @@ impl Page {
             .execute_raw("Storage.setCookies", params)
             .await?;
         Ok(())
-    }
-}
-
-fn dom_timeout(error: &Error) -> bool {
-    match error {
-        Error::Timeout(_) => true,
-        Error::Cleanup { source, cleanup } => dom_timeout(source) || dom_timeout(cleanup),
-        _ => false,
     }
 }

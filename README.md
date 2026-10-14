@@ -80,7 +80,8 @@ Each example awaits browser cleanup on success or failure. Report files go to
   and explicit cleanup. `new_context()` bypasses the parent browser's proxy;
   [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
 - [Page](rustcdp/src/page.rs): navigation, isolated-world JSON evaluation, HTML, and cookies.
-  [Interaction](rustcdp/src/page/interaction.rs) provides CSS/XPath lookup, waits, and DOM search.
+  [Selectors](rustcdp/src/page/selectors.rs) provides CSS/XPath lookup and polling;
+  [DOM](rustcdp/src/page/dom.rs) handles HTML reads and search transactions.
   [Element](rustcdp/src/page/element.rs) owns remote nodes;
   [input](rustcdp/src/page/input.rs) provides keyboard and Unicode input.
 - [Frame](rustcdp/src/page/frame.rs): same-process frame traversal and scoped evaluation.

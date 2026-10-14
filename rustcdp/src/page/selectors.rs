@@ -1,11 +1,7 @@
-use super::{ClickMethod, Element, Page, dom_timeout, element::node_result};
-use crate::{
-    Error, Result, Session,
-    cdp::{dom::Node, page::FrameId},
-    error::with_cleanup,
-};
+use super::{ClickMethod, Element, Page, element::node_result};
+use crate::{Error, Result, cdp::page::FrameId};
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::time::Instant;
 
 /// Options for [`Page::wait_for_selector`] and [`Page::wait_for_xpath`].
@@ -129,135 +125,6 @@ impl Page {
         self.element_for_expression(format!("document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue")).await
     }
 
-    /// Search by plain text, CSS selector, or XPath using CDP DOM search.
-    /// Optionally include user-agent shadow DOM.
-    /// Acquire an `enable_dom()` guard before searching and retain it while using
-    /// the returned frontend node IDs.
-    /// `resolve_node()` uses backend IDs and does not require that extra guard.
-    ///
-    /// Once a search ID is known, cleanup makes one owned discard attempt capped
-    /// at 30 seconds, preserving a shorter command timeout. Normal completion
-    /// awaits cleanup and reports failures; Drop schedules the same attempt
-    /// best-effort, without retrying a failed explicit cleanup.
-    ///
-    /// Transactions are serialized with `Page::html` across all handles for this
-    /// session. Caller cancellation or timeout leaves the owner running. Queueing
-    /// and transaction work each have a 30-second limit, excluding domain
-    /// transitions and recovery. Uncertain timeouts or an invalid search identity
-    /// detach the session and descendants, falling back to connection closure.
-    /// A DOM guard prevents disable, not frontend ID invalidation: another search,
-    /// HTML read, raw document reset, or navigation can invalidate returned IDs.
-    /// Recovery runs before releasing the transaction gate, with a one-second
-    /// detach attempt before connection closure. Other decoding errors still await
-    /// discard; [`Error::Cleanup`] preserves both errors if discard also fails.
-    pub async fn search_dom(&self, query: &str, include_shadow_dom: bool) -> Result<Vec<Node>> {
-        let timeout = self.session.connection().command_timeout();
-        let page = self.clone();
-        let query = query.to_owned();
-        let task = self.session.connection().runtime().spawn(async move {
-            let domain = page.session.enable_dom().await?;
-            let result = async {
-                let gate = page.session.lock_dom_transaction().await?;
-                let commands = page.clone().with_command_timeout(None);
-                let mut recovery_required = false;
-                let result = tokio::time::timeout(
-                    Duration::from_secs(30),
-                    commands.search_dom_owned(
-                        &query,
-                        include_shadow_dom,
-                        &page.session,
-                        &mut recovery_required,
-                    ),
-                )
-                .await
-                .unwrap_or_else(|_| Err(Error::Timeout("searching DOM".into())));
-                if recovery_required || result.as_ref().is_err_and(dom_timeout) {
-                    page.recover_session().await;
-                }
-                drop(gate);
-                result
-            }
-            .await;
-            let result = with_cleanup(result, domain.close().await);
-            drop(page);
-            result
-        });
-        if let Some(timeout) = timeout {
-            tokio::time::timeout(timeout, task)
-                .await
-                .map_err(|_| Error::Timeout("waiting for DOM search".into()))??
-        } else {
-            task.await?
-        }
-    }
-
-    async fn search_dom_owned(
-        &self,
-        query: &str,
-        include_shadow_dom: bool,
-        cleanup_session: &Session,
-        recovery_required: &mut bool,
-    ) -> Result<Vec<Node>> {
-        self.session
-            .execute_raw(
-                "DOM.getDocument",
-                json!({"depth":-1,"pierce":include_shadow_dom}),
-            )
-            .await?;
-        let search = self
-            .session
-            .execute_raw(
-                "DOM.performSearch",
-                json!({"query":query,"includeUserAgentShadowDOM":include_shadow_dom}),
-            )
-            .await?;
-        let search_id = match serde_json::from_value::<String>(search["searchId"].clone()) {
-            Ok(id) if !id.is_empty() => id,
-            invalid => {
-                let error = match invalid {
-                    Err(error) => Error::Json(error),
-                    Ok(_) => Error::InvalidArgument("empty DOM search ID".into()),
-                };
-                *recovery_required = true;
-                return Err(error);
-            }
-        };
-        let guard = Search {
-            session: cleanup_session.clone(),
-            id: Some(search_id.clone()),
-            context_lease: self.context_lease.clone(),
-        };
-        let result = async {
-            let count: i64 = serde_json::from_value(search["resultCount"].clone())?;
-            if count < 0 {
-                return Err(Error::InvalidArgument(
-                    "search result count must be nonnegative".into(),
-                ));
-            }
-            let mut nodes = Vec::new();
-            if count > 0 {
-                let response = self
-                    .session
-                    .execute_raw(
-                        "DOM.getSearchResults",
-                        json!({"searchId":search_id,"fromIndex":0,"toIndex":count}),
-                    )
-                    .await?;
-                let ids: Vec<i64> = serde_json::from_value(response["nodeIds"].clone())?;
-                for id in ids {
-                    let node = self
-                        .session
-                        .execute_raw("DOM.describeNode", json!({"nodeId":id}))
-                        .await?;
-                    nodes.push(serde_json::from_value(node["node"].clone())?);
-                }
-            }
-            Ok(nodes)
-        }
-        .await;
-        with_cleanup(result, guard.close().await)
-    }
-
     /// Wait for a stable, nonzero XPath match count, as in [`Self::wait_for_selector`].
     pub async fn wait_for_xpath(&self, xpath: &str, options: WaitOptions) -> Result<bool> {
         let xpath = serde_json::to_string(xpath)?;
@@ -350,42 +217,5 @@ fn is_context_change(error: &Error) -> bool {
             .any(|known| message.contains(known))
         }
         _ => false,
-    }
-}
-
-struct Search {
-    session: Session,
-    id: Option<String>,
-    context_lease: Option<Arc<crate::browser::ContextLease>>,
-}
-impl Search {
-    async fn close(mut self) -> Result<()> {
-        if let Some(task) = self.discard() {
-            task.await?
-        } else {
-            Ok(())
-        }
-    }
-
-    fn discard(&mut self) -> Option<tokio::task::JoinHandle<Result<()>>> {
-        let id = self.id.take()?;
-        let session = self.session.clone();
-        let context_lease = self.context_lease.take();
-        Some(self.session.connection().runtime().spawn(async move {
-            let result = tokio::time::timeout(
-                Duration::from_secs(30),
-                session.execute_raw("DOM.discardSearchResults", json!({"searchId":id})),
-            )
-            .await
-            .unwrap_or_else(|_| Err(Error::Timeout("DOM.discardSearchResults".into())))
-            .map(|_| ());
-            drop(context_lease);
-            result
-        }))
-    }
-}
-impl Drop for Search {
-    fn drop(&mut self) {
-        drop(self.discard());
     }
 }
