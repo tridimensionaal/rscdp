@@ -15,13 +15,15 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 mod capture;
+mod element;
 mod execution_context;
 mod frame;
 mod input;
 pub use frame::Frame;
 mod interaction;
+pub use element::{ClickMethod, Element, ElementPosition};
 pub use input::KeyModifiers;
-pub use interaction::{ClickMethod, Element, ElementPosition, WaitOptions};
+pub use interaction::WaitOptions;
 
 /// Page operations are shared by the initial browser page and isolated contexts.
 /// A Page retains shared Page- and Runtime-domain guards for its lifetime and
