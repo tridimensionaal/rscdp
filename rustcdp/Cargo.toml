@@ -15,21 +15,21 @@ tracing = ["dep:tracing"]
 
 [dependencies]
 base64 = "0.22"
-tracing = { version = "0.1", optional = true, default-features = false, features = ["std"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-futures-util = { version = "0.3", features = ["sink"] }
+tracing = { version = "0.1.44", optional = true, default-features = false, features = ["std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+futures-util = { version = "0.3.34", features = ["sink"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs"] }
+tokio = { version = "1.54.0", features = ["rt", "macros", "sync", "time", "fs"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
-tempfile = "3"
-url = "2"
-percent-encoding = "2"
+tempfile = "3.27.0"
+url = "2.5.8"
+percent-encoding = "2.3.2"
 
 [build-dependencies]
-heck = "0.5"
-serde_json = "1"
+heck = "0.5.0"
+serde_json = "1.0.154"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1.1.5", features = ["process"] }
