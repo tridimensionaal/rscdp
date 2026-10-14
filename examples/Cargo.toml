@@ -5,8 +5,24 @@ edition = "2024"
 rust-version = "1.99.1"
 publish = false
 
-[dependencies]
+[dev-dependencies]
 rustcdp = { path = "../rustcdp" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs"] }
 serde_json = "1"
 percent-encoding = "2"
+
+[[example]]
+name = "checkout"
+path = "checkout.rs"
+
+[[example]]
+name = "event_watch"
+path = "event_watch.rs"
+
+[[example]]
+name = "frame_walk"
+path = "frame_walk.rs"
+
+[[example]]
+name = "page_report"
+path = "page_report.rs"

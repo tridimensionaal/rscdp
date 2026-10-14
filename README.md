@@ -63,10 +63,10 @@ can follow `--` in each run command.
 
 | Example | Demonstrates | Run |
 | --- | --- | --- |
-| [checkout](examples/src/bin/checkout.rs) | Fill a checkout form with Unicode input, Tab, and Enter | `cargo run -p rustcdp-examples --bin checkout` |
-| [page_report](examples/src/bin/page_report.rs) | Export a workshop report as a full-page PNG and PDF | `cargo run -p rustcdp-examples --bin page_report` |
-| [frame_walk](examples/src/bin/frame_walk.rs) | Update inventory inside a nested dispatch-board iframe | `cargo run -p rustcdp-examples --bin frame_walk` |
-| [event_watch](examples/src/bin/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run -p rustcdp-examples --bin event_watch` |
+| [checkout](examples/checkout.rs) | Fill a checkout form with Unicode input, Tab, and Enter | `cargo run -p rustcdp-examples --example checkout` |
+| [page_report](examples/page_report.rs) | Export a workshop report as a full-page PNG and PDF | `cargo run -p rustcdp-examples --example page_report` |
+| [frame_walk](examples/frame_walk.rs) | Update inventory inside a nested dispatch-board iframe | `cargo run -p rustcdp-examples --example frame_walk` |
+| [event_watch](examples/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run -p rustcdp-examples --example event_watch` |
 
 The [examples package](examples/Cargo.toml) is separate, unpublished, and excluded
 from the library package. Its dependencies are not needed by library consumers.
