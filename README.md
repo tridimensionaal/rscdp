@@ -17,15 +17,15 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 This program opens a Chrome window and reads a local page. It needs no website
-or account. To run headless, add `--headless=new` to `LaunchOptions::args`.
+or account. To run headless, add `.headless(true)` before `.launch()`.
 
 ```rust
-use rustcdp::{Browser, Page, Result, launcher::LaunchOptions};
+use rustcdp::{Browser, Page, Result};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut browser = Browser::launch(LaunchOptions::default()).await?;
+    let mut browser = Browser::builder().launch().await?;
 
     let result = read_page(browser.page()).await;
     let cleanup = browser.close().await;
@@ -47,6 +47,12 @@ async fn read_page(page: &Page) -> Result<()> {
 The named operation lets `?` return an error while `main` still awaits cleanup.
 If both fail, this example returns the operation error. Your application owns the
 Tokio runtime; keep it running until awaited cleanup finishes.
+
+The [browser builder](rustcdp/src/browser/builder.rs) lists supported settings and
+their defaults, including window size, DevTools, executable, profile, and startup
+timeout. Use `.arg()` or `.args()` for additional Chrome flags. Setting the same
+option through both a typed setter and a raw flag returns an error; use one form.
+`Browser::launch(options)` remains available for existing `LaunchOptions` values.
 
 Use `Browser::connect` for an existing browser, or `Connection::connect` for direct
 CDP access. Both accept HTTP(S) discovery endpoints and WS(S) socket URLs.

@@ -8,20 +8,18 @@
 //!
 //! # Example
 //!
-//! This application launches Chrome or Chromium in headless mode. Set
+//! This application opens a Chrome or Chromium window. Set
 //! `CHROME_PATH` if the executable is not discoverable. Add Tokio with its `rt`
 //! and `macros` features to use the single-thread runtime shown here.
+//! For headless mode, add `.headless(true)` before `.launch()`.
 //!
 //! ```no_run
-//! use rustcdp::{Browser, Page, Result, launcher::LaunchOptions};
+//! use rustcdp::{Browser, Page, Result};
 //! use std::time::Duration;
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<()> {
-//!     let mut browser = Browser::launch(LaunchOptions {
-//!         args: vec!["--headless=new".into()],
-//!         ..Default::default()
-//!     }).await?;
+//!     let mut browser = Browser::builder().launch().await?;
 //!
 //!     let result = print_title(browser.page()).await;
 //!     let cleanup = browser.close().await;

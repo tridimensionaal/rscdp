@@ -1,11 +1,10 @@
-use rustcdp::{Browser, Result, launcher::LaunchOptions};
+use rustcdp::{Browser, Result};
 
 pub async fn launch() -> Result<Browser> {
-    Browser::launch(LaunchOptions {
-        args: std::env::args_os().skip(1).collect(),
-        ..Default::default()
-    })
-    .await
+    Browser::builder()
+        .args(std::env::args_os().skip(1))
+        .launch()
+        .await
 }
 
 pub fn html_url(html: &str) -> String {
