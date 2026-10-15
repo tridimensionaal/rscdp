@@ -26,3 +26,7 @@ path = "frame_walk.rs"
 [[example]]
 name = "page_report"
 path = "page_report.rs"
+
+[[example]]
+name = "browser_contexts"
+path = "browser_contexts.rs"

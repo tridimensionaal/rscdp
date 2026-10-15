@@ -61,7 +61,7 @@ profile, and process-cleanup contracts.
 
 ## Try the examples
 
-All four examples open a Chrome window and use local sample pages. Chrome flags
+The examples open a Chrome window and use local sample pages. Chrome flags
 can follow `--` in each run command. Headless mode is optional:
 
 ```sh
@@ -74,6 +74,7 @@ cargo run -p rustcdp-examples --example checkout -- --headless=new
 | [page_report](examples/page_report.rs) | Export a workshop report as a full-page PNG and PDF | `cargo run -p rustcdp-examples --example page_report` |
 | [frame_walk](examples/frame_walk.rs) | Update inventory inside a nested dispatch-board iframe | `cargo run -p rustcdp-examples --example frame_walk` |
 | [event_watch](examples/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run -p rustcdp-examples --example event_watch` |
+| [browser_contexts](examples/browser_contexts.rs) | Isolate two shoppers' cookies and close contexts independently | `cargo run -p rustcdp-examples --example browser_contexts` |
 
 The [examples package](examples/Cargo.toml) is separate, unpublished, and excluded
 from the library package. Its dependencies are not needed by library consumers.
