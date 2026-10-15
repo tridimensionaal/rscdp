@@ -1,12 +1,6 @@
 //! Export the same locally rendered report to PNG and PDF.
 mod common;
-use rustcdp::{
-    Page, Result,
-    cdp::page::{
-        Viewport,
-        commands::{CaptureScreenshot, GetLayoutMetrics, PrintToPdf},
-    },
-};
+use rustcdp::{Page, Result, cdp::page::commands::PrintToPdf};
 use std::{path::PathBuf, time::Duration};
 
 const REPORT: &str = r#"<!doctype html><meta charset="utf-8"><title>Workshop report</title>
@@ -39,24 +33,7 @@ async fn main() -> Result<()> {
 async fn export_report(page: &Page, output: &std::path::Path) -> Result<()> {
     page.navigate_and_wait(&common::html_url(REPORT), Duration::from_secs(10))
         .await?;
-    let size = page
-        .session()
-        .execute(&GetLayoutMetrics::new())
-        .await?
-        .css_content_size;
-    let png = page
-        .screenshot(
-            &CaptureScreenshot::new()
-                .with_capture_beyond_viewport(true)
-                .with_clip(Viewport {
-                    x: size.x,
-                    y: size.y,
-                    width: size.width,
-                    height: size.height,
-                    scale: 1.0,
-                }),
-        )
-        .await?;
+    let png = page.screenshot().full_page(true).capture().await?;
     let pdf = page
         .print_to_pdf(&PrintToPdf::new().with_print_background(true))
         .await?;

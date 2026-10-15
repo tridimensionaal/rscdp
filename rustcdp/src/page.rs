@@ -21,6 +21,7 @@ mod frame;
 mod input;
 mod selectors;
 
+pub use capture::{ScreenshotBuilder, ScreenshotFormat};
 pub use element::{ClickMethod, Element, ElementPosition};
 pub use frame::Frame;
 pub use input::KeyModifiers;

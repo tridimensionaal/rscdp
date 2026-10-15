@@ -94,7 +94,9 @@ Each example awaits browser cleanup on success or failure. Report files go to
   [input](rustcdp/src/page/input.rs) provides keyboard and Unicode input.
 - [Frame](rustcdp/src/page/frame.rs): same-process frame traversal and scoped evaluation.
   `Page::frame(index)` attaches to an out-of-process frame belonging to that page.
-- [Capture](rustcdp/src/page/capture.rs): screenshot and PDF bytes using generated CDP options.
+- [Capture](rustcdp/src/page/capture.rs): `page.screenshot().full_page(true).capture().await`
+  returns image bytes; `screenshot_with_options` exposes all CDP screenshot options.
+  `print_to_pdf` returns PDF bytes using generated CDP options.
 - [Connection](rustcdp/src/connection.rs) and [Session](rustcdp/src/session.rs): typed `execute`,
   JSON `execute_raw`, and event subscriptions for lower-level protocol access.
 
