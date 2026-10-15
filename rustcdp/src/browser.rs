@@ -5,6 +5,9 @@ use crate::{
 };
 use serde_json::json;
 
+mod builder;
+pub use builder::BrowserBuilder;
+
 mod context;
 pub use context::BrowserContext;
 
@@ -21,6 +24,11 @@ pub struct Browser {
 }
 
 impl Browser {
+    /// Configure a new browser. Chrome remains visible unless headless is requested.
+    pub fn builder() -> BrowserBuilder {
+        BrowserBuilder::default()
+    }
+
     /// Launch Chrome with the supplied options and attach to its initial page.
     /// Headless mode is opt-in through [`LaunchOptions::args`]. See
     /// [`Self::connect`] for initial-page selection and fallback ownership.

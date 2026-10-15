@@ -55,7 +55,7 @@ pub mod proxy;
 pub use proxy::auth as proxy_auth;
 pub mod session;
 
-pub use browser::{Browser, BrowserContext};
+pub use browser::{Browser, BrowserBuilder, BrowserContext};
 pub use page::Page;
 
 pub use connection::Connection;
