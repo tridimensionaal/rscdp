@@ -16,8 +16,8 @@ rustcdp = { path = "../rustcdp/rustcdp" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-This program launches headless Chrome and reads a local page. It needs no website
-or account. The library does not enable headless mode unless you request it.
+This program opens a Chrome window and reads a local page. It needs no website
+or account. To run headless, add `--headless=new` to `LaunchOptions::args`.
 
 ```rust
 use rustcdp::{Browser, Page, Result, launcher::LaunchOptions};
@@ -25,10 +25,7 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut browser = Browser::launch(LaunchOptions {
-        args: vec!["--headless=new".into()],
-        ..Default::default()
-    }).await?;
+    let mut browser = Browser::launch(LaunchOptions::default()).await?;
 
     let result = read_page(browser.page()).await;
     let cleanup = browser.close().await;
@@ -58,8 +55,12 @@ profile, and process-cleanup contracts.
 
 ## Try the examples
 
-All four examples use headless Chrome and local sample pages. Extra Chrome flags
-can follow `--` in each run command.
+All four examples open a Chrome window and use local sample pages. Chrome flags
+can follow `--` in each run command. Headless mode is optional:
+
+```sh
+cargo run -p rustcdp-examples --example checkout -- --headless=new
+```
 
 | Example | Demonstrates | Run |
 | --- | --- | --- |

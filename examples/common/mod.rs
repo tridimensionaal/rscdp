@@ -2,9 +2,7 @@ use rustcdp::{Browser, Result, launcher::LaunchOptions};
 
 pub async fn launch() -> Result<Browser> {
     Browser::launch(LaunchOptions {
-        args: std::iter::once("--headless=new".into())
-            .chain(std::env::args_os().skip(1))
-            .collect(),
+        args: std::env::args_os().skip(1).collect(),
         ..Default::default()
     })
     .await
