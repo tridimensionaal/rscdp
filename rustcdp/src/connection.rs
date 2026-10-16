@@ -396,7 +396,10 @@ impl Connection {
     }
 
     /// Set this handle's command deadline, including queue admission. None waits
-    /// until completion, session closure, or caller cancellation. Clones inherit it.
+    /// until completion, closure, or caller cancellation. Subsequent clones and
+    /// sessions created through this handle inherit it; existing handles are unchanged.
+    /// This does not change the connection-establishment or socket-write deadlines,
+    /// or the independent bounds of owned acquisition and cleanup helpers.
     #[must_use]
     pub fn with_command_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.1 = timeout;
@@ -433,6 +436,12 @@ impl Connection {
         self.1
     }
 
+    /// Send a typed command on this root session and decode its response.
+    /// Cancellation or timeout stops waiting but cannot undo a command already
+    /// received by Chrome. Retrying can repeat side effects; retry only when the
+    /// operation is safe to repeat. A decoding error can follow remote success.
+    /// Typed commands do not acquire cleanup ownership of returned resources;
+    /// prefer owned helpers such as [`Connection::attach`] where available.
     pub async fn execute<C: Command>(&self, command: &C) -> Result<C::Response> {
         serde_json::from_value(
             self.execute_raw(C::METHOD, serde_json::to_value(command)?)
@@ -441,6 +450,10 @@ impl Connection {
         .map_err(Into::into)
     }
 
+    /// Send a command on this root session without typed response decoding.
+    /// `params` must be a JSON object; use `serde_json::json!({})` for no parameters.
+    /// Cancellation or timeout stops waiting, not remote execution; retries can
+    /// repeat side effects. The ownership caveats of [`Self::execute`] also apply.
     pub async fn execute_raw(&self, method: &str, params: Value) -> Result<Value> {
         self.execute_session(method, params, None).await
     }
@@ -590,7 +603,10 @@ impl Connection {
         result
     }
 
+    /// Subscribe to raw events on the root and all attached sessions.
     /// Register synchronously so a subsequent command cannot race subscription.
+    /// This does not enable any protocol domain. Use [`Self::listen`] or
+    /// [`crate::Session::listen`] to filter by method and session before buffering.
     pub fn subscribe(&self) -> EventStream {
         EventStream {
             _sender: None,
@@ -678,6 +694,9 @@ impl EventStream {
         }
     }
 
+    /// Receive the next event. Canceling a pending wait does not consume an event,
+    /// so this can be used in `tokio::select!`.
+    /// [`Error::Lagged`] reports lost events; call again to receive retained events.
     pub async fn recv(&mut self) -> Result<RawEvent> {
         if let Some(event) = self.try_recv()? {
             return Ok(event);

@@ -57,6 +57,7 @@ enum Stop {
 /// at 256; excess work is aborted or canceled. Queue overflow fails authentication
 /// and triggers recovery rather than silently losing paused requests.
 /// See the module documentation for recovery behavior.
+#[must_use = "retain this worker while authentication is needed; await stop() to finish cleanup"]
 pub struct ProxyAuth {
     stop: watch::Sender<Stop>,
     task: Option<JoinHandle<Result<()>>>,
@@ -66,6 +67,9 @@ pub struct ProxyAuth {
 impl ProxyAuth {
     /// Arm before navigation. Only one worker may own a session at a time.
     /// Setup has a 30-second upper bound even when command timeouts are disabled.
+    /// Interception covers only this session, not other tabs or separate child
+    /// sessions. This does not configure proxy routing or navigate the page.
+    /// Retain the returned worker; dropping it requests shutdown.
     pub async fn start(session: Session, proxy: Proxy) -> Result<Self> {
         if !proxy.requires_authentication() {
             return Err(Error::InvalidArgument("proxy has no credentials".into()));

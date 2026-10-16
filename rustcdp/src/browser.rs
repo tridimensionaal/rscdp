@@ -16,6 +16,7 @@ mod resource;
 pub(crate) use resource::ContextLease;
 
 /// A browser connection, its initial page, and optionally an owned Chrome process.
+#[must_use = "retain the browser while using it; await close() to finish cleanup"]
 pub struct Browser {
     connection: Connection,
     page: Page,
@@ -125,7 +126,11 @@ impl Browser {
 
     /// Stop authentication, dispose any owned fallback context, and disconnect.
     /// An owned Chrome process is also reaped; an external process is not killed.
-    /// Connection and process cleanup are attempted even if earlier cleanup fails.
+    /// When awaited to completion, connection and process cleanup are attempted
+    /// even if earlier cleanup fails. Canceling this future can leave later stages
+    /// unstarted; call `close` again and await it to finish the sequence. Cleanup
+    /// already started continues independently, but cancellation does not schedule
+    /// the remaining stages. Drop provides only best-effort cleanup.
     /// Keep the owning Tokio runtime running until this completes.
     pub async fn close(&mut self) -> Result<()> {
         let page_result = if let Some(lease) = &self.page.context_lease {

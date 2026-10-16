@@ -119,7 +119,10 @@ impl Connection {
         })
     }
 
-    /// Listen only to events on the root session.
+    /// Listen only to this event method on the root session, not attached sessions.
+    /// Registers synchronously; subscribe before the action that emits events.
+    /// This does not enable any protocol domain. Use [`Session::listen`] for an
+    /// attached session or [`Connection::subscribe`] for raw events across sessions.
     pub fn listen<E: Event>(&self) -> TypedEvents<E> {
         TypedEvents {
             stream: self.subscribe_typed(E::METHOD, None),
@@ -132,6 +135,11 @@ impl Connection {
 }
 
 impl Session {
+    /// Set this handle's command deadline, including queue admission.
+    /// Subsequent clones inherit it; existing handles for the same session are
+    /// unchanged. `None` removes the caller deadline, not socket-write deadlines
+    /// or independent acquisition, domain-transition, and cleanup bounds.
+    /// See [`Connection::with_command_timeout`] and [`Self::detach`].
     #[must_use]
     pub fn with_command_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
         self.connection = self.connection.with_command_timeout(timeout);
@@ -197,6 +205,12 @@ impl Session {
         }
     }
 
+    /// Send a typed command on this session and decode its response.
+    /// Cancellation or timeout stops waiting but cannot undo a command already
+    /// received by Chrome. Retrying can repeat side effects; retry only when the
+    /// operation is safe to repeat. A decoding error can follow remote success.
+    /// Typed commands do not acquire cleanup ownership of returned resources;
+    /// prefer owned helpers such as [`Connection::attach`] where available.
     pub async fn execute<C: Command>(&self, command: &C) -> Result<C::Response> {
         serde_json::from_value(
             self.execute_raw(C::METHOD, serde_json::to_value(command)?)
@@ -205,6 +219,10 @@ impl Session {
         .map_err(Into::into)
     }
 
+    /// Send a command on this session without typed response decoding.
+    /// `params` must be a JSON object; use `serde_json::json!({})` for no parameters.
+    /// Cancellation or timeout stops waiting, not remote execution; retries can
+    /// repeat side effects. The ownership caveats of [`Self::execute`] also apply.
     pub async fn execute_raw(&self, method: &str, params: Value) -> Result<Value> {
         if self.is_closed() {
             return Err(self
@@ -217,6 +235,10 @@ impl Session {
             .await
     }
 
+    /// Listen only to this event method on this session, not descendant sessions.
+    /// Registers synchronously and retains attachment ownership. This does not
+    /// enable the domain: subscribe before enabling it or triggering the event,
+    /// and retain the appropriate [`DomainGuard`] while receiving domain events.
     pub fn listen<E: Event>(&self) -> TypedEvents<E> {
         TypedEvents {
             stream: self
@@ -263,6 +285,10 @@ pub struct TypedEvents<E> {
 }
 
 impl<E: Event> TypedEvents<E> {
+    /// Receive the next matching event. Canceling a pending wait does not consume
+    /// an event, so this can be used in `tokio::select!`.
+    /// [`Error::Lagged`] reports lost events; call again to receive retained events.
+    /// A typed decoding error consumes that event; later events remain receivable.
     pub async fn recv(&mut self) -> Result<E> {
         loop {
             let event = if let Some(closed) = &mut self.closed {

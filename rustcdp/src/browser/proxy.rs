@@ -13,6 +13,11 @@ impl Browser {
     /// [`ProxyAuthMode`] selects preflight or on-demand authentication when
     /// credentials are configured. Without credentials, neither worker nor
     /// preflight runs. See [`Self::wait_for_proxy_ready`] for readiness semantics.
+    /// The worker handles only the initial page's session; other tabs and separate
+    /// child sessions do not automatically receive authentication workers.
+    /// With credentials, preflight navigates the initial page to
+    /// `https://www.example.com/` and does not restore its previous URL. It waits
+    /// for worker readiness, not for the page's load event.
     pub async fn launch_with_proxy(
         mut options: LaunchOptions,
         proxy: Proxy,
@@ -45,6 +50,11 @@ impl Browser {
     /// Credentials start a worker using `mode`; without credentials, no worker
     /// or preflight runs. Inspect [`BrowserContext::proxy_auth_status`] for evidence
     /// of authentication, rather than assuming readiness proves proxy traversal.
+    /// The proxy configuration applies to the context, but the credential worker
+    /// handles only its initial page's session, not other tabs or child sessions.
+    /// With credentials, preflight navigates that page to `https://www.example.com/`
+    /// without restoring the previous URL; it waits for worker readiness, not a
+    /// page load event.
     pub async fn new_context_with_proxy(
         &self,
         proxy: Proxy,

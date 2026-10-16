@@ -44,6 +44,7 @@ impl Default for LaunchOptions {
 
 /// Owns exactly one child and, when applicable, its temporary profile.
 /// Call `close` to await cleanup. Drop schedules a kill/reap/cleanup fallback.
+#[must_use = "retain this process owner while using Chrome; await close() to reap it and clean up"]
 pub struct BrowserProcess {
     child: Option<Child>,
     temporary: Option<TempDir>,

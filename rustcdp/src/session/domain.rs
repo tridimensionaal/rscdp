@@ -17,10 +17,13 @@ const DETACH_TIMEOUT: Duration = Duration::from_secs(1);
 /// Await `close` to confirm the final disable; Drop schedules the same cleanup.
 /// A transition that stalls for 30 seconds triggers session detachment; failed
 /// detachment closes the connection to resolve the uncertain domain state.
-/// Counts are shared across handles of the same session; raw enable/disable
-/// commands do not participate. The first guard enables and the last disables.
+/// Counts are shared across handles of the same session. Direct enable/disable
+/// commands through either `execute` or `execute_raw` bypass these counts; do not
+/// mix them with guards for the same domain. The first guard enables and the last
+/// disables.
 /// Transitions run on the connection runtime independently of caller cancellation
 /// and command timeouts, with a one-second detach attempt during timeout recovery.
+#[must_use = "retain this guard while using the enabled domain; await close() to observe cleanup errors"]
 pub struct DomainGuard {
     session: Session,
     counts: Counts,
@@ -30,9 +33,17 @@ pub struct DomainGuard {
 }
 
 impl Session {
+    /// Enable DOM until the last shared guard is released.
+    /// Retain the guard while using the domain; subscribe before enabling events.
+    /// Direct typed or raw enable/disable commands bypass guard accounting;
+    /// do not mix them with guards for this domain. See [`DomainGuard`].
     pub async fn enable_dom(&self) -> Result<DomainGuard> {
         self.enable_domain(0).await
     }
+    /// Enable Page until the last shared guard is released.
+    /// Retain the guard while using the domain; subscribe before enabling events.
+    /// Direct typed or raw enable/disable commands bypass guard accounting;
+    /// do not mix them with guards for this domain. See [`DomainGuard`].
     pub async fn enable_page(&self) -> Result<DomainGuard> {
         self.enable_domain(1).await
     }
@@ -40,6 +51,8 @@ impl Session {
     ///
     /// Subscribe before acquiring the guard to receive existing-context events
     /// emitted during enablement. Keep the guard while using those subscriptions.
+    /// Direct typed or raw enable/disable commands bypass guard accounting;
+    /// do not mix them with guards for this domain. See [`DomainGuard`].
     pub async fn enable_runtime(&self) -> Result<DomainGuard> {
         self.enable_domain(2).await
     }

@@ -16,6 +16,7 @@ use serde_json::Value;
 /// remain, without closing the parent browser on successful cleanup. Only the
 /// fallback page created by [`crate::Browser::connect`] shares context ownership with
 /// its dependents. Await [`Self::close`] to observe cleanup errors.
+#[must_use = "retain this context while using its pages; dropping it schedules disposal"]
 pub struct BrowserContext {
     lease: Option<ContextLease>,
     pub(super) page: Page,
