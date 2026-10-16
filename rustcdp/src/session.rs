@@ -58,7 +58,7 @@ impl Connection {
             let response = match response {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) => {
-                    if matches!(&error, Error::Json(_)) {
+                    if matches!(&error, Error::Json(_) | Error::Decode { .. }) {
                         connection.close().await;
                     }
                     return Err(error);
@@ -209,14 +209,15 @@ impl Session {
     /// Cancellation or timeout stops waiting but cannot undo a command already
     /// received by Chrome. Retrying can repeat side effects; retry only when the
     /// operation is safe to repeat. A decoding error can follow remote success.
+    /// [`Error::Decode`] retains the method, original result payload, and cause.
     /// Typed commands do not acquire cleanup ownership of returned resources;
     /// prefer owned helpers such as [`Connection::attach`] where available.
     pub async fn execute<C: Command>(&self, command: &C) -> Result<C::Response> {
-        serde_json::from_value(
+        crate::error::decode(
+            C::METHOD,
             self.execute_raw(C::METHOD, serde_json::to_value(command)?)
                 .await?,
         )
-        .map_err(Into::into)
     }
 
     /// Send a command on this session without typed response decoding.
@@ -289,6 +290,7 @@ impl<E: Event> TypedEvents<E> {
     /// an event, so this can be used in `tokio::select!`.
     /// [`Error::Lagged`] reports lost events; call again to receive retained events.
     /// A typed decoding error consumes that event; later events remain receivable.
+    /// [`Error::Decode`] retains its method, original payload, and cause.
     pub async fn recv(&mut self) -> Result<E> {
         loop {
             let event = if let Some(closed) = &mut self.closed {
@@ -296,7 +298,7 @@ impl<E: Event> TypedEvents<E> {
                     match self.stream.try_recv()? {
                         Some(event) => {
                             if event.session_id == self.session_id && event.method == E::METHOD {
-                                return serde_json::from_value(event.params).map_err(Into::into);
+                                return crate::error::decode(E::METHOD, event.params);
                             }
                             continue;
                         }
@@ -315,7 +317,7 @@ impl<E: Event> TypedEvents<E> {
                 self.stream.recv().await?
             };
             if event.session_id == self.session_id && event.method == E::METHOD {
-                return serde_json::from_value(event.params).map_err(Into::into);
+                return crate::error::decode(E::METHOD, event.params);
             }
         }
     }

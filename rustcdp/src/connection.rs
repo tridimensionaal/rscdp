@@ -47,9 +47,14 @@ async fn wait_closed_state(closed: &mut watch::Receiver<CloseState>) -> Error {
 #[serde(rename_all = "camelCase")]
 pub struct RawEvent {
     pub method: String,
-    #[serde(default)]
+    /// Missing parameters default to an empty object; explicit JSON null is retained.
+    #[serde(default = "empty_params")]
     pub params: Value,
     pub session_id: Option<String>,
+}
+
+fn empty_params() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
 struct Request {
@@ -440,14 +445,15 @@ impl Connection {
     /// Cancellation or timeout stops waiting but cannot undo a command already
     /// received by Chrome. Retrying can repeat side effects; retry only when the
     /// operation is safe to repeat. A decoding error can follow remote success.
+    /// [`Error::Decode`] retains the method, original result payload, and cause.
     /// Typed commands do not acquire cleanup ownership of returned resources;
     /// prefer owned helpers such as [`Connection::attach`] where available.
     pub async fn execute<C: Command>(&self, command: &C) -> Result<C::Response> {
-        serde_json::from_value(
+        crate::error::decode(
+            C::METHOD,
             self.execute_raw(C::METHOD, serde_json::to_value(command)?)
                 .await?,
         )
-        .map_err(Into::into)
     }
 
     /// Send a command on this root session without typed response decoding.
@@ -708,5 +714,33 @@ impl EventStream {
                 broadcast::error::RecvError::Lagged(count) => Error::Lagged(count),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parameterless_event_accepts_absent_params_but_preserves_explicit_null() {
+        #[derive(Debug, Deserialize)]
+        struct EmptyEvent {}
+
+        let absent: RawEvent =
+            serde_json::from_value(json!({"method": "Inspector.targetCrashed"})).unwrap();
+        assert_eq!(absent.params, json!({}));
+        crate::error::decode::<EmptyEvent>(&absent.method, absent.params).unwrap();
+
+        let explicit: RawEvent =
+            serde_json::from_value(json!({"method": "Inspector.targetCrashed", "params": null}))
+                .unwrap();
+        assert_eq!(explicit.params, Value::Null);
+        assert!(matches!(
+            crate::error::decode::<EmptyEvent>(&explicit.method, explicit.params),
+            Err(Error::Decode {
+                payload: Value::Null,
+                ..
+            })
+        ));
     }
 }

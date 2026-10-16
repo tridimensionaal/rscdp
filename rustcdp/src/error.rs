@@ -7,7 +7,9 @@ use serde_json::Value;
 pub struct ProtocolError {
     pub code: i64,
     pub message: String,
+    /// Absent data is `None`; explicit JSON null is `Some(Value::Null)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "crate::protocol::present_json")]
     pub data: Option<Value>,
 }
 
@@ -19,6 +21,15 @@ pub enum Error {
     Protocol(#[from] ProtocolError),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
+    /// A received command result or event payload failed typed decoding.
+    /// The remote command may have succeeded; inspect `payload` without retrying.
+    #[error("failed to decode {method}: {source}")]
+    Decode {
+        method: String,
+        payload: Value,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error(transparent)]
     Base64(#[from] base64::DecodeError),
     #[error(transparent)]
@@ -68,6 +79,14 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub(crate) fn decode<T: serde::de::DeserializeOwned>(method: &str, payload: Value) -> Result<T> {
+    T::deserialize(&payload).map_err(|source| Error::Decode {
+        method: method.into(),
+        payload,
+        source,
+    })
+}
+
 pub(crate) fn with_cleanup<T>(result: Result<T>, cleanup: Result<()>) -> Result<T> {
     match (result, cleanup) {
         (Ok(value), Ok(())) => Ok(value),
@@ -76,5 +95,47 @@ pub(crate) fn with_cleanup<T>(result: Result<T>, cleanup: Result<()>) -> Result<
             source: Box::new(source),
             cleanup: Box::new(cleanup),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn decode_failure_preserves_payload_method_and_source() {
+        #[derive(Debug, Deserialize)]
+        enum Known {
+            Current,
+        }
+
+        let error = decode::<Known>("Example.changed", json!("Future")).unwrap_err();
+        assert!(std::error::Error::source(&error).is_some());
+        let Error::Decode {
+            method,
+            payload,
+            source,
+        } = error
+        else {
+            panic!("expected contextual decode failure");
+        };
+        assert_eq!(method, "Example.changed");
+        assert_eq!(payload, json!("Future"));
+        assert!(source.is_data());
+        assert_eq!(decode::<String>(&method, payload).unwrap(), "Future");
+    }
+
+    #[test]
+    fn protocol_error_data_distinguishes_absent_null_and_value() {
+        for wire in [
+            json!({"code": -1, "message": "failed"}),
+            json!({"code": -1, "message": "failed", "data": null}),
+            json!({"code": -1, "message": "failed", "data": {"detail": 42}}),
+        ] {
+            let error: ProtocolError = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(error.data.as_ref(), wire.get("data"));
+            assert_eq!(serde_json::to_value(error).unwrap(), wire);
+        }
     }
 }
