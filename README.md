@@ -74,7 +74,7 @@ cargo run -p rustcdp-examples --example checkout -- --headless=new
 | [page_report](examples/page_report.rs) | Export a workshop report as a full-page PNG and PDF | `cargo run -p rustcdp-examples --example page_report` |
 | [frame_walk](examples/frame_walk.rs) | Update inventory inside a nested dispatch-board iframe | `cargo run -p rustcdp-examples --example frame_walk` |
 | [event_watch](examples/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run -p rustcdp-examples --example event_watch` |
-| [browser_contexts](examples/browser_contexts.rs) | Isolate two shoppers' cookies and close contexts independently | `cargo run -p rustcdp-examples --example browser_contexts` |
+| [browser_contexts](examples/browser_contexts.rs) | Isolate and clear two shoppers' cookies; close contexts independently | `cargo run -p rustcdp-examples --example browser_contexts` |
 
 The [examples package](examples/Cargo.toml) is separate, unpublished, and excluded
 from the library package. Its dependencies are not needed by library consumers.
@@ -84,7 +84,7 @@ Each example awaits browser cleanup on success or failure. Report files go to
 ## Choose an API
 
 - [Browser](rustcdp/src/browser.rs) and [BrowserContext](rustcdp/src/browser/context.rs):
-  launch/connect, isolated contexts,
+  launch/connect, isolated contexts, context-wide cookie reads/updates/clearing,
   and explicit cleanup. `new_context()` bypasses the parent browser's proxy;
   [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
 - [Page](rustcdp/src/page.rs): navigation, isolated-world JSON evaluation, HTML, and cookies.
@@ -97,7 +97,8 @@ Each example awaits browser cleanup on success or failure. Report files go to
   `Page::frame(index)` attaches to an out-of-process frame belonging to that page.
 - [Capture](rustcdp/src/page/capture.rs): `page.screenshot().full_page(true).capture().await`
   returns image bytes; `screenshot_with_options` exposes all CDP screenshot options.
-  `page.pdf().print_background(true).generate().await` returns PDF bytes;
+  [PDF export](rustcdp/src/page/pdf.rs) uses
+  `page.pdf().print_background(true).generate().await` to return PDF bytes;
   `print_to_pdf` accepts all CDP PDF options.
 - [Connection](rustcdp/src/connection.rs) and [Session](rustcdp/src/session.rs): typed `execute`,
   JSON `execute_raw`, and event subscriptions for lower-level protocol access.
@@ -113,7 +114,7 @@ page.require_element("button[type=submit]").await?.click().await?;
 `wait_for_element` checks presence, not visibility or readiness. `require_element`
 looks up once and reports `Error::ElementNotFound` if absent; `element_by_selector`
 returns `Option<Element>` for optional matches. `click()` scrolls and sends CDP
-mouse input; `click_with_options(ClickOptions { .. })` selects different behavior.
+mouse input; `click_with_options` accepts named settings through `page::ClickOptions`.
 Actions are not automatically retried. The existing `wait_for_selector` and
 `wait_for_xpath` methods wait for stable match counts, which is a different task.
 
