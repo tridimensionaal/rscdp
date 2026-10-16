@@ -1,5 +1,13 @@
 use super::ContextLease;
-use crate::{Connection, Error, Page, Result, cdp::browser::BrowserContextId, error::with_cleanup};
+use crate::{
+    Connection, Error, Page, Result,
+    cdp::{
+        browser::BrowserContextId,
+        network::{Cookie, CookieParam},
+        storage::commands::ClearCookies,
+    },
+    error::with_cleanup,
+};
 use serde_json::Value;
 
 /// An isolated browser context with its initial page and optional proxy worker.
@@ -105,6 +113,42 @@ impl BrowserContext {
     }
     pub fn page(&self) -> &Page {
         &self.page
+    }
+
+    /// Read all cookies in this browser context using Storage, across all its pages.
+    /// After acknowledged disposal, returns an error locally; it never selects the
+    /// default context. External disposal may instead produce a remote error.
+    pub async fn cookies(&self) -> Result<Vec<Cookie>> {
+        self.id()
+            .ok_or_else(|| Error::InvalidArgument("browser context is closed".into()))?;
+        self.page.cookies().await
+    }
+
+    /// Add or update the supplied cookies across this browser context using Storage.
+    /// This does not replace the whole cookie jar and is not limited to the initial page.
+    /// After acknowledged disposal, returns an error locally; it never selects the
+    /// default context. External disposal may instead produce a remote error.
+    pub async fn set_cookies(&self, cookies: &[CookieParam]) -> Result<()> {
+        self.id()
+            .ok_or_else(|| Error::InvalidArgument("browser context is closed".into()))?;
+        self.page.set_cookies(cookies).await
+    }
+
+    /// Clear all cookies in this browser context using Storage, across all its pages.
+    /// Other contexts are unaffected. After acknowledged disposal, returns an error
+    /// locally; it never selects the default context. External disposal may instead
+    /// produce a remote error.
+    pub async fn clear_cookies(&self) -> Result<()> {
+        let id = self
+            .id()
+            .ok_or_else(|| Error::InvalidArgument("browser context is closed".into()))?
+            .clone();
+        self.page
+            .session()
+            .connection()
+            .execute(&ClearCookies::default().with_browser_context_id(id))
+            .await?;
+        Ok(())
     }
 
     // Only the fallback page takes context ownership. Ordinary context pages
