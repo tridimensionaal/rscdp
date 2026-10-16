@@ -1,5 +1,8 @@
 use super::Browser;
-use crate::{Error, Result, launcher::LaunchOptions};
+use crate::{
+    Error, Result,
+    launcher::{LaunchOptions, args::validated_switch_name},
+};
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 /// Configure and launch Chrome with [`Browser::builder`].
@@ -120,39 +123,10 @@ impl BrowserBuilder {
             ));
         }
         for arg in &self.options.args {
-            // Inspect Chrome's normalized switch spelling without changing the
-            // original OS argument, including non-Unicode values.
-            let text = arg.to_string_lossy();
-            #[cfg(windows)]
-            let text = text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
-            #[cfg(not(windows))]
-            let text = text.trim_matches(['\t', '\n', '\u{b}', '\u{c}', '\r', ' ']);
-            if text == "--" {
-                return Err(Error::InvalidArgument(
-                    "the -- terminator would disable launcher arguments".into(),
-                ));
-            }
-            let flag = text.strip_prefix("--").or_else(|| text.strip_prefix('-'));
-            #[cfg(windows)]
-            let flag = flag.or_else(|| text.strip_prefix('/'));
-            let Some(flag) = flag else { continue };
-            let name = flag.split('=').next().unwrap_or_default();
-            #[cfg(windows)]
-            let normalized = name.to_ascii_lowercase();
-            #[cfg(windows)]
-            let name = normalized.as_str();
-            if name.starts_with("user-data-dir") || name.starts_with("remote-debugging-") {
-                return Err(Error::InvalidArgument(
-                    "use builder settings for profile/debugging configuration".into(),
-                ));
-            }
-            #[cfg(windows)]
-            if name == "single-argument" {
-                return Err(Error::InvalidArgument(
-                    "single-argument would disable launcher arguments".into(),
-                ));
-            }
-            let duplicate = match name {
+            let Some(name) = validated_switch_name(arg)? else {
+                continue;
+            };
+            let duplicate = match name.as_str() {
                 "headless" => self.headless.is_some(),
                 "window-size" => self.window_size.is_some(),
                 "auto-open-devtools-for-tabs" => self.devtools.is_some(),

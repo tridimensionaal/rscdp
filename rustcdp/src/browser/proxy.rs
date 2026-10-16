@@ -2,7 +2,7 @@ use super::{Browser, BrowserContext};
 use crate::{
     Error, Page, Result,
     error::with_cleanup,
-    launcher::LaunchOptions,
+    launcher::{LaunchOptions, args::validated_switch_name},
     proxy::{Proxy, ProxyAuth, ProxyAuthMode, ProxyAuthStatus},
 };
 use serde_json::json;
@@ -18,19 +18,23 @@ impl Browser {
     /// With credentials, preflight navigates the initial page to
     /// `https://www.example.com/` and does not restore its previous URL. It waits
     /// for worker readiness, not for the page's load event.
+    /// Raw `proxy-server`, `no-proxy-server`, `proxy-pac-url`, and
+    /// `proxy-auto-detect` switches conflict with the explicit proxy and are
+    /// rejected. `proxy-bypass-list` customization is allowed.
     pub async fn launch_with_proxy(
         mut options: LaunchOptions,
         proxy: Proxy,
         mode: ProxyAuthMode,
     ) -> Result<Self> {
-        if options
-            .args
-            .iter()
-            .any(|arg| arg.to_string_lossy().starts_with("--proxy-server"))
-        {
-            return Err(Error::InvalidArgument(
-                "proxy already specified in launch arguments".into(),
-            ));
+        for arg in &options.args {
+            if matches!(
+                validated_switch_name(arg)?.as_deref(),
+                Some("proxy-server" | "no-proxy-server" | "proxy-pac-url" | "proxy-auto-detect")
+            ) {
+                return Err(Error::InvalidArgument(
+                    "raw proxy routing switch conflicts with the explicit proxy".into(),
+                ));
+            }
         }
         options
             .args

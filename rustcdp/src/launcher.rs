@@ -7,6 +7,8 @@ use std::{
 };
 use tempfile::TempDir;
 
+pub(crate) mod args;
+
 /// Chrome executable, arguments, profile location, and startup deadline.
 /// The launcher selects a debugging port through Chrome and makes up to three
 /// attempts for retryable startup failures. Use [`crate::Browser::connect`] for
@@ -17,6 +19,7 @@ pub struct LaunchOptions {
     pub executable: Option<PathBuf>,
     /// Additional Chrome flags, for example `--headless=new`.
     /// Profile and remote-debugging flags are reserved for the launcher.
+    /// The `--` terminator and Windows `single-argument` switch are rejected.
     pub args: Vec<OsString>,
     /// A fixed profile is retained after shutdown.
     pub profile_dir: Option<PathBuf>,
@@ -55,6 +58,9 @@ pub struct BrowserProcess {
 
 impl BrowserProcess {
     pub async fn launch(options: LaunchOptions) -> Result<(Self, Connection)> {
+        for arg in &options.args {
+            args::validated_switch_name(arg)?;
+        }
         let mut retries = 0;
         loop {
             match Self::launch_once(options.clone()).await {
@@ -113,16 +119,7 @@ impl BrowserProcess {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        for arg in &options.args {
-            let name = arg.to_string_lossy();
-            if name.starts_with("--user-data-dir") || name.starts_with("--remote-debugging-") {
-                return Err(Error::InvalidArgument(
-                    "use LaunchOptions fields for profile/debugging settings".into(),
-                ));
-            }
-            command.arg(arg);
-        }
-        command.arg("about:blank");
+        command.args(&options.args).arg("about:blank");
         let mut process = Self {
             child: Some(
                 command
