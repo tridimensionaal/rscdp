@@ -1,6 +1,6 @@
 //! Export the same locally rendered report to PNG and PDF.
 mod common;
-use rustcdp::{Page, Result, cdp::page::commands::PrintToPdf};
+use rustcdp::{Page, Result};
 use std::{path::PathBuf, time::Duration};
 
 const REPORT: &str = r#"<!doctype html><meta charset="utf-8"><title>Workshop report</title>
@@ -34,9 +34,7 @@ async fn export_report(page: &Page, output: &std::path::Path) -> Result<()> {
     page.navigate_and_wait(&common::html_url(REPORT), Duration::from_secs(10))
         .await?;
     let png = page.screenshot().full_page(true).capture().await?;
-    let pdf = page
-        .print_to_pdf(&PrintToPdf::new().with_print_background(true))
-        .await?;
+    let pdf = page.pdf().print_background(true).generate().await?;
     tokio::fs::write(output.join("workshop.png"), png).await?;
     tokio::fs::write(output.join("workshop.pdf"), pdf).await?;
     println!("Report files: {}", output.display());

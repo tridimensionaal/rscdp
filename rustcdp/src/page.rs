@@ -19,12 +19,14 @@ mod element;
 mod execution_context;
 mod frame;
 mod input;
+mod pdf;
 mod selectors;
 
 pub use capture::{ScreenshotBuilder, ScreenshotFormat};
 pub use element::{ClickMethod, Element, ElementPosition};
 pub use frame::Frame;
 pub use input::KeyModifiers;
+pub use pdf::PdfBuilder;
 pub use selectors::WaitOptions;
 
 /// Page operations are shared by the initial browser page and isolated contexts.

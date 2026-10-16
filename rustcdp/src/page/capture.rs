@@ -1,8 +1,5 @@
 use super::Page;
-use crate::{
-    Error, Result,
-    cdp::page::commands::{CaptureScreenshot, PrintToPdf, PrintToPdfTransferMode},
-};
+use crate::{Error, Result, cdp::page::commands::CaptureScreenshot};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
 pub use crate::cdp::page::commands::CaptureScreenshotFormat as ScreenshotFormat;
@@ -110,20 +107,6 @@ impl Page {
     /// Capture using all available CDP options and return decoded image bytes.
     /// Prefer [`Self::screenshot`] for viewport, full-page and clipped captures.
     pub async fn screenshot_with_options(&self, options: &CaptureScreenshot) -> Result<Vec<u8>> {
-        let result = self.session.execute(options).await?;
-        Ok(STANDARD.decode(result.data)?)
-    }
-
-    /// Print to PDF bytes. Stream transfer is available through Session::execute.
-    pub async fn print_to_pdf(&self, options: &PrintToPdf) -> Result<Vec<u8>> {
-        if matches!(
-            options.transfer_mode,
-            Some(PrintToPdfTransferMode::ReturnAsStream)
-        ) {
-            return Err(Error::InvalidArgument(
-                "print_to_pdf returns bytes; use Session::execute for stream transfer".into(),
-            ));
-        }
         let result = self.session.execute(options).await?;
         Ok(STANDARD.decode(result.data)?)
     }

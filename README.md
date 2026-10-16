@@ -96,7 +96,8 @@ Each example awaits browser cleanup on success or failure. Report files go to
   `Page::frame(index)` attaches to an out-of-process frame belonging to that page.
 - [Capture](rustcdp/src/page/capture.rs): `page.screenshot().full_page(true).capture().await`
   returns image bytes; `screenshot_with_options` exposes all CDP screenshot options.
-  `print_to_pdf` returns PDF bytes using generated CDP options.
+  `page.pdf().print_background(true).generate().await` returns PDF bytes;
+  `print_to_pdf` accepts all CDP PDF options.
 - [Connection](rustcdp/src/connection.rs) and [Session](rustcdp/src/session.rs): typed `execute`,
   JSON `execute_raw`, and event subscriptions for lower-level protocol access.
 
