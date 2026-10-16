@@ -39,6 +39,9 @@ pub enum Error {
     /// The context disappeared or changed while preparing an operation.
     #[error("execution context changed during acquisition")]
     ExecutionContextChanged,
+    /// A required element lookup found no matching node.
+    #[error("element not found: {0}")]
+    ElementNotFound(String),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     #[error(transparent)]

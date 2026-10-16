@@ -54,6 +54,71 @@ impl Page {
             .await
     }
 
+    /// Find the first CSS match without polling, or return [`Error::ElementNotFound`]
+    /// if absent. Invalid selectors and acquisition errors propagate unchanged.
+    /// Uses the owned acquisition and cancellation policy of [`Self::element_by_selector`].
+    pub async fn require_element(&self, selector: &str) -> Result<Element> {
+        self.element_by_selector(selector)
+            .await?
+            .ok_or_else(|| Error::ElementNotFound(selector.to_owned()))
+    }
+
+    /// Wait for the first present CSS match and return its owned handle.
+    /// Polls immediately, then 100 milliseconds after each unsuccessful acquisition.
+    /// Only recognized navigation/context-change errors are retried; other errors
+    /// propagate. The timeout includes polling and acquisition and expires with
+    /// [`Error::Timeout`]; a shorter command timeout can fail an acquisition earlier.
+    ///
+    /// This checks presence only, not visibility, stability, or actionability.
+    /// The element can become stale after acquisition. Cancellation or expiration
+    /// stops polling but leaves an in-flight owned acquisition running under its
+    /// independent 30-second limit and recovery/cleanup bounds; see
+    /// [`Self::element_by_selector`].
+    ///
+    /// ```no_run
+    /// # async fn focus_customer(page: &rustcdp::Page) -> rustcdp::Result<()> {
+    /// use std::time::Duration;
+    ///
+    /// let customer = page
+    ///     .wait_for_element("input[name=customer]", Duration::from_secs(5))
+    ///     .await?;
+    /// customer.focus().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_for_element(&self, selector: &str, timeout: Duration) -> Result<Element> {
+        self.wait_for_element_in_frame(selector, timeout, None)
+            .await
+    }
+
+    pub(super) async fn wait_for_element_in_frame(
+        &self,
+        selector: &str,
+        timeout: Duration,
+        frame: Option<FrameId>,
+    ) -> Result<Element> {
+        tokio::time::timeout(timeout, async {
+            let expression = format!(
+                "document.querySelector({})",
+                serde_json::to_string(selector)?
+            );
+            loop {
+                match self
+                    .element_for_expression_in_frame(expression.clone(), frame.clone())
+                    .await
+                {
+                    Ok(Some(element)) => return Ok(element),
+                    Ok(None) => {}
+                    Err(error) if is_context_change(&error) => {}
+                    Err(error) => return Err(error),
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout(format!("waiting for element: {selector}")))?
+    }
+
     pub(super) async fn element_for_expression(
         &self,
         expression: String,

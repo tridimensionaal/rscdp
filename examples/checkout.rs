@@ -1,6 +1,6 @@
 //! Fill a local checkout form and submit it through keyboard input.
 mod common;
-use rustcdp::{Error, Page, Result, page::WaitOptions};
+use rustcdp::{Error, Page, Result};
 use std::time::Duration;
 
 const CHECKOUT: &str = r#"<!doctype html><meta charset="utf-8"><title>Paper shop</title>
@@ -23,27 +23,13 @@ async fn main() -> Result<()> {
 async fn reserve_notebook(page: &Page) -> Result<()> {
     page.navigate_and_wait(&common::html_url(CHECKOUT), Duration::from_secs(10))
         .await?;
-    let customer = page
-        .element_by_selector("input[name=customer]")
-        .await?
-        .ok_or_else(|| Error::InvalidArgument("checkout has no customer field".into()))?;
+    let customer = page.require_element("input[name=customer]").await?;
     customer.type_text("Ada Muñoz").await?;
     page.press_key("Tab").await?;
     page.insert_text("For your next idea ✨").await?;
     page.press_key("Enter").await?;
-    if !page
-        .wait_for_selector(
-            "output:not(:empty)",
-            WaitOptions {
-                stability_time: Duration::ZERO,
-                delay_after: Duration::ZERO,
-                ..Default::default()
-            },
-        )
-        .await?
-    {
-        return Err(Error::Timeout("waiting for the reservation receipt".into()));
-    }
+    page.wait_for_element("output:not(:empty)", Duration::from_secs(5))
+        .await?;
     let receipt = page
         .evaluate("document.querySelector('output').textContent")
         .await?;

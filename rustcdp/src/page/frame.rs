@@ -7,6 +7,7 @@ use crate::{
     },
 };
 use serde_json::{Value, json};
+use std::time::Duration;
 
 /// A frame within a CDP target. Clones share the page's resource ownership.
 /// Each evaluation resolves the frame's current isolated execution context.
@@ -187,6 +188,29 @@ impl Frame {
     pub async fn element_by_selector(&self, selector: &str) -> Result<Option<Element>> {
         let selector = serde_json::to_string(selector)?;
         self.element_for_expression(format!("document.querySelector({selector})"))
+            .await
+    }
+
+    /// Find the first CSS match in this frame without polling, or return
+    /// [`Error::ElementNotFound`] if absent. Other errors propagate unchanged.
+    /// Uses the owned acquisition and cancellation policy of [`Self::element_by_selector`].
+    pub async fn require_element(&self, selector: &str) -> Result<Element> {
+        self.element_by_selector(selector)
+            .await?
+            .ok_or_else(|| Error::ElementNotFound(selector.to_owned()))
+    }
+
+    /// Wait for the first present CSS match in this frame, as in [`Page::wait_for_element`].
+    /// Polls immediately, then every 100 milliseconds after unsuccessful acquisition;
+    /// only recognized context changes are retried. The timeout includes acquisition
+    /// and polling; shorter command timeouts still apply. No visibility, stability,
+    /// or actionability is promised, and the returned element can become stale.
+    /// Cancellation or timeout leaves in-flight owned acquisition running under its
+    /// independent 30-second limit and recovery/cleanup bounds. This does not
+    /// reattach a removed frame or follow a process swap.
+    pub async fn wait_for_element(&self, selector: &str, timeout: Duration) -> Result<Element> {
+        self.page
+            .wait_for_element_in_frame(selector, timeout, Some(self.id.clone()))
             .await
     }
 

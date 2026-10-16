@@ -46,10 +46,7 @@ async fn update_inventory(page: &Page, board: &str) -> Result<()> {
     let shelf = children
         .first()
         .ok_or_else(|| Error::InvalidArgument("shelf frame missing".into()))?;
-    let receive = shelf
-        .element_by_selector("button")
-        .await?
-        .ok_or_else(|| Error::InvalidArgument("receive button missing".into()))?;
+    let receive = shelf.require_element("button").await?;
     receive.click(ClickMethod::JavaScript, false).await?;
     let stock = shelf
         .evaluate("Number(document.querySelector('output').textContent)")
