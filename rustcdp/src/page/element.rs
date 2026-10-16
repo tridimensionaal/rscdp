@@ -46,27 +46,41 @@ pub struct ElementPosition {
 /// release attempt, capped at 30 seconds while preserving a shorter handle
 /// deadline. Drop does not guarantee that the remote release is acknowledged.
 #[derive(Clone)]
-pub struct Element(pub(super) Arc<RemoteNode>);
+pub struct Element(pub(super) Arc<RemoteObjectLease>);
 
-pub(super) struct RemoteNode {
+pub(super) struct RemoteObjectLease {
     pub(super) session: Session,
     pub(super) id: RemoteObjectId,
     context_lease: Option<Arc<crate::browser::ContextLease>>,
+    released: bool,
 }
 
-impl Drop for RemoteNode {
-    fn drop(&mut self) {
+impl RemoteObjectLease {
+    fn release_task(&mut self) -> tokio::task::JoinHandle<Result<()>> {
+        self.released = true;
         let session = self.session.clone();
         let id = self.id.clone();
         let context_lease = self.context_lease.take();
         self.session.connection().runtime().spawn(async move {
-            let _ = tokio::time::timeout(
+            let result = tokio::time::timeout(
                 Duration::from_secs(30),
                 session.execute_raw("Runtime.releaseObject", json!({"objectId":id})),
             )
-            .await;
+            .await
+            .map_err(|_| Error::Timeout("releasing remote object".into()))?
+            .map(|_| ());
             drop(context_lease);
-        });
+            result
+        })
+    }
+}
+
+impl Drop for RemoteObjectLease {
+    fn drop(&mut self) {
+        if !self.released {
+            // The task owns the session and fallback context through release.
+            drop(self.release_task());
+        }
     }
 }
 
@@ -76,11 +90,24 @@ impl Element {
         id: RemoteObjectId,
         context_lease: Option<Arc<crate::browser::ContextLease>>,
     ) -> Self {
-        Self(Arc::new(RemoteNode {
+        Self(Arc::new(RemoteObjectLease {
             session,
             id,
             context_lease,
+            released: false,
         }))
+    }
+
+    /// Release this handle. If it is the last clone, await remote-object cleanup.
+    /// Other clones remain usable and retain their shared reference. Once final
+    /// cleanup starts, it continues if the caller cancels this wait. Release uses
+    /// the handle deadline, capped at 30 seconds; failures are returned without
+    /// retrying. Navigation or explicit context closure can already invalidate it.
+    pub async fn release(self) -> Result<()> {
+        match Arc::into_inner(self.0) {
+            Some(mut lease) => lease.release_task().await?,
+            None => Ok(()),
+        }
     }
 
     pub fn object_id(&self) -> &RemoteObjectId {
