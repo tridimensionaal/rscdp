@@ -1,4 +1,4 @@
-use super::{ClickMethod, Element, Page, element::node_result};
+use super::{ClickOptions, Element, Page, element::node_result};
 use crate::{Error, Result, cdp::page::FrameId};
 use serde_json::json;
 use std::time::Duration;
@@ -254,11 +254,20 @@ impl Page {
         }
     }
 
-    pub async fn click_xpath(&self, xpath: &str, method: ClickMethod, scroll: bool) -> Result<()> {
+    /// Find the first XPath node, scroll into view and click using CDP input.
+    /// Returns [`Error::ElementNotFound`] if absent. Does not poll or retry clicks.
+    pub async fn click_xpath(&self, xpath: &str) -> Result<()> {
+        self.click_xpath_with_options(xpath, ClickOptions::default())
+            .await
+    }
+
+    /// Find the first XPath node and click with explicit settings.
+    /// See [`Element::click_with_options`] for input and cancellation behavior.
+    pub async fn click_xpath_with_options(&self, xpath: &str, options: ClickOptions) -> Result<()> {
         self.element_by_xpath(xpath)
             .await?
-            .ok_or_else(|| Error::InvalidArgument(format!("element not found: {xpath}")))?
-            .click(method, scroll)
+            .ok_or_else(|| Error::ElementNotFound(xpath.to_owned()))?
+            .click_with_options(options)
             .await
     }
 }

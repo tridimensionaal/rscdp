@@ -88,7 +88,8 @@ Each example awaits browser cleanup on success or failure. Report files go to
   and explicit cleanup. `new_context()` bypasses the parent browser's proxy;
   [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
 - [Page](rustcdp/src/page.rs): navigation, isolated-world JSON evaluation, HTML, and cookies.
-  [Selectors](rustcdp/src/page/selectors.rs) provides CSS/XPath lookup and polling;
+  [Selectors](rustcdp/src/page/selectors.rs) provides optional lookup, required lookup,
+  and element-returning presence waits;
   [DOM](rustcdp/src/page/dom.rs) handles HTML reads and search transactions.
   [Element](rustcdp/src/page/element.rs) owns remote nodes;
   [input](rustcdp/src/page/input.rs) provides keyboard and Unicode input.
@@ -100,6 +101,21 @@ Each example awaits browser cleanup on success or failure. Report files go to
   `print_to_pdf` accepts all CDP PDF options.
 - [Connection](rustcdp/src/connection.rs) and [Session](rustcdp/src/session.rs): typed `execute`,
   JSON `execute_raw`, and event subscriptions for lower-level protocol access.
+
+For ordinary interactions, wait for a matching element and use direct actions:
+
+```rust
+let input = page.wait_for_element("input[name=email]", std::time::Duration::from_secs(5)).await?;
+input.insert_text("reader@example.com").await?;
+page.require_element("button[type=submit]").await?.click().await?;
+```
+
+`wait_for_element` checks presence, not visibility or readiness. `require_element`
+looks up once and reports `Error::ElementNotFound` if absent; `element_by_selector`
+returns `Option<Element>` for optional matches. `click()` scrolls and sends CDP
+mouse input; `click_with_options(ClickOptions { .. })` selects different behavior.
+Actions are not automatically retried. The existing `wait_for_selector` and
+`wait_for_xpath` methods wait for stable match counts, which is a different task.
 
 The [generated `cdp` API](rustcdp/src/lib.rs) groups types, commands, and events by domain.
 Commands implement `protocol::Command` with an associated response type. Commands

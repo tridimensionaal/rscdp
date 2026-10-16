@@ -24,7 +24,7 @@ async fn reserve_notebook(page: &Page) -> Result<()> {
     page.navigate_and_wait(&common::html_url(CHECKOUT), Duration::from_secs(10))
         .await?;
     let customer = page.require_element("input[name=customer]").await?;
-    customer.type_text("Ada Muñoz").await?;
+    customer.insert_text("Ada Muñoz").await?;
     page.press_key("Tab").await?;
     page.insert_text("For your next idea ✨").await?;
     page.press_key("Enter").await?;

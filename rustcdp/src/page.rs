@@ -23,7 +23,7 @@ mod pdf;
 mod selectors;
 
 pub use capture::{ScreenshotBuilder, ScreenshotFormat};
-pub use element::{ClickMethod, Element, ElementPosition};
+pub use element::{ClickMethod, ClickOptions, Element, ElementPosition};
 pub use frame::Frame;
 pub use input::KeyModifiers;
 pub use pdf::PdfBuilder;

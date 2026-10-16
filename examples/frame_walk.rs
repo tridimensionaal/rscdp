@@ -1,6 +1,9 @@
 //! Explore a nested dispatch board without confusing parent and child documents.
 mod common;
-use rustcdp::{Error, Page, Result, page::ClickMethod};
+use rustcdp::{
+    Error, Page, Result,
+    page::{ClickMethod, ClickOptions},
+};
 use std::time::Duration;
 
 fn embed(name: &str, html: &str) -> String {
@@ -47,7 +50,12 @@ async fn update_inventory(page: &Page, board: &str) -> Result<()> {
         .first()
         .ok_or_else(|| Error::InvalidArgument("shelf frame missing".into()))?;
     let receive = shelf.require_element("button").await?;
-    receive.click(ClickMethod::JavaScript, false).await?;
+    receive
+        .click_with_options(ClickOptions {
+            method: ClickMethod::JavaScript,
+            scroll_into_view: false,
+        })
+        .await?;
     let stock = shelf
         .evaluate("Number(document.querySelector('output').textContent)")
         .await?;

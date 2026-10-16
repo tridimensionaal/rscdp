@@ -16,6 +16,24 @@ pub enum ClickMethod {
     JavaScript,
 }
 
+/// Options for clicking an element. Defaults to CDP input with scrolling enabled.
+#[derive(Debug, Clone, Copy)]
+pub struct ClickOptions {
+    /// Dispatch CDP mouse input or invoke the element's JavaScript `click()` method.
+    pub method: ClickMethod,
+    /// Scroll before clicking, including when using JavaScript.
+    pub scroll_into_view: bool,
+}
+
+impl Default for ClickOptions {
+    fn default() -> Self {
+        Self {
+            method: ClickMethod::Cdp,
+            scroll_into_view: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ElementPosition {
     pub x: f64,
@@ -95,11 +113,24 @@ impl Element {
         Ok(())
     }
 
-    pub async fn click(&self, method: ClickMethod, scroll: bool) -> Result<()> {
-        if scroll {
+    /// Scroll into view and click the element's center using CDP mouse input.
+    /// See [`Self::click_with_options`] for behavior and limitations.
+    pub async fn click(&self) -> Result<()> {
+        self.click_with_options(ClickOptions::default()).await
+    }
+
+    /// Click this element using the requested method and scrolling behavior.
+    ///
+    /// Scrolling completes before clicking; a scroll error prevents the click.
+    /// CDP input targets the border-quad center; JavaScript invokes `this.click()`.
+    /// This does not check actionability, retry actions, or wait for navigation.
+    /// Cancellation does not undo input already dispatched. Once the CDP input
+    /// pair starts, its release is attempted even after press failure or cancellation.
+    pub async fn click_with_options(&self, options: ClickOptions) -> Result<()> {
+        if options.scroll_into_view {
             self.scroll_into_view().await?;
         }
-        match method {
+        match options.method {
             ClickMethod::Cdp => {
                 let position = self.position().await?;
                 click_cdp(&self.0.session, position.center_x, position.center_y).await

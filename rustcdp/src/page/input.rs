@@ -119,10 +119,19 @@ impl Element {
         Ok(())
     }
 
-    /// Focus this element and insert text using Chrome's input pipeline.
-    pub async fn type_text(&self, text: &str) -> Result<()> {
+    /// Focus this element and insert Unicode text at the current selection.
+    ///
+    /// Uses Chrome's input pipeline without synthesizing key events. Selected text
+    /// is replaced; the entire value is not cleared first. Focus and insertion are
+    /// separate commands, so this operation is not atomic.
+    pub async fn insert_text(&self, text: &str) -> Result<()> {
         self.focus().await?;
         insert_text(&self.0.session, text).await
+    }
+
+    /// Alias for [`Self::insert_text`]; does not synthesize key events.
+    pub async fn type_text(&self, text: &str) -> Result<()> {
+        self.insert_text(text).await
     }
 }
 
