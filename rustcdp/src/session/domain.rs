@@ -1,5 +1,5 @@
 use super::Session;
-use crate::{Error, Result};
+use crate::{Error, Result, error::with_cleanup};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
@@ -15,14 +15,16 @@ const DETACH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Shared ownership of an enabled DOM, Page, or Runtime domain.
 /// Await `close` to confirm the final disable; Drop schedules the same cleanup.
-/// A transition that stalls for 30 seconds triggers session detachment; failed
-/// detachment closes the connection to resolve the uncertain domain state.
+/// A failed final disable or a transition that stalls for 30 seconds triggers
+/// session detachment. If the session remains open, recovery closes the connection.
+/// The transition error is preserved; a failed detach is combined with it in
+/// [`Error::Cleanup`]. Neither enable nor disable is retried.
 /// Counts are shared across handles of the same session. Direct enable/disable
 /// commands through either `execute` or `execute_raw` bypass these counts; do not
 /// mix them with guards for the same domain. The first guard enables and the last
 /// disables.
 /// Transitions run on the connection runtime independently of caller cancellation
-/// and command timeouts, with a one-second detach attempt during timeout recovery.
+/// and command timeouts, with a one-second detach attempt during recovery.
 #[must_use = "retain this guard while using the enabled domain; await close() to observe cleanup errors"]
 pub struct DomainGuard {
     session: Session,
@@ -144,8 +146,15 @@ async fn release(session: Session, counts: Counts, index: usize) -> Result<()> {
         return Ok(());
     }
     *users -= 1;
-    if *users == 0 && !session.is_closed() {
-        transition(&session, METHODS[index].1).await?;
+    if *users == 0
+        && !session.is_closed()
+        && let Err(error) = transition(&session, METHODS[index].1).await
+    {
+        // There is no guard left to own an enabled domain. Retain the count
+        // lock through recovery so another acquisition cannot reuse it.
+        // A transition timeout already recovered; the closed check makes
+        // that case a no-op rather than a second detach attempt.
+        return with_cleanup(Err(error), recover(&session).await);
     }
     Ok(())
 }
@@ -156,13 +165,26 @@ async fn transition(session: &Session, method: &str) -> Result<()> {
         Err(_) => {
             // Timing out cannot establish whether the remote domain changed.
             // Keep ownership until detachment or connection teardown resolves it.
-            let detached = tokio::time::timeout(DETACH_TIMEOUT, session.detach()).await;
-            if !matches!(detached, Ok(Ok(()))) && !session.is_closed() {
-                session.connection().close().await;
-            }
-            Err(Error::Timeout(method.into()))
+            with_cleanup(Err(Error::Timeout(method.into())), recover(session).await)
         }
     }
+}
+
+async fn recover(session: &Session) -> Result<()> {
+    if session.is_closed() {
+        return Ok(());
+    }
+    let detached = tokio::time::timeout(DETACH_TIMEOUT, session.detach())
+        .await
+        .unwrap_or_else(|_| {
+            Err(Error::Timeout(
+                "detaching session after domain transition failure".into(),
+            ))
+        });
+    if !session.is_closed() {
+        session.connection().close().await;
+    }
+    detached
 }
 
 impl Drop for DomainGuard {
