@@ -153,6 +153,9 @@ impl Element {
     /// This does not check actionability, retry actions, or wait for navigation.
     /// Cancellation does not undo input already dispatched. Once the CDP input
     /// pair starts, its release is attempted even after press failure or cancellation.
+    /// Each input command has its own deadline capped at 30 seconds, preserving
+    /// a shorter handle deadline. Received JavaScript result/exception object IDs
+    /// are released best-effort; error details retain diagnostic IDs, not ownership.
     pub async fn click_with_options(&self, options: ClickOptions) -> Result<()> {
         if options.scroll_into_view {
             self.scroll_into_view().await?;
@@ -160,10 +163,22 @@ impl Element {
         match options.method {
             ClickMethod::Cdp => {
                 let position = self.position().await?;
-                click_cdp(&self.0.session, position.center_x, position.center_y).await
+                click_cdp(
+                    &self.0.session,
+                    self.0.context_lease.clone(),
+                    position.center_x,
+                    position.center_y,
+                )
+                .await
             }
             ClickMethod::JavaScript => {
                 let result = self.0.session.execute_raw("Runtime.callFunctionOn", json!({"objectId":self.0.id,"functionDeclaration":"function() { this.click(); }","userGesture":true,"returnByValue":true})).await?;
+                // Own received IDs before interpreting the response. Seed with
+                // this handle so an aliased result/exception cannot release it.
+                let mut objects = vec![self.clone()];
+                for object in [&result["result"], &result["exceptionDetails"]["exception"]] {
+                    own_remote_object(&self.0.session, &self.0.context_lease, object, &mut objects);
+                }
                 if let Some(error) = result.get("exceptionDetails") {
                     return Err(Error::JavaScript(error.clone()));
                 }
@@ -296,40 +311,45 @@ impl Page {
         let mut known = if result_by_value && result.get("objectId").is_none() {
             true
         } else {
-            self.own_remote_object(result, objects)
+            own_remote_object(&self.session, &self.context_lease, result, objects)
         };
         if let Some(details) = response.get("exceptionDetails") {
             if let Some(exception) = details.get("exception") {
-                known &= self.own_remote_object(exception, objects);
+                known &= own_remote_object(&self.session, &self.context_lease, exception, objects);
             } else if !details.is_object() {
                 known = false;
             }
         }
         known
     }
+}
 
-    fn own_remote_object(&self, object: &Value, objects: &mut Vec<Element>) -> bool {
-        if let Some(id) = object.get("objectId") {
-            let Some(id) = id.as_str().filter(|id| !id.is_empty()) else {
-                return false;
-            };
-            if !objects.iter().any(|owned| owned.object_id().0 == id) {
-                objects.push(Element::from_object_id(
-                    self.session.clone(),
-                    RemoteObjectId(id.to_owned()),
-                    self.context_lease.clone(),
-                ));
-            }
-            return true;
+fn own_remote_object(
+    session: &Session,
+    context_lease: &Option<Arc<crate::browser::ContextLease>>,
+    object: &Value,
+    objects: &mut Vec<Element>,
+) -> bool {
+    if let Some(id) = object.get("objectId") {
+        let Some(id) = id.as_str().filter(|id| !id.is_empty()) else {
+            return false;
+        };
+        if !objects.iter().any(|owned| owned.object_id().0 == id) {
+            objects.push(Element::from_object_id(
+                session.clone(),
+                RemoteObjectId(id.to_owned()),
+                context_lease.clone(),
+            ));
         }
-        // By-reference objects/functions/symbols require an ID. Only recognized
-        // primitives and null conclusively contain no remote reference.
-        serde_json::from_value::<RemoteObject>(object.clone()).is_ok()
-            && (matches!(
-                object["type"].as_str(),
-                Some("undefined" | "string" | "number" | "boolean" | "bigint")
-            ) || is_null_object(object))
+        return true;
     }
+    // By-reference objects/functions/symbols require an ID. Only recognized
+    // primitives and null conclusively contain no remote reference.
+    serde_json::from_value::<RemoteObject>(object.clone()).is_ok()
+        && (matches!(
+            object["type"].as_str(),
+            Some("undefined" | "string" | "number" | "boolean" | "bigint")
+        ) || is_null_object(object))
 }
 
 fn is_null_object(object: &Value) -> bool {

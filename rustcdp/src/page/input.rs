@@ -1,7 +1,7 @@
 use super::{ClickMethod, Element, Page};
 use crate::{Error, Result, Session, cdp::input::commands::InsertText, error::with_cleanup};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// Modifier flags applied to both key-down and key-up events.
 #[derive(Debug, Clone, Copy, Default)]
@@ -41,6 +41,9 @@ impl Page {
             .await
     }
 
+    /// Dispatch a press/release pair that continues after caller cancellation.
+    /// Each command has its own deadline, capped at 30 seconds while preserving
+    /// a shorter handle deadline. Release is attempted even if pressing fails.
     pub async fn press_key_with_modifiers(&self, key: &str, modifiers: KeyModifiers) -> Result<()> {
         let (virtual_key, text) = match key {
             "Enter" => (13, "\r"),
@@ -106,7 +109,14 @@ impl Page {
             down["text"] = text.into();
             down["unmodifiedText"] = text.into();
         }
-        dispatch_pair(&self.session, "Input.dispatchKeyEvent", down, up).await
+        dispatch_pair(
+            &self.session,
+            self.context_lease.clone(),
+            "Input.dispatchKeyEvent",
+            down,
+            up,
+        )
+        .await
     }
 }
 
@@ -135,7 +145,12 @@ impl Element {
     }
 }
 
-pub(super) async fn click_cdp(session: &Session, x: f64, y: f64) -> Result<()> {
+pub(super) async fn click_cdp(
+    session: &Session,
+    context_lease: Option<Arc<crate::browser::ContextLease>>,
+    x: f64,
+    y: f64,
+) -> Result<()> {
     if !x.is_finite() || !y.is_finite() {
         return Err(Error::InvalidArgument(
             "click coordinates must be finite".into(),
@@ -143,6 +158,7 @@ pub(super) async fn click_cdp(session: &Session, x: f64, y: f64) -> Result<()> {
     }
     dispatch_pair(
         session,
+        context_lease,
         "Input.dispatchMouseEvent",
         json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1}),
         json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":1}),
@@ -152,17 +168,28 @@ pub(super) async fn click_cdp(session: &Session, x: f64, y: f64) -> Result<()> {
 
 async fn dispatch_pair(
     session: &Session,
+    context_lease: Option<Arc<crate::browser::ContextLease>>,
     method: &'static str,
     press: Value,
     release: Value,
 ) -> Result<()> {
-    let session = session.clone();
+    // Bound each attempt separately so a stalled press still reaches release,
+    // including when the caller has disabled command timeouts.
+    let limit = Duration::from_secs(30);
+    let timeout = session
+        .connection()
+        .command_timeout()
+        .unwrap_or(limit)
+        .min(limit);
+    let session = session.clone().with_command_timeout(Some(timeout));
     session
         .connection()
         .runtime()
         .spawn(async move {
             let pressed = session.execute_raw(method, press).await;
             let released = session.execute_raw(method, release).await;
+            // Session ownership alone does not retain a fallback browser context.
+            drop(context_lease);
             with_cleanup(pressed.map(|_| ()), released.map(|_| ()))
         })
         .await?
@@ -176,7 +203,7 @@ impl Page {
             ));
         }
         match method {
-            ClickMethod::Cdp => click_cdp(&self.session, x, y).await,
+            ClickMethod::Cdp => click_cdp(&self.session, self.context_lease.clone(), x, y).await,
             ClickMethod::JavaScript => {
                 self.evaluate_remote(&format!("(() => {{ const e = document.elementFromPoint({x},{y}); if (!e) throw new Error('No element at point'); e.dispatchEvent(new MouseEvent('click', {{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}})); }})()"),true).await?;
                 Ok(())
