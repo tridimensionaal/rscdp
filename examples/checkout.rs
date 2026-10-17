@@ -21,7 +21,9 @@ async fn main() -> Result<()> {
 }
 
 async fn reserve_notebook(page: &Page) -> Result<()> {
-    page.navigate_and_wait(&common::html_url(CHECKOUT), Duration::from_secs(10))
+    page.navigate(common::html_url(CHECKOUT))
+        .timeout(Duration::from_secs(10))
+        .send()
         .await?;
     let customer = page.require_element("input[name=customer]").await?;
     customer.insert_text("Ada Muñoz").await?;

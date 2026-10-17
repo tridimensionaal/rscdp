@@ -136,7 +136,7 @@ async fn start_auth(page: &Page, proxy: Proxy, mode: ProxyAuthMode) -> Result<Op
     let auth = ProxyAuth::start(page.session().clone(), proxy).await?;
     if mode == ProxyAuthMode::Preflight {
         tokio::time::timeout(Duration::from_secs(15), async {
-            page.navigate("https://www.example.com/").await?;
+            page.start_navigation("https://www.example.com/").await?;
             auth.wait_ready(Duration::from_secs(15)).await
         })
         .await

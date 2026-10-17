@@ -34,10 +34,12 @@ async fn main() -> Result<()> {
 }
 
 async fn read_page(page: &Page) -> Result<()> {
-    page.navigate_and_wait(
+    page.navigate(
         "data:text/html,<title>Workshop</title><h1>Hello%20from%20Rust</h1>",
-        Duration::from_secs(15),
-    ).await?;
+    )
+    .timeout(Duration::from_secs(15))
+    .send()
+    .await?;
     println!("{}", page.evaluate("document.title").await?);
     println!("{}", page.html().await?);
     Ok(())

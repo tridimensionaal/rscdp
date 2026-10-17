@@ -31,7 +31,9 @@ async fn main() -> Result<()> {
 }
 
 async fn export_report(page: &Page, output: &std::path::Path) -> Result<()> {
-    page.navigate_and_wait(&common::html_url(REPORT), Duration::from_secs(10))
+    page.navigate(common::html_url(REPORT))
+        .timeout(Duration::from_secs(10))
+        .send()
         .await?;
     let png = page.screenshot().full_page(true).capture().await?;
     let pdf = page.pdf().print_background(true).generate().await?;

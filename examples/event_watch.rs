@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
 async fn watch_dispatch(page: &Page) -> Result<()> {
     let mut events = page.session().listen::<ConsoleApiCalled>();
     let runtime = page.session().enable_runtime().await?;
-    page.navigate(&common::html_url(DISPATCH)).await?;
+    page.navigate(common::html_url(DISPATCH)).send().await?;
     tokio::time::timeout(
         Duration::from_secs(10),
         collect_dispatch_events(&mut events),

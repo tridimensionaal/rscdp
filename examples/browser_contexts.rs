@@ -93,8 +93,11 @@ async fn prepare_cart(context: &BrowserContext, shopper: &str, item: &str) -> Re
     );
     context
         .page()
-        .navigate_and_wait(&common::html_url(&html), Duration::from_secs(10))
-        .await
+        .navigate(common::html_url(&html))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+    Ok(())
 }
 
 fn cart_item(cookies: Vec<Cookie>) -> Option<String> {

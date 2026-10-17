@@ -276,7 +276,7 @@ impl Session {
 /// including descendants; buffered events are delivered before closure.
 /// Register with [`Session::listen`] before the action that can emit the event.
 /// A fragment-only navigation may not emit a load event; use
-/// [`crate::Page::navigate_and_wait`] to await a specific navigation.
+/// [`crate::Page::navigate`] to await a specific navigation.
 pub struct TypedEvents<E> {
     stream: EventStream,
     session_id: Option<String>,

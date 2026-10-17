@@ -3,10 +3,7 @@ use crate::{
     cdp::{
         browser::BrowserContextId,
         network::{Cookie, CookieParam},
-        page::{
-            commands::{GetFrameTree, NavigateResponse},
-            events::LifecycleEvent,
-        },
+        page::commands::GetFrameTree,
         runtime::{ExecutionContextId, RemoteObject},
     },
 };
@@ -19,6 +16,7 @@ mod element;
 mod execution_context;
 mod frame;
 mod input;
+mod navigation;
 mod pdf;
 mod selectors;
 
@@ -26,6 +24,7 @@ pub use capture::{ScreenshotBuilder, ScreenshotFormat};
 pub use element::{ClickMethod, ClickOptions, Element, ElementPosition};
 pub use frame::Frame;
 pub use input::KeyModifiers;
+pub use navigation::{NavigationBuilder, WaitUntil};
 pub use pdf::PdfBuilder;
 pub use selectors::WaitOptions;
 
@@ -85,68 +84,6 @@ impl Page {
 
     pub fn session(&self) -> &Session {
         &self.session
-    }
-
-    /// Start a navigation. Use `navigate_and_wait` when completion is required.
-    pub async fn navigate(&self, url: &str) -> Result<NavigateResponse> {
-        let response = self
-            .session
-            .execute_raw("Page.navigate", json!({"url":url,"transitionType":"typed"}))
-            .await?;
-        let response: NavigateResponse = serde_json::from_value(response)?;
-        if let Some(error) = &response.error_text {
-            return Err(Error::Navigation(error.clone()));
-        }
-        if response.is_download == Some(true) {
-            return Err(Error::Navigation("navigation became a download".into()));
-        }
-        Ok(response)
-    }
-
-    /// Navigate and wait for the returned loader's load event within `timeout`.
-    /// A same-document navigation with no new loader completes immediately.
-    /// Unlike listening for an arbitrary load event, this matches the requested
-    /// navigation. Downloads and reported navigation failures are errors.
-    pub async fn navigate_and_wait(&self, url: &str, timeout: Duration) -> Result<()> {
-        tokio::time::timeout(timeout, async {
-            self.session
-                .execute_raw("Page.setLifecycleEventsEnabled", json!({"enabled":true}))
-                .await?;
-            let mut events = self.session.listen::<LifecycleEvent>();
-            let response = self.navigate(url).await?;
-            let Some(loader) = response.loader_id else {
-                return Ok(());
-            };
-            loop {
-                let event = events.recv().await?;
-                if event.name == "load" && event.loader_id == loader {
-                    return Ok(());
-                }
-            }
-        })
-        .await
-        .map_err(|_| Error::Timeout(format!("navigating to {url}")))?
-    }
-
-    pub async fn go_back(&self) -> Result<bool> {
-        let history = self
-            .session
-            .execute(&crate::cdp::page::commands::GetNavigationHistory::default())
-            .await?;
-        let Some(index) = history
-            .current_index
-            .checked_sub(1)
-            .and_then(|n| usize::try_from(n).ok())
-        else {
-            return Ok(false);
-        };
-        let Some(entry) = history.entries.get(index) else {
-            return Ok(false);
-        };
-        self.session
-            .execute_raw("Page.navigateToHistoryEntry", json!({"entryId":entry.id}))
-            .await?;
-        Ok(true)
     }
 
     /// Return the main frame's current URL, including its fragment.

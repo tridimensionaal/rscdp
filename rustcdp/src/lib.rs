@@ -28,10 +28,12 @@
 //! }
 //!
 //! async fn print_title(page: &Page) -> Result<()> {
-//!     page.navigate_and_wait(
+//!     page.navigate(
 //!         "data:text/html,<title>Library demo</title>",
-//!         Duration::from_secs(10),
-//!     ).await?;
+//!     )
+//!     .timeout(Duration::from_secs(10))
+//!     .send()
+//!     .await?;
 //!     println!("{}", page.evaluate("document.title").await?);
 //!     Ok(())
 //! }

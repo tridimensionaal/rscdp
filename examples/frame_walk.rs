@@ -31,7 +31,9 @@ async fn main() -> Result<()> {
 }
 
 async fn update_inventory(page: &Page, board: &str) -> Result<()> {
-    page.navigate_and_wait(&common::html_url(board), Duration::from_secs(10))
+    page.navigate(common::html_url(board))
+        .timeout(Duration::from_secs(10))
+        .send()
         .await?;
     for frame in page.frames().await? {
         println!(
