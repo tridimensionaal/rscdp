@@ -196,7 +196,9 @@ impl Drop for Browser {
         } else if self.shutdown.is_none() && !self.shutdown_complete {
             // Preserve external connections and fallback leases retained by
             // dependent handles when explicit shutdown was never requested.
-            self.detach_proxy_auth();
+            // Dropping the worker requests its owned Fetch cleanup rather than
+            // aborting it while dependent pages can still use the connection.
+            drop(self.auth.take());
         }
         // Dropping a JoinHandle detaches the task; it does not abort shutdown.
     }

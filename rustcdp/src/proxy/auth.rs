@@ -40,7 +40,6 @@ pub enum ProxyAuthStatus {
 enum Stop {
     Running,
     Shutdown,
-    Detach,
 }
 
 /// An owned authentication worker for one session.
@@ -131,9 +130,6 @@ impl ProxyAuth {
                     _ = session.closed() => Ok(false),
                 }
             };
-            if *stopped.borrow() == Stop::Detach {
-                return Ok(());
-            }
             if session.is_closed() {
                 status_sender.send_replace(ProxyAuthStatus::Stopped);
                 return Ok(());
@@ -222,7 +218,7 @@ impl ProxyAuth {
 
     /// Stop the worker and await cleanup. Fetch disable has a one-second limit
     /// before recovery, even when ordinary command timeouts are disabled.
-    /// Use [`Self::detach`] only immediately before disposing an unresponsive target.
+    /// Canceling this wait leaves cleanup running; another call can await it.
     pub async fn stop(&mut self) -> Result<()> {
         self.stop.send_replace(Stop::Shutdown);
         if let Some(task) = &mut self.task {
@@ -231,14 +227,6 @@ impl ProxyAuth {
             result??;
         }
         Ok(())
-    }
-
-    /// Skip Fetch cleanup. Use only immediately before disposing the target/context.
-    pub fn detach(&mut self) {
-        self.stop.send_replace(Stop::Detach);
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
     }
 }
 

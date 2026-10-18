@@ -167,8 +167,8 @@ impl BrowserContext {
     /// timeout closes the connection; protocol errors remain retryable.
     ///
     /// Concurrent cleanup is serialized. Authentication cleanup precedes disposal,
-    /// including after caller cancellation or Drop. [`Self::detach_proxy_auth`]
-    /// explicitly skips authentication cleanup.
+    /// including after caller cancellation or Drop. Use [`Self::stop_proxy_auth`]
+    /// to stop authentication without disposing the context.
     /// Acknowledged disposal prevents duplicate commands and makes [`Self::id`]
     /// return `None`, even if the caller canceled its wait. Drop is best-effort;
     /// connection teardown after an uncertain timeout can take additional time.

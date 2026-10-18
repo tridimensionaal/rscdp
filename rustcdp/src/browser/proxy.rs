@@ -95,11 +95,14 @@ impl Browser {
         Ok(())
     }
 
-    /// Cancel authentication without waiting for its epilogue, immediately before close.
-    pub fn detach_proxy_auth(&mut self) {
-        if let Some(mut auth) = self.auth.take() {
-            auth.detach();
+    /// Stop the initial page's authentication worker and await Fetch cleanup.
+    /// Canceling the wait leaves cleanup running; call again to observe completion.
+    /// The proxy route remains configured, so later requests may require credentials.
+    pub async fn stop_proxy_auth(&mut self) -> Result<()> {
+        if let Some(auth) = &mut self.auth {
+            auth.stop().await?;
         }
+        Ok(())
     }
 }
 
@@ -121,11 +124,14 @@ impl BrowserContext {
         Ok(())
     }
 
-    /// Use immediately before closing an unresponsive context.
-    pub fn detach_proxy_auth(&mut self) {
-        if let Some(mut auth) = self.auth.take() {
-            auth.detach();
+    /// Stop the initial page's authentication worker and await Fetch cleanup.
+    /// Canceling the wait leaves cleanup running; call again to observe completion.
+    /// The proxy route remains configured, so later requests may require credentials.
+    pub async fn stop_proxy_auth(&mut self) -> Result<()> {
+        if let Some(auth) = &mut self.auth {
+            auth.stop().await?;
         }
+        Ok(())
     }
 }
 
