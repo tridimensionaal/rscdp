@@ -20,7 +20,7 @@ use std::{ffi::OsString, path::PathBuf, time::Duration};
 /// | [`executable`](Self::executable) | Discover Chrome / `CHROME_PATH` | — |
 /// | [`profile_dir`](Self::profile_dir) | Temporary profile | `--user-data-dir` |
 /// | [`startup_timeout`](Self::startup_timeout) | 15 seconds per attempt | — |
-/// | [`base_temp_dir`](Self::base_temp_dir) | `.temp_chrome_profiles` | — |
+/// | [`base_temp_dir`](Self::base_temp_dir) | OS temporary directory | — |
 /// | [`dir_prefix`](Self::dir_prefix) | `tmp` | — |
 ///
 /// The launcher manages remote-debugging flags and the user-data directory;
@@ -63,6 +63,8 @@ impl BrowserBuilder {
     }
 
     /// Use a persistent user-data directory, retained after browser shutdown.
+    /// Concurrent rustcdp launches of the same canonical directory are rejected.
+    /// A persistent sibling lock file requires write access to its parent directory.
     pub fn profile_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.options.profile_dir = Some(path.into());
         self
@@ -76,6 +78,7 @@ impl BrowserBuilder {
     }
 
     /// Set the parent directory for temporary profiles.
+    /// Defaults to [`std::env::temp_dir`].
     /// Ignored when [`Self::profile_dir`] supplies a persistent profile.
     pub fn base_temp_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.options.base_temp_dir = path.into();

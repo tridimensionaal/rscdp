@@ -1,6 +1,7 @@
 use crate::{Connection, Error, Result, error::with_cleanup};
 use std::{
     ffi::OsString,
+    fs::File,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::Duration,
@@ -8,6 +9,63 @@ use std::{
 use tempfile::TempDir;
 
 pub(crate) mod args;
+
+fn lock_profile(profile: &Path) -> std::io::Result<File> {
+    let name = profile.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "profile must not be a filesystem root",
+        )
+    })?;
+    let mut lock_name = OsString::from(".rustcdp-");
+    lock_name.push(name);
+    lock_name.push(".lock");
+    // The sibling survives profile removal/recreation. Never unlink it: another
+    // opener must not lock a replacement inode while this one is still held.
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(profile.with_file_name(lock_name))?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!(
+                "profile is already owned by another rustcdp launch: {}",
+                profile.display()
+            ),
+        ),
+        std::fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(file)
+}
+
+fn browser_endpoint(contents: &[u8]) -> Option<String> {
+    let mut lines = std::str::from_utf8(contents).ok()?.lines();
+    let port = lines
+        .next()?
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)?;
+    let path = lines.next()?;
+    let id = path.strip_prefix("/devtools/browser/")?;
+    if id.is_empty() || id.chars().any(|c| c.is_whitespace() || "/?#".contains(c)) {
+        return None;
+    }
+    Some(format!("ws://127.0.0.1:{port}{path}"))
+}
+
+fn fresh_endpoint(contents: &[u8], previous: Option<&[u8]>) -> Option<String> {
+    if previous == Some(contents) {
+        return None;
+    }
+    let endpoint = browser_endpoint(contents)?;
+    if previous.and_then(browser_endpoint).as_ref() == Some(&endpoint) {
+        return None;
+    }
+    Some(endpoint)
+}
 
 /// Chrome executable, arguments, profile location, and startup deadline.
 /// The launcher selects a debugging port through Chrome and makes up to three
@@ -21,9 +79,12 @@ pub struct LaunchOptions {
     /// Profile and remote-debugging flags are reserved for the launcher.
     /// The `--` terminator and Windows `single-argument` switch are rejected.
     pub args: Vec<OsString>,
-    /// A fixed profile is retained after shutdown.
+    /// A fixed profile is retained after shutdown. Concurrent rustcdp launches
+    /// using the same canonical directory are rejected by a persistent sibling
+    /// `.rustcdp-<profile-name>.lock` file. The parent must be writable.
+    /// Chrome's own singleton files and any existing DevToolsActivePort are left intact.
     pub profile_dir: Option<PathBuf>,
-    /// Parent of temporary profiles; defaults to `.temp_chrome_profiles`.
+    /// Parent of temporary profiles; defaults to [`std::env::temp_dir`].
     pub base_temp_dir: PathBuf,
     /// `None` uses "tmp"; an empty prefix is preserved.
     pub dir_prefix: Option<String>,
@@ -38,7 +99,7 @@ impl Default for LaunchOptions {
             executable: None,
             args: Vec::new(),
             profile_dir: None,
-            base_temp_dir: ".temp_chrome_profiles".into(),
+            base_temp_dir: std::env::temp_dir(),
             dir_prefix: None,
             startup_timeout: Duration::from_secs(15),
         }
@@ -47,10 +108,14 @@ impl Default for LaunchOptions {
 
 /// Owns exactly one child and, when applicable, its temporary profile.
 /// Call `close` to await cleanup. Drop schedules a kill/reap/cleanup fallback.
+/// Endpoint ownership is checked using SystemInfo.getProcessInfo. The executable
+/// must remain the browser process (wrappers must exec, not spawn another PID).
+/// The profile lock coordinates rustcdp only; it does not replace Chrome's lock.
 #[must_use = "retain this process owner while using Chrome; await close() to reap it and clean up"]
 pub struct BrowserProcess {
     child: Option<Child>,
     temporary: Option<TempDir>,
+    profile_lock: Option<File>,
     cleanup: Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>,
     profile: PathBuf,
     endpoint: String,
@@ -93,20 +158,42 @@ impl BrowserProcess {
             let directory = tempfile::Builder::new()
                 .prefix(prefix)
                 .tempdir_in(&options.base_temp_dir)?;
-            (
-                tokio::fs::canonicalize(directory.path()).await?,
-                Some(directory),
-            )
+            (std::fs::canonicalize(directory.path())?, Some(directory))
         };
+        let profile_lock = match lock_profile(&profile) {
+            Ok(lock) => lock,
+            Err(error) => {
+                // A concurrent explicit-profile launch may already own this
+                // newly created path. Never remove it without holding its lock.
+                if let Some(directory) = temporary {
+                    let _ = directory.keep();
+                }
+                return Err(error.into());
+            }
+        };
+        // Own the temporary directory before any further await or fallible work.
+        // With no child yet, field drop order removes it before releasing the lock.
+        let mut process = Self {
+            child: None,
+            temporary,
+            profile_lock: Some(profile_lock),
+            cleanup: None,
+            profile,
+            endpoint: String::new(),
+        };
+        let profile = &process.profile;
+        // Previous cleanup could have removed the directory between canonicalizing
+        // and acquiring the lock. Recreate it only now that removal is excluded.
+        std::fs::create_dir_all(profile)?;
         let port_file = profile.join("DevToolsActivePort");
-        match tokio::fs::remove_file(&port_file).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        let previous_port_file = match tokio::fs::read(&port_file).await {
+            Ok(contents) => Some(contents),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
-        }
+        };
         let mut command = Command::new(executable);
         let mut profile_arg = OsString::from("--user-data-dir=");
-        profile_arg.push(&profile);
+        profile_arg.push(profile);
         command
             .arg(profile_arg)
             .arg("--remote-debugging-port=0")
@@ -120,17 +207,11 @@ impl BrowserProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command.args(&options.args).arg("about:blank");
-        let mut process = Self {
-            child: Some(
-                command
-                    .spawn()
-                    .map_err(|error| Error::Launch(format!("could not spawn Chrome: {error}")))?,
-            ),
-            temporary,
-            cleanup: None,
-            profile,
-            endpoint: String::new(),
-        };
+        process.child = Some(
+            command
+                .spawn()
+                .map_err(|error| Error::Launch(format!("could not spawn Chrome: {error}")))?,
+        );
         let connected = tokio::time::timeout(options.startup_timeout, async {
             loop {
                 if let Some(status) = process
@@ -141,22 +222,53 @@ impl BrowserProcess {
                 {
                     return Err(Error::Launch(format!("Chrome exited with {status}")));
                 }
-                let endpoint = match tokio::fs::read_to_string(&port_file).await {
-                    Ok(contents) => {
-                        let mut lines = contents.lines();
-                        lines
-                            .next()
-                            .and_then(|s| s.parse::<u16>().ok())
-                            .zip(lines.next())
-                            .filter(|(_, path)| path.starts_with("/devtools/browser/"))
-                            .map(|(port, path)| format!("ws://127.0.0.1:{port}{path}"))
-                    }
+                let endpoint = match tokio::fs::read(&port_file).await {
+                    Ok(contents) => fresh_endpoint(&contents, previous_port_file.as_deref()),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => return Err(e.into()),
                 };
                 if let Some(endpoint) = endpoint {
                     match Connection::connect(&endpoint).await {
                         Ok(connection) => {
+                            // A native Chrome launch does not honor our library lock.
+                            // Never accept its endpoint merely because the file changed.
+                            let ownership = connection
+                                .execute(
+                                    &crate::cdp::system_info::commands::GetProcessInfo::default(),
+                                )
+                                .await;
+                            let owned = match ownership {
+                                Ok(info) => info.process_info.iter().any(|info| {
+                                    info.type_ == "browser"
+                                        && Some(info.id) == process.id().map(i64::from)
+                                }),
+                                Err(error) => {
+                                    connection.close().await;
+                                    return Err(error);
+                                }
+                            };
+                            if !owned {
+                                connection.close().await;
+                                return Err(Error::Launch(
+                                    "debugging endpoint does not belong to the spawned browser PID"
+                                        .into(),
+                                ));
+                            }
+                            // Recheck after the asynchronous handshake/ownership query.
+                            // Do not publish a connection for an already exited child.
+                            match process.child.as_mut().expect("launched child").try_wait() {
+                                Ok(None) => {}
+                                Ok(Some(status)) => {
+                                    connection.close().await;
+                                    return Err(Error::Launch(format!(
+                                        "Chrome exited with {status}"
+                                    )));
+                                }
+                                Err(error) => {
+                                    connection.close().await;
+                                    return Err(error.into());
+                                }
+                            }
                             process.endpoint = endpoint;
                             return Ok(connection);
                         }
@@ -189,11 +301,16 @@ impl BrowserProcess {
     /// Reap the child before removing its temporary profile. Fixed profiles remain.
     /// On Unix, allow up to three seconds after TERM before forcing termination.
     /// Canceling the wait leaves cleanup running; a later call can await it.
+    /// The profile lock is held through reaping and temporary-directory removal.
+    /// The sibling lock file remains after cleanup to preserve its identity.
+    /// If termination fails, the lock is retained until the host application exits
+    /// and the temporary directory is preserved to avoid reusing a live profile.
     pub async fn close(&mut self) -> Result<()> {
         if let Some(child) = self.child.take() {
             let cleanup = Cleanup {
                 child: Some(child),
                 temporary: self.temporary.take(),
+                profile_lock: self.profile_lock.take(),
             };
             let (reply, done) = tokio::sync::oneshot::channel();
             std::thread::Builder::new()
@@ -216,12 +333,13 @@ impl BrowserProcess {
 struct Cleanup {
     child: Option<Child>,
     temporary: Option<TempDir>,
+    profile_lock: Option<File>,
 }
 
 impl Cleanup {
     fn run(mut self) -> std::io::Result<()> {
         if let Some(child) = self.child.take() {
-            let result = reap(child, self.temporary.take());
+            let result = reap(child, self.temporary.take(), self.profile_lock.take());
             #[cfg(feature = "tracing")]
             tracing::debug!(target: "rustcdp", success = result.is_ok(), "browser cleanup finished");
             result
@@ -234,19 +352,30 @@ impl Cleanup {
 impl Drop for Cleanup {
     fn drop(&mut self) {
         if let Some(child) = self.child.take() {
-            let _ = reap(child, self.temporary.take());
+            let _ = reap(child, self.temporary.take(), self.profile_lock.take());
         }
     }
 }
 
-fn reap(mut child: Child, temporary: Option<TempDir>) -> std::io::Result<()> {
+fn reap(
+    mut child: Child,
+    temporary: Option<TempDir>,
+    profile_lock: Option<File>,
+) -> std::io::Result<()> {
     if let Err(error) = terminate(&mut child) {
         // Never delete a profile while its process could still be using it.
         if let Some(directory) = temporary {
             let _ = directory.keep();
         }
+        // Without confirmed termination, retain exclusivity until this host
+        // process exits rather than allow another library launch into the profile.
+        if let Some(lock) = profile_lock {
+            std::mem::forget(lock);
+        }
         return Err(error);
     }
+    // The lock is outside the directory being removed, so it can remain held
+    // through deletion on Windows too. Explicit reuse must wait for all removal.
     if let Some(directory) = temporary {
         let path = directory.keep();
         // Chromium descendants can finish writing after the browser is reaped.
@@ -264,6 +393,7 @@ fn reap(mut child: Child, temporary: Option<TempDir>) -> std::io::Result<()> {
             }
         }
     }
+    drop(profile_lock);
     Ok(())
 }
 
@@ -297,6 +427,7 @@ impl Drop for BrowserProcess {
             let cleanup = Cleanup {
                 child: Some(child),
                 temporary: self.temporary.take(),
+                profile_lock: self.profile_lock.take(),
             };
             // The owning guard also cleans up if spawning the thread fails.
             let _ = std::thread::Builder::new()
