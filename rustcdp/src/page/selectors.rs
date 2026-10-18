@@ -1,4 +1,4 @@
-use super::{ClickOptions, Element, Page, element::node_result};
+use super::{Element, Page, element::node_result};
 use crate::{Error, Result, cdp::page::FrameId};
 use serde_json::json;
 use std::time::Duration;
@@ -84,21 +84,22 @@ impl Page {
     /// # }
     /// ```
     pub async fn wait_for_element(&self, selector: &str, timeout: Duration) -> Result<Element> {
-        self.wait_for_element_in_frame(selector, timeout, None)
+        let expression = format!(
+            "document.querySelector({})",
+            serde_json::to_string(selector)?
+        );
+        self.wait_for_expression_in_frame(expression, selector, timeout, None)
             .await
     }
 
-    pub(super) async fn wait_for_element_in_frame(
+    pub(super) async fn wait_for_expression_in_frame(
         &self,
-        selector: &str,
+        expression: String,
+        query: &str,
         timeout: Duration,
         frame: Option<FrameId>,
     ) -> Result<Element> {
         tokio::time::timeout(timeout, async {
-            let expression = format!(
-                "document.querySelector({})",
-                serde_json::to_string(selector)?
-            );
             loop {
                 match self
                     .element_for_expression_in_frame(expression.clone(), frame.clone())
@@ -113,7 +114,7 @@ impl Page {
             }
         })
         .await
-        .map_err(|_| Error::Timeout(format!("waiting for element: {selector}")))?
+        .map_err(|_| Error::Timeout(format!("waiting for element: {query}")))?
     }
 
     pub(super) async fn element_for_expression(
@@ -185,6 +186,29 @@ impl Page {
     pub async fn element_by_xpath(&self, xpath: &str) -> Result<Option<Element>> {
         let xpath = serde_json::to_string(xpath)?;
         self.element_for_expression(format!("document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue")).await
+    }
+
+    /// Find the first XPath node without polling, or return [`Error::ElementNotFound`]
+    /// if absent. Invalid XPath and acquisition errors propagate unchanged.
+    /// Uses the owned acquisition and cancellation policy of [`Self::element_by_xpath`].
+    pub async fn require_xpath_element(&self, xpath: &str) -> Result<Element> {
+        self.element_by_xpath(xpath)
+            .await?
+            .ok_or_else(|| Error::ElementNotFound(xpath.to_owned()))
+    }
+
+    /// Wait for the first present XPath node and return its owned handle.
+    /// Uses the polling, timeout, context-change retry, and cancellation policy
+    /// of [`Self::wait_for_element`]. Invalid XPath and other errors propagate.
+    /// This checks presence only, not visibility, stability, or actionability;
+    /// XPath may select non-element nodes, as in [`Self::element_by_xpath`].
+    pub async fn wait_for_xpath_element(&self, xpath: &str, timeout: Duration) -> Result<Element> {
+        let expression = format!(
+            "document.evaluate({}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue",
+            serde_json::to_string(xpath)?
+        );
+        self.wait_for_expression_in_frame(expression, xpath, timeout, None)
+            .await
     }
 
     /// Wait for a stable, nonzero XPath match count, as in [`Self::wait_for_selector_count_stable`].
@@ -260,23 +284,6 @@ impl Page {
         })
         .await
         .map_err(|_| Error::Timeout("waiting for a stable nonzero selector count".into()))?
-    }
-
-    /// Find the first XPath node, scroll into view and click using CDP input.
-    /// Returns [`Error::ElementNotFound`] if absent. Does not poll or retry clicks.
-    pub async fn click_xpath(&self, xpath: &str) -> Result<()> {
-        self.click_xpath_with_options(xpath, ClickOptions::default())
-            .await
-    }
-
-    /// Find the first XPath node and click with explicit settings.
-    /// See [`Element::click_with_options`] for input and cancellation behavior.
-    pub async fn click_xpath_with_options(&self, xpath: &str, options: ClickOptions) -> Result<()> {
-        self.element_by_xpath(xpath)
-            .await?
-            .ok_or_else(|| Error::ElementNotFound(xpath.to_owned()))?
-            .click_with_options(options)
-            .await
     }
 }
 

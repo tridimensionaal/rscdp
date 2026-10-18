@@ -196,8 +196,12 @@ impl Frame {
     /// independent 30-second limit and recovery/cleanup bounds. This does not
     /// reattach a removed frame or follow a process swap.
     pub async fn wait_for_element(&self, selector: &str, timeout: Duration) -> Result<Element> {
+        let expression = format!(
+            "document.querySelector({})",
+            serde_json::to_string(selector)?
+        );
         self.page
-            .wait_for_element_in_frame(selector, timeout, Some(self.id.clone()))
+            .wait_for_expression_in_frame(expression, selector, timeout, Some(self.id.clone()))
             .await
     }
 
@@ -206,6 +210,30 @@ impl Frame {
     pub async fn element_by_xpath(&self, xpath: &str) -> Result<Option<Element>> {
         let xpath = serde_json::to_string(xpath)?;
         self.element_for_expression(format!("document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue")).await
+    }
+
+    /// Find the first XPath node in this frame without polling, or return
+    /// [`Error::ElementNotFound`] if absent. Other errors propagate unchanged.
+    /// Uses the owned acquisition and cancellation policy of [`Self::element_by_xpath`].
+    pub async fn require_xpath_element(&self, xpath: &str) -> Result<Element> {
+        self.element_by_xpath(xpath)
+            .await?
+            .ok_or_else(|| Error::ElementNotFound(xpath.to_owned()))
+    }
+
+    /// Wait for the first present XPath node in this frame, as in
+    /// [`Page::wait_for_xpath_element`]. Uses the polling, timeout, context-change
+    /// retry, and cancellation policy of [`Self::wait_for_element`].
+    /// Presence does not imply actionability; XPath may select non-element nodes.
+    /// This does not reattach a removed frame or follow a process swap.
+    pub async fn wait_for_xpath_element(&self, xpath: &str, timeout: Duration) -> Result<Element> {
+        let expression = format!(
+            "document.evaluate({}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue",
+            serde_json::to_string(xpath)?
+        );
+        self.page
+            .wait_for_expression_in_frame(expression, xpath, timeout, Some(self.id.clone()))
+            .await
     }
 
     async fn element_for_expression(&self, expression: String) -> Result<Option<Element>> {
