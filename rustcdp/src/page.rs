@@ -27,7 +27,7 @@ pub use frame::Frame;
 pub use input::KeyModifiers;
 pub use navigation::{NavigationBuilder, WaitUntil};
 pub use pdf::PdfBuilder;
-pub use selectors::WaitOptions;
+pub use selectors::CountWaitOptions;
 
 /// Page operations are shared by the initial browser page and isolated contexts.
 /// A Page retains shared Page- and Runtime-domain guards for its lifetime and

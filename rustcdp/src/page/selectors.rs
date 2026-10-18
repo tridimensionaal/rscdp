@@ -4,15 +4,15 @@ use serde_json::json;
 use std::time::Duration;
 use tokio::time::Instant;
 
-/// Options for [`Page::wait_for_selector`] and [`Page::wait_for_xpath`].
+/// Options for [`Page::wait_for_selector_count_stable`] and [`Page::wait_for_xpath_count_stable`].
 ///
 /// Stability means the sampled number of matching elements stays nonzero and
 /// unchanged. It does not track element identity, visibility, or position.
 #[derive(Debug, Clone)]
-pub struct WaitOptions {
+pub struct CountWaitOptions {
     /// Deadline for observing a stable count. Defaults to 5 seconds.
     ///
-    /// This excludes [`Self::delay_after`]. Expiration returns `Ok(false)`.
+    /// Expiration returns [`Error::Timeout`]. Success has no additional delay.
     pub timeout: Duration,
     /// Delay between completed polls. Defaults to 100 milliseconds.
     ///
@@ -23,17 +23,14 @@ pub struct WaitOptions {
     /// A zero count, changed count, or recoverable navigation error resets this
     /// interval. A zero duration accepts the first nonzero count.
     pub stability_time: Duration,
-    /// Additional delay after success, outside the timeout. Defaults to 1 second.
-    pub delay_after: Duration,
 }
 
-impl Default for WaitOptions {
+impl Default for CountWaitOptions {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(5),
             polling_interval: Duration::from_millis(100),
             stability_time: Duration::from_secs(2),
-            delay_after: Duration::from_secs(1),
         }
     }
 }
@@ -190,8 +187,12 @@ impl Page {
         self.element_for_expression(format!("document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue")).await
     }
 
-    /// Wait for a stable, nonzero XPath match count, as in [`Self::wait_for_selector`].
-    pub async fn wait_for_xpath(&self, xpath: &str, options: WaitOptions) -> Result<bool> {
+    /// Wait for a stable, nonzero XPath match count, as in [`Self::wait_for_selector_count_stable`].
+    pub async fn wait_for_xpath_count_stable(
+        &self,
+        xpath: &str,
+        options: CountWaitOptions,
+    ) -> Result<()> {
         let xpath = serde_json::to_string(xpath)?;
         let expression = format!(
             "document.evaluate({xpath}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"
@@ -199,13 +200,19 @@ impl Page {
         self.wait_for_count(&expression, options).await
     }
 
-    /// Wait for a stable, nonzero number of CSS matches. Returns false on timeout.
+    /// Wait for a sampled, stable, nonzero number of CSS matches.
+    /// Expiration returns [`Error::Timeout`]. Replacing nodes without changing
+    /// their count still satisfies this condition; it does not imply readiness.
     /// Polling retries recognized navigation/context-loss errors and resets the
-    /// stability interval; other errors propagate. See [`WaitOptions`] for sampling.
+    /// stability interval; other errors propagate. See [`CountWaitOptions`] for sampling.
     /// A timeout stops polling but can leave an owned evaluation finishing in
     /// the background. If its remote outcome stays unknown, recovery may detach
     /// the session; see [`Page::evaluate`] for execution and cleanup bounds.
-    pub async fn wait_for_selector(&self, selector: &str, options: WaitOptions) -> Result<bool> {
+    pub async fn wait_for_selector_count_stable(
+        &self,
+        selector: &str,
+        options: CountWaitOptions,
+    ) -> Result<()> {
         let selector = serde_json::to_string(selector)?;
         self.wait_for_count(
             &format!("document.querySelectorAll({selector}).length"),
@@ -214,13 +221,13 @@ impl Page {
         .await
     }
 
-    async fn wait_for_count(&self, expression: &str, options: WaitOptions) -> Result<bool> {
+    async fn wait_for_count(&self, expression: &str, options: CountWaitOptions) -> Result<()> {
         if options.polling_interval.is_zero() {
             return Err(Error::InvalidArgument(
                 "polling interval must be nonzero".into(),
             ));
         }
-        let result = tokio::time::timeout(options.timeout, async {
+        tokio::time::timeout(options.timeout, async {
             let mut previous = 0;
             let mut stable = Instant::now();
             loop {
@@ -251,15 +258,8 @@ impl Page {
                 tokio::time::sleep(options.polling_interval).await;
             }
         })
-        .await;
-        match result {
-            Ok(result) => {
-                result?;
-                tokio::time::sleep(options.delay_after).await;
-                Ok(true)
-            }
-            Err(_) => Ok(false),
-        }
+        .await
+        .map_err(|_| Error::Timeout("waiting for a stable nonzero selector count".into()))?
     }
 
     /// Find the first XPath node, scroll into view and click using CDP input.

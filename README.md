@@ -117,8 +117,10 @@ page.require_element("button[type=submit]").await?.click().await?;
 looks up once and reports `Error::ElementNotFound` if absent; `element_by_selector`
 returns `Option<Element>` for optional matches. `click()` scrolls and sends CDP
 mouse input; `click_with_options` accepts named settings through `page::ClickOptions`.
-Actions are not automatically retried. The existing `wait_for_selector` and
-`wait_for_xpath` methods wait for stable match counts, which is a different task.
+Actions are not automatically retried. `wait_for_selector_count_stable` and
+`wait_for_xpath_count_stable` use `CountWaitOptions` to wait for a sampled nonzero
+match count to stay unchanged. They return a timeout error if it never stabilizes
+and add no delay after success. This does not check node identity or readiness.
 
 The [generated `cdp` API](rustcdp/src/lib.rs) groups types, commands, and events by domain.
 Commands implement `protocol::Command` with an associated response type. Commands
