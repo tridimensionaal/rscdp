@@ -99,6 +99,20 @@ impl Page {
         })
     }
 
+    /// Find an ID in one snapshot of this target's frame tree, including its root.
+    /// Returns `None` if absent; protocol and decoding errors propagate.
+    /// This does not attach out-of-process targets, poll, or retry.
+    /// The ID identifies a frame, not a particular document or a durable locator:
+    /// navigation can replace its document, and removal or a process swap can
+    /// invalidate the returned handle immediately after this lookup.
+    pub async fn frame_by_id(&self, id: &FrameId) -> Result<Option<Frame>> {
+        let tree = self.session.execute(&GetFrameTree::new()).await?.frame_tree;
+        Ok(find(&tree, id).map(|tree| Frame {
+            page: self.clone(),
+            id: tree.frame.id.clone(),
+        }))
+    }
+
     /// Snapshot all frames exposed by this target's frame tree, including its root.
     /// OOPIF targets are separate: attach with `Page::frame`, then use `main_frame`.
     pub async fn frames(&self) -> Result<Vec<Frame>> {
