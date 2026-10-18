@@ -65,6 +65,10 @@ pub enum Error {
     Task(#[from] tokio::task::JoinError),
     #[error("JavaScript exception: {0}")]
     JavaScript(Value),
+    /// Evaluation succeeded but its result has no JSON representation.
+    /// Remote IDs in this metadata are diagnostic, not owned live references.
+    #[error("JavaScript result has no JSON value; use remote() to inspect its metadata")]
+    NonJsonValue(Box<crate::cdp::runtime::RemoteObject>),
     #[error("navigation failed: {0}")]
     Navigation(String),
     #[error("proxy authentication failed: {0}")]

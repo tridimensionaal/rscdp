@@ -39,7 +39,7 @@ async fn update_inventory(page: &Page, board: &str) -> Result<()> {
         println!(
             "{}: {}",
             frame.id().0,
-            frame.evaluate("document.title").await?
+            frame.evaluate("document.title").json::<String>().await?
         );
     }
     let root = page.main_frame().await?;
@@ -60,6 +60,7 @@ async fn update_inventory(page: &Page, board: &str) -> Result<()> {
         .await?;
     let stock = shelf
         .evaluate("Number(document.querySelector('output').textContent)")
+        .json::<u64>()
         .await?;
     println!("Shelf A now holds {stock} notebooks");
     if stock != 4 {
@@ -67,7 +68,7 @@ async fn update_inventory(page: &Page, board: &str) -> Result<()> {
     }
     println!(
         "Parent document is still {}",
-        root.evaluate("document.title").await?
+        root.evaluate("document.title").json::<String>().await?
     );
     Ok(())
 }

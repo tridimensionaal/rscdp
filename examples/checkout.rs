@@ -34,6 +34,7 @@ async fn reserve_notebook(page: &Page) -> Result<()> {
         .await?;
     let receipt = page
         .evaluate("document.querySelector('output').textContent")
+        .json::<String>()
         .await?;
     println!("{receipt}");
     if receipt != "Reserved for Ada Muñoz: For your next idea ✨" {

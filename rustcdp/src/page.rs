@@ -1,18 +1,18 @@
 use crate::{
-    Error, Result, Session,
+    Result, Session,
     cdp::{
         browser::BrowserContextId,
         network::{Cookie, CookieParam},
         page::commands::GetFrameTree,
-        runtime::{ExecutionContextId, RemoteObject},
     },
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::time::Duration;
 
 mod capture;
 mod dom;
 mod element;
+mod evaluation;
 mod execution_context;
 mod frame;
 mod input;
@@ -22,6 +22,7 @@ mod selectors;
 
 pub use capture::{ScreenshotBuilder, ScreenshotFormat};
 pub use element::{ClickMethod, ClickOptions, Element, ElementPosition};
+pub use evaluation::{EvaluationBuilder, EvaluationWorld, RemoteValue};
 pub use frame::Frame;
 pub use input::KeyModifiers;
 pub use navigation::{NavigationBuilder, WaitUntil};
@@ -31,7 +32,7 @@ pub use selectors::WaitOptions;
 /// Page operations are shared by the initial browser page and isolated contexts.
 /// A Page retains shared Page- and Runtime-domain guards for its lifetime and
 /// subscribes to context events before enabling them. See [`Self::evaluate`] for
-/// isolated-world behavior and [`crate::Browser::connect`] for fallback lifetime.
+/// execution-world behavior and [`crate::Browser::connect`] for fallback lifetime.
 #[derive(Clone)]
 pub struct Page {
     session: Session,
@@ -99,96 +100,6 @@ impl Page {
             frame.url,
             frame.url_fragment.unwrap_or_default()
         ))
-    }
-
-    /// Return a raw numeric context ID, which Chrome may reuse after navigation.
-    /// Prefer `evaluate` for evaluation protected against context-ID reuse.
-    pub async fn create_isolated_world(&self) -> Result<ExecutionContextId> {
-        let frame = self
-            .session
-            .execute(&GetFrameTree::default())
-            .await?
-            .frame_tree
-            .frame
-            .id;
-        self.create_isolated_world_for(&frame).await
-    }
-
-    async fn create_isolated_world_for(
-        &self,
-        frame: &crate::cdp::page::FrameId,
-    ) -> Result<ExecutionContextId> {
-        let response = self
-            .session
-            .execute_raw(
-                "Page.createIsolatedWorld",
-                json!({"frameId":frame,"worldName":format!("rustcdp-{}",self.session.id().0)}),
-            )
-            .await?;
-        serde_json::from_value(response["executionContextId"].clone()).map_err(Into::into)
-    }
-
-    /// Evaluate in the current isolated world and return its JSON value.
-    ///
-    /// Page/Frame evaluation uses a unique execution-context identity, so reused
-    /// numeric IDs cannot redirect an expression to another document. Expressions
-    /// are never automatically retried; navigation races and JavaScript exceptions
-    /// are errors. Worlds are reused within a document, but recovery after lost or
-    /// inconsistent context events can create a fresh world without prior globals.
-    ///
-    /// A cache miss retains the Page in an owned setup task capped at 30 seconds.
-    /// The handle timeout bounds the caller's combined world-lock and setup wait;
-    /// canceling that wait does not abandon setup.
-    ///
-    /// Use [`Self::evaluate_remote`] for object IDs, `undefined`, BigInt, or
-    /// non-finite numbers. This value-only method schedules best-effort release of
-    /// any received object ID, including when no JSON value is available.
-    pub async fn evaluate(&self, expression: &str) -> Result<Value> {
-        self.json_value(self.evaluate_remote(expression, true).await?)
-    }
-
-    /// Evaluate with caller-owned remote objects on success.
-    /// Release returned object IDs with `Runtime.releaseObject` when finished.
-    /// On errors, received result and exception handles are released best-effort;
-    /// IDs in JavaScript error details are diagnostic, not owned live references.
-    /// Result and exception IDs are deduplicated before release. Cancellation
-    /// before receiving a response cannot release unseen IDs. The world identity
-    /// and setup behavior are the same as [`Self::evaluate`].
-    pub async fn evaluate_remote(
-        &self,
-        expression: &str,
-        return_by_value: bool,
-    ) -> Result<RemoteObject> {
-        let context = self.isolated_context().await?;
-        self.evaluate_with_context(context.unique, expression, return_by_value)
-            .await
-    }
-
-    async fn evaluate_with_context(
-        &self,
-        context: String,
-        expression: &str,
-        return_by_value: bool,
-    ) -> Result<RemoteObject> {
-        let response = self.session.execute_raw("Runtime.evaluate", json!({"expression":expression,"uniqueContextId":context,"silent":true,"returnByValue":return_by_value,"awaitPromise":true})).await?;
-        if let Some(error) = response.get("exceptionDetails") {
-            self.release_response_objects(&response);
-            return Err(Error::JavaScript(error.clone()));
-        }
-        match serde_json::from_value(response["result"].clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => {
-                self.release_response_objects(&response);
-                Err(error.into())
-            }
-        }
-    }
-
-    fn json_value(&self, result: RemoteObject) -> Result<Value> {
-        let _object = result.object_id.filter(|id| !id.0.is_empty()).map(|id| {
-            Element::from_object_id(self.session.clone(), id, self.context_lease.clone())
-        });
-        result.value.ok_or_else(|| Error::InvalidArgument("JavaScript result has no JSON value; use evaluate_remote for undefined, BigInt and non-finite numbers".into()))
     }
 
     // Resolve uncertain resource ownership. DOM transactions retain their gate

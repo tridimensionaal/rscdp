@@ -40,7 +40,7 @@ async fn read_page(page: &Page) -> Result<()> {
     .timeout(Duration::from_secs(15))
     .send()
     .await?;
-    println!("{}", page.evaluate("document.title").await?);
+    println!("{}", page.evaluate("document.title").json::<String>().await?);
     println!("{}", page.html().await?);
     Ok(())
 }
@@ -89,7 +89,7 @@ Each example awaits browser cleanup on success or failure. Report files go to
   launch/connect, isolated contexts, context-wide cookie reads/updates/clearing,
   and explicit cleanup. `new_context()` bypasses the parent browser's proxy;
   [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
-- [Page](rustcdp/src/page.rs): navigation, isolated-world JSON evaluation, HTML, and cookies.
+- [Page](rustcdp/src/page.rs): navigation, JavaScript evaluation, HTML, and cookies.
   [Selectors](rustcdp/src/page/selectors.rs) provides optional lookup, required lookup,
   and element-returning presence waits;
   [DOM](rustcdp/src/page/dom.rs) handles HTML reads and search transactions.
@@ -148,10 +148,13 @@ Drop until explicit close or last Drop. Dropping a launched Browser terminates i
 owned process. An ordinary BrowserContext disposes its context even if Page clones remain.
 Keep a context owner alongside standalone Sessions or listeners.
 
-Evaluation uses unique context identities and does not retry user expressions.
-Successful `evaluate_remote` object IDs are caller-owned; release them with
-`Runtime.releaseObject`. Value-only evaluation and evaluation errors release known
-IDs best-effort. See [Page evaluation](rustcdp/src/page.rs) for world reuse and cancellation.
+Evaluation defaults to the page's main world, where its JavaScript globals are visible.
+Choose `.world(EvaluationWorld::Isolated)` to share the DOM without sharing those globals.
+Use `page.evaluate(source).json::<T>().await` for a Rust value, `.run().await` for
+side effects, or `.remote().await` for an owned JavaScript reference. A remote value
+schedules best-effort release on drop; `.release().await` observes cleanup errors.
+Evaluation uses unique context identities and never retries user expressions.
+See [evaluation](rustcdp/src/page/evaluation.rs) for cancellation and lifetime details.
 
 Recorded transport failures share their typed cause through
 `Error::ConnectionFailed(Arc<Error>)`; inspect the Arc or the standard error source

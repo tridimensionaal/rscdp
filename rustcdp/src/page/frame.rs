@@ -1,16 +1,13 @@
-use super::{Element, Page};
+use super::{Element, EvaluationBuilder, EvaluationWorld, Page};
 use crate::{
     Error, Result,
-    cdp::{
-        page::{Frame as FrameInfo, FrameId, FrameTree, commands::GetFrameTree},
-        runtime::RemoteObject,
-    },
+    cdp::page::{Frame as FrameInfo, FrameId, FrameTree, commands::GetFrameTree},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::time::Duration;
 
 /// A frame within a CDP target. Clones share the page's resource ownership.
-/// Each evaluation resolves the frame's current isolated execution context.
+/// Each evaluation resolves the frame's current unique execution context.
 /// A removed frame or a process swap invalidates the handle; acquire a new one.
 #[derive(Clone)]
 pub struct Frame {
@@ -160,27 +157,17 @@ impl Frame {
             .collect())
     }
 
-    pub async fn evaluate(&self, expression: &str) -> Result<Value> {
-        self.page
-            .json_value(self.evaluate_remote(expression, true).await?)
-    }
-
-    /// Evaluate in this frame, with the same remote object ownership as
-    /// [`Page::evaluate_remote`].
-    pub async fn evaluate_remote(
-        &self,
-        expression: &str,
-        return_by_value: bool,
-    ) -> Result<RemoteObject> {
-        let context = self.page.isolated_context_for(&self.id).await?;
-        self.page
-            .evaluate_with_context(context.unique, expression, return_by_value)
-            .await
+    /// Configure evaluation in this frame's main world.
+    /// See [`Page::evaluate`] for ownership and cancellation guarantees.
+    pub fn evaluate(&self, expression: impl Into<String>) -> EvaluationBuilder<'_> {
+        EvaluationBuilder::for_frame(&self.page, self.id.clone(), expression)
     }
 
     pub async fn html(&self) -> Result<String> {
-        serde_json::from_value(self.evaluate("document.documentElement.outerHTML").await?)
-            .map_err(Into::into)
+        self.evaluate("document.documentElement.outerHTML")
+            .world(EvaluationWorld::Isolated)
+            .json()
+            .await
     }
 
     /// Find a node in this frame with the owned acquisition and cleanup policy

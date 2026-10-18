@@ -202,6 +202,9 @@ impl Page {
     /// Wait for a stable, nonzero number of CSS matches. Returns false on timeout.
     /// Polling retries recognized navigation/context-loss errors and resets the
     /// stability interval; other errors propagate. See [`WaitOptions`] for sampling.
+    /// A timeout stops polling but can leave an owned evaluation finishing in
+    /// the background. If its remote outcome stays unknown, recovery may detach
+    /// the session; see [`Page::evaluate`] for execution and cleanup bounds.
     pub async fn wait_for_selector(&self, selector: &str, options: WaitOptions) -> Result<bool> {
         let selector = serde_json::to_string(selector)?;
         self.wait_for_count(
@@ -221,7 +224,12 @@ impl Page {
             let mut previous = 0;
             let mut stable = Instant::now();
             loop {
-                let count = match self.evaluate(expression).await {
+                let count = match self
+                    .evaluate(expression)
+                    .world(super::EvaluationWorld::Isolated)
+                    .json::<serde_json::Value>()
+                    .await
+                {
                     Ok(value) => value.as_u64().ok_or_else(|| {
                         Error::InvalidArgument("selector count is not an integer".into())
                     })?,

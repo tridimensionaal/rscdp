@@ -34,7 +34,7 @@
 //!     .timeout(Duration::from_secs(10))
 //!     .send()
 //!     .await?;
-//!     println!("{}", page.evaluate("document.title").await?);
+//!     println!("{}", page.evaluate("document.title").json::<String>().await?);
 //!     Ok(())
 //! }
 //! ```

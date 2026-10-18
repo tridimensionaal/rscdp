@@ -34,7 +34,11 @@ async fn second_shopper(browser: &Browser, mira: &BrowserContext) -> Result<()> 
     cleanup?;
 
     // Disposing Leo's context leaves Mira's page and cookies intact.
-    let title = mira.page().evaluate("document.title").await?;
+    let title = mira
+        .page()
+        .evaluate("document.title")
+        .json::<String>()
+        .await?;
     if title != "Mira's cart" || cart_item(mira.cookies().await?).as_deref() != Some("notebook") {
         return Err(Error::InvalidArgument(
             "Mira's context did not survive".into(),

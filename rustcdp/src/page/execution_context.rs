@@ -29,6 +29,7 @@ pub(super) struct Worlds(Arc<Mutex<State>>);
 struct State {
     events: EventStream,
     frames: HashMap<String, World>,
+    main: MainContexts,
     namespace: Option<String>,
     generation: u64,
 }
@@ -44,6 +45,78 @@ struct World {
 pub(super) struct ContextIdentity {
     pub(super) numeric: i64,
     pub(super) unique: String,
+}
+
+// A None entry is an ambiguous frame, retained until contexts are cleared.
+// After event loss, only frames with fresh creation events can be used.
+// BFCache may announce a previously seen identity again after a clear. Accept
+// that fresh event, but never choose between overlapping default identities.
+#[derive(Default)]
+struct MainContexts {
+    frames: HashMap<String, Option<ContextIdentity>>,
+    lost: bool,
+}
+
+fn invalid_main_context() -> Error {
+    Error::InvalidArgument(
+        "main execution context correlation unavailable or ambiguous; navigate or reattach the page"
+            .into(),
+    )
+}
+
+impl MainContexts {
+    fn lose_correlation(&mut self) {
+        self.frames.clear();
+        self.lost = true;
+    }
+
+    fn created(&mut self, context: &serde_json::Value) {
+        if context["auxData"]["isDefault"].as_bool() != Some(true) {
+            return;
+        }
+        let Some(frame) = context["auxData"]["frameId"]
+            .as_str()
+            .filter(|frame| !frame.is_empty())
+        else {
+            self.lose_correlation();
+            return;
+        };
+        let identity = match (context["id"].as_i64(), context["uniqueId"].as_str()) {
+            (Some(numeric), Some(unique)) if !unique.is_empty() => ContextIdentity {
+                numeric,
+                unique: unique.into(),
+            },
+            _ => {
+                self.frames.insert(frame.into(), None);
+                return;
+            }
+        };
+        self.frames
+            .entry(frame.into())
+            .and_modify(|old| {
+                if old.as_ref() != Some(&identity) {
+                    *old = None;
+                }
+            })
+            .or_insert(Some(identity));
+    }
+
+    fn destroyed(&mut self, unique: &str) {
+        self.frames.retain(|_, identity| {
+            !identity
+                .as_ref()
+                .is_some_and(|identity| identity.unique == unique)
+        });
+    }
+
+    fn get(&self, frame: &str) -> Result<Option<ContextIdentity>> {
+        match self.frames.get(frame) {
+            Some(Some(identity)) => Ok(Some(identity.clone())),
+            Some(None) => Err(invalid_main_context()),
+            None if self.lost => Err(invalid_main_context()),
+            None => Ok(None),
+        }
+    }
 }
 
 fn subscribe(session: &Session) -> EventStream {
@@ -62,6 +135,7 @@ impl Worlds {
         Self(Arc::new(Mutex::new(State {
             events: subscribe(session),
             frames: HashMap::new(),
+            main: MainContexts::default(),
             namespace: None,
             generation: 0,
         })))
@@ -69,6 +143,78 @@ impl Worlds {
 }
 
 impl Page {
+    /// Resolve only an event-correlated default context. Callers must evaluate
+    /// with its unique ID, never its numeric ID or Runtime's implicit default.
+    pub(super) async fn main_context(&self) -> Result<ContextIdentity> {
+        let timeout = self
+            .session
+            .connection()
+            .command_timeout()
+            .unwrap_or(SETUP_TIMEOUT)
+            .min(SETUP_TIMEOUT);
+        tokio::time::timeout(timeout, async {
+            let frame = self
+                .session
+                .execute(&GetFrameTree::default())
+                .await?
+                .frame_tree
+                .frame
+                .id;
+            self.main_context_for(&frame).await
+        })
+        .await
+        .map_err(|_| {
+            Error::Timeout("acquiring main execution context; navigate or reattach the page".into())
+        })?
+    }
+
+    pub(super) async fn main_context_for(&self, frame: &FrameId) -> Result<ContextIdentity> {
+        let timeout = self
+            .session
+            .connection()
+            .command_timeout()
+            .unwrap_or(SETUP_TIMEOUT)
+            .min(SETUP_TIMEOUT);
+        let acquire = async {
+            let mut state = self.worlds.0.lock().await;
+            loop {
+                // Drain before returning a cached identity: a queued destroy,
+                // clear, or second default context must invalidate it first.
+                if let Err(error) = state.drain(&self.session) {
+                    return Err(if matches!(error, Error::Lagged(_)) {
+                        invalid_main_context()
+                    } else {
+                        error
+                    });
+                }
+                if let Some(identity) = state.main.get(&frame.0)? {
+                    return Ok(identity);
+                }
+                let event = state.events.recv().await.map_err(|error| {
+                    let error = state.stream_error(&self.session, error);
+                    if matches!(error, Error::Lagged(_)) {
+                        invalid_main_context()
+                    } else {
+                        error
+                    }
+                })?;
+                state.handle(event)?;
+            }
+        };
+        // No world-creation command is needed. Canceling this read-only wait is
+        // safe; the borrowed Page retains its lease and recv is cancellation-safe.
+        // The deadline includes the mutex queue, even with command timeouts off.
+        tokio::select! {
+            biased;
+            () = self.session.closed() => Err(Error::SessionClosed(self.session.id().0.clone())),
+            result = tokio::time::timeout(timeout, acquire) => {
+                result.map_err(|_| Error::Timeout(
+                    "waiting for main execution context; navigate or reattach the page".into(),
+                ))?
+            }
+        }
+    }
+
     pub(super) async fn isolated_context(&self) -> Result<ContextIdentity> {
         let frame = self
             .session
@@ -149,6 +295,7 @@ impl State {
         match event.method.as_str() {
             "Runtime.executionContextCreated" => {
                 let context = &event.params["context"];
+                self.main.created(context);
                 let Some(frame) = self
                     .namespace
                     .as_ref()
@@ -195,8 +342,10 @@ impl State {
                     .as_str()
                     .filter(|id| !id.is_empty())
                 else {
+                    self.main.lose_correlation();
                     return Err(self.lose_correlation());
                 };
+                self.main.destroyed(unique);
                 self.frames.retain(|_, world| {
                     world.conflicted
                         || !world
@@ -205,7 +354,10 @@ impl State {
                             .is_some_and(|identity| identity.unique == unique)
                 });
             }
-            "Runtime.executionContextsCleared" => self.frames.clear(),
+            "Runtime.executionContextsCleared" => {
+                self.frames.clear();
+                self.main = MainContexts::default();
+            }
             _ => {}
         }
         Ok(())
@@ -213,8 +365,11 @@ impl State {
 
     fn stream_error(&mut self, session: &Session, error: Error) -> Error {
         if matches!(error, Error::Lagged(_)) {
+            self.main.lose_correlation();
             self.frames.clear();
             self.namespace = None;
+            // Discard retained events too: a creation in the old queue may
+            // precede a lost destroy. Never replay Runtime.enable to recover.
             self.events = subscribe(session);
         }
         error
@@ -332,5 +487,80 @@ impl State {
                 .map_err(|error| self.stream_error(session, error))?;
             self.handle(event)?;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn created(frame: &str, numeric: i64, unique: &str) -> serde_json::Value {
+        json!({"id": numeric, "uniqueId": unique,
+            "auxData": {"frameId": frame, "isDefault": true}})
+    }
+
+    #[test]
+    fn main_context_requires_default_frame_and_unique_identity() {
+        let mut main = MainContexts::default();
+        let mut isolated = created("frame", 1, "isolated");
+        isolated["auxData"]["isDefault"] = json!(false);
+        main.created(&isolated);
+        assert!(main.get("frame").unwrap().is_none());
+        main.created(&created("frame", 1, "main"));
+        assert_eq!(main.get("frame").unwrap().unwrap().unique, "main");
+        main.created(&created("other", 2, ""));
+        assert!(main.get("other").is_err());
+        assert!(main.get("frame").unwrap().is_some());
+    }
+
+    #[test]
+    fn main_context_destroy_uses_unique_id_even_when_numeric_id_is_reused() {
+        let mut main = MainContexts::default();
+        main.created(&created("frame", 1, "old"));
+        main.destroyed("old");
+        assert!(main.get("frame").unwrap().is_none());
+        main.created(&created("frame", 1, "new"));
+        main.destroyed("old");
+        assert_eq!(main.get("frame").unwrap().unwrap().unique, "new");
+    }
+
+    #[test]
+    fn overlapping_main_contexts_remain_ambiguous_until_clear() {
+        let mut main = MainContexts::default();
+        main.created(&created("frame", 1, "a"));
+        main.created(&created("frame", 1, "a"));
+        assert!(main.get("frame").unwrap().is_some());
+        main.created(&created("frame", 2, "b"));
+        assert!(main.get("frame").is_err());
+        main.destroyed("a");
+        main.created(&created("frame", 2, "b"));
+        assert!(main.get("frame").is_err());
+        main = MainContexts::default();
+        assert!(main.get("frame").unwrap().is_none());
+        main.created(&created("frame", 1, "a"));
+        assert_eq!(main.get("frame").unwrap().unwrap().unique, "a");
+    }
+
+    #[test]
+    fn lost_main_correlation_requires_fresh_events_per_frame() {
+        let mut main = MainContexts::default();
+        main.created(&created("frame", 1, "old"));
+        main.lose_correlation();
+        assert!(main.get("frame").is_err());
+        main.created(&created("other", 2, "fresh"));
+        assert!(main.get("frame").is_err());
+        assert_eq!(main.get("other").unwrap().unwrap().unique, "fresh");
+        main.created(&created("frame", 3, "new"));
+        assert_eq!(main.get("frame").unwrap().unwrap().unique, "new");
+    }
+
+    #[test]
+    fn uncorrelated_default_event_invalidates_all_main_frames() {
+        let mut main = MainContexts::default();
+        main.created(&created("frame", 1, "old"));
+        let mut invalid = created("other", 2, "new");
+        invalid["auxData"]["frameId"] = json!(null);
+        main.created(&invalid);
+        assert!(main.get("frame").is_err());
     }
 }
