@@ -133,8 +133,12 @@ impl Generator {
         }
         if value["enum"].is_array() {
             documentation(value, extra);
-            extra.push_str(&format!("#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]\npub enum {name} {{\n"));
+            extra.push_str(&format!("#[derive(Debug, Clone, PartialEq, Eq, Hash)]\n#[non_exhaustive]\npub enum {name} {{\n"));
             let mut used = std::collections::HashSet::new();
+            // Some schemas already define a known `Unknown` variant. Reserve
+            // one uniform fallback name without renaming any known variants.
+            used.insert("Unrecognized".to_owned());
+            let mut variants = Vec::new();
             for variant in items(value, "enum") {
                 let wire = variant.as_str().expect("string enum");
                 let mut variant_name = type_name(wire);
@@ -148,9 +152,21 @@ impl Generator {
                     used.insert(variant_name.clone()),
                     "enum name collision: {name}.{wire}"
                 );
-                extra.push_str(&format!("#[serde(rename = {wire:?})]\n{variant_name},\n"));
+                extra.push_str(&format!("{variant_name},\n"));
+                variants.push((variant_name, wire));
             }
-            extra.push_str("}\n");
+            extra.push_str("/// A wire string absent from the pinned schema, preserved verbatim.\nUnrecognized(String),\n}\n");
+            extra.push_str(&format!("impl {name} {{\n/// Return the exact protocol wire string, including unrecognized values.\npub fn as_str(&self) -> &str {{ match self {{\n"));
+            for (variant, wire) in &variants {
+                extra.push_str(&format!("Self::{variant} => {wire:?},\n"));
+            }
+            extra.push_str("Self::Unrecognized(value) => value.as_str(),\n} }\n}\n");
+            extra.push_str(&format!("impl serde::Serialize for {name} {{\nfn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {{ serializer.serialize_str(self.as_str()) }}\n}}\n"));
+            extra.push_str(&format!("impl<'de> serde::Deserialize<'de> for {name} {{\nfn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {{\nlet value = <String as serde::Deserialize<'de>>::deserialize(deserializer)?;\nOk(match value.as_str() {{\n"));
+            for (variant, wire) in &variants {
+                extra.push_str(&format!("{wire:?} => Self::{variant},\n"));
+            }
+            extra.push_str("_ => Self::Unrecognized(value),\n})\n}\n}\n");
             return name.into();
         }
         match value["type"].as_str().expect("schema type") {
