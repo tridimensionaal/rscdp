@@ -22,6 +22,8 @@ pub struct Browser {
     page: Page,
     process: Option<BrowserProcess>,
     auth: Option<crate::proxy::ProxyAuth>,
+    shutdown: Option<tokio::task::JoinHandle<Result<()>>>,
+    shutdown_complete: bool,
 }
 
 impl Browser {
@@ -41,6 +43,8 @@ impl Browser {
                 page,
                 process: Some(process),
                 auth: None,
+                shutdown: None,
+                shutdown_complete: false,
             }),
             Err(error) => {
                 connection.close().await;
@@ -69,6 +73,8 @@ impl Browser {
                 page,
                 process: None,
                 auth: None,
+                shutdown: None,
+                shutdown_complete: false,
             }),
             Err(error) => {
                 connection.close().await;
@@ -109,6 +115,9 @@ impl Browser {
     pub fn page(&self) -> &Page {
         &self.page
     }
+    /// The owned process, or `None` for an external browser or once `close()`
+    /// has first been polled. Shutdown takes process ownership immediately;
+    /// `None` does not mean that process cleanup has already finished.
     pub fn process(&self) -> Option<&BrowserProcess> {
         self.process.as_ref()
     }
@@ -126,35 +135,69 @@ impl Browser {
 
     /// Stop authentication, dispose any owned fallback context, and disconnect.
     /// An owned Chrome process is also reaped; an external process is not killed.
-    /// When awaited to completion, connection and process cleanup are attempted
-    /// even if earlier cleanup fails. Canceling this future can leave later stages
-    /// unstarted; call `close` again and await it to finish the sequence. Cleanup
-    /// already started continues independently, but cancellation does not schedule
-    /// the remaining stages. Drop provides only best-effort cleanup.
-    /// Keep the owning Tokio runtime running until this completes.
+    /// On first poll, an owned task takes over the entire shutdown sequence.
+    /// Connection and process cleanup are attempted even if earlier cleanup fails.
+    /// Canceling the wait or dropping this Browser does not cancel that task;
+    /// another `close()` awaits the same completion. Cleanup errors are returned
+    /// once when completion is observed; later calls return `Ok(())`.
+    /// Keep the owning Tokio runtime running until shutdown completes. Runtime
+    /// shutdown can abandon async cleanup; process Drop still provides its
+    /// independent best-effort kill/reap fallback.
     pub async fn close(&mut self) -> Result<()> {
-        let page_result = if let Some(lease) = &self.page.context_lease {
-            lease
-                .close_with_auth(self.auth.take())
-                .await
-                .unwrap_or_else(|error| Err(error.into()))
-        } else if let Some(auth) = &mut self.auth {
-            auth.stop().await
-        } else {
-            Ok(())
-        };
-        self.connection.close().await;
-        let process_result = if let Some(process) = &mut self.process {
-            process.close().await
-        } else {
-            Ok(())
-        };
-        with_cleanup(page_result, process_result)
+        if self.shutdown_complete {
+            return Ok(());
+        }
+        self.start_shutdown();
+        // Await by reference so cancellation leaves the completion handle here.
+        let result = self.shutdown.as_mut().expect("shutdown started").await;
+        self.shutdown = None;
+        self.shutdown_complete = true;
+        result?
+    }
+
+    fn start_shutdown(&mut self) {
+        if self.shutdown.is_some() || self.shutdown_complete {
+            return;
+        }
+        let connection = self.connection.clone();
+        // Retain the page's session/domain guards through authentication cleanup,
+        // including when the Browser itself is dropped while shutdown is running.
+        let page = self.page.clone();
+        let mut process = self.process.take();
+        let mut auth = self.auth.take();
+        self.shutdown = Some(self.connection.runtime().spawn(async move {
+            let page_result = if let Some(lease) = &page.context_lease {
+                lease
+                    .close_with_auth(auth.take())
+                    .await
+                    .unwrap_or_else(|error| Err(error.into()))
+            } else if let Some(auth) = &mut auth {
+                auth.stop().await
+            } else {
+                Ok(())
+            };
+            connection.close().await;
+            let process_result = if let Some(process) = &mut process {
+                process.close().await
+            } else {
+                Ok(())
+            };
+            // Also force whole-Page capture rather than only context_lease.
+            drop(page);
+            with_cleanup(page_result, process_result)
+        }));
     }
 }
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        self.detach_proxy_auth();
+        if self.process.is_some() {
+            self.start_shutdown();
+        } else if self.shutdown.is_none() && !self.shutdown_complete {
+            // Preserve external connections and fallback leases retained by
+            // dependent handles when explicit shutdown was never requested.
+            self.detach_proxy_auth();
+        }
+        // Dropping a JoinHandle detaches the task; it does not abort shutdown.
     }
 }
