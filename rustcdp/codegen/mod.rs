@@ -285,6 +285,16 @@ impl Generator {
                     ""
                 };
                 out.push_str(&format!("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize{eq})]\n#[serde(transparent)]\npub struct {name}(pub {ty});\n"));
+                // Only scalar wrappers get these conversions. Enums and named
+                // objects were emitted above; arrays and maps keep their APIs.
+                if matches!(ty.as_str(), "String" | "i64" | "f64" | "bool") {
+                    out.push_str(&format!("impl From<{ty}> for {name} {{ fn from(value: {ty}) -> Self {{ Self(value) }} }}\n"));
+                    out.push_str(&format!("impl std::fmt::Display for {name} {{ fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ std::fmt::Display::fmt(&self.0, f) }} }}\n"));
+                    if ty == "String" {
+                        out.push_str(&format!("impl From<&str> for {name} {{ fn from(value: &str) -> Self {{ Self(value.to_owned()) }} }}\n"));
+                        out.push_str(&format!("impl AsRef<str> for {name} {{ fn as_ref(&self) -> &str {{ &self.0 }} }}\n"));
+                    }
+                }
             }
         }
         out.push_str("pub mod commands {\n");
