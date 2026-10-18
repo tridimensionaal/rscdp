@@ -16,9 +16,8 @@ use tokio_tungstenite::{
 
 mod auth_events;
 pub(crate) use auth_events::{AuthEvent, AuthEventKind, AuthEvents};
-
-const CAPACITY: usize = 256;
-const TIMEOUT: Duration = Duration::from_secs(30);
+mod options;
+pub use options::ConnectionOptions;
 
 // None is running; a terminal value distinguishes normal close from failure.
 type CloseState = Option<std::result::Result<(), Arc<Error>>>;
@@ -68,6 +67,7 @@ struct Inner {
     runtime: tokio::runtime::Handle,
     requests: mpsc::Sender<Request>,
     events: broadcast::Sender<RawEvent>,
+    event_capacity: usize,
     shutdown: watch::Sender<bool>,
     closed: watch::Receiver<CloseState>,
     task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -180,7 +180,8 @@ impl Drop for Inner {
 
 /// A cloneable handle to one CDP socket. The reader task starts automatically.
 ///
-/// Commands share 256 in-flight slots; incoming messages are limited to 100 MiB.
+/// By default, commands share 256 in-flight slots and incoming messages are limited
+/// to 100 MiB. Configure transport limits with [`ConnectionOptions`].
 /// The default command timeout is 30 seconds, including admission. Configure it
 /// per handle with [`Self::with_command_timeout`]. Cancellation cannot undo a
 /// command Chrome has already received.
@@ -197,12 +198,10 @@ pub struct Connection(Arc<Inner>, Option<Duration>);
 impl Connection {
     /// Connect to a ws/wss endpoint or discover it via HTTP(S) `/json/version`.
     pub async fn connect(endpoint: &str) -> Result<Self> {
-        tokio::time::timeout(TIMEOUT, Self::connect_inner(endpoint))
-            .await
-            .map_err(|_| Error::Timeout("connecting to CDP".into()))?
+        ConnectionOptions::default().connect(endpoint).await
     }
 
-    async fn connect_inner(endpoint: &str) -> Result<Self> {
+    async fn connect_inner(endpoint: &str, options: ConnectionOptions) -> Result<Self> {
         let url = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
             #[derive(Deserialize)]
             struct Version {
@@ -225,11 +224,11 @@ impl Connection {
             ));
         };
         let config = WebSocketConfig::default()
-            .max_message_size(Some(100 * 1024 * 1024))
-            .max_frame_size(Some(100 * 1024 * 1024));
+            .max_message_size(Some(options.max_message_size))
+            .max_frame_size(Some(options.max_message_size));
         let (socket, _) = connect_async_with_config(url, Some(config), false).await?;
-        let (requests, mut incoming) = mpsc::channel::<Request>(CAPACITY);
-        let (events, _) = broadcast::channel(CAPACITY);
+        let (requests, mut incoming) = mpsc::channel::<Request>(options.max_in_flight);
+        let (events, _) = broadcast::channel(options.event_capacity);
         let event_sender = events.clone();
         let (shutdown, mut stop) = watch::channel(false);
         let (closed_sender, closed) = watch::channel(None);
@@ -239,6 +238,7 @@ impl Connection {
         let active_subscriptions = subscriptions.clone();
         let auth_subscriptions = auth_events::AuthSubscriptions::default();
         let active_auth_subscriptions = auth_subscriptions.clone();
+        let write_timeout = options.write_timeout;
         let task = tokio::spawn(async move {
             let (mut sink, mut stream) = socket.split();
             let mut pending = HashMap::<u64, Request>::new();
@@ -329,7 +329,9 @@ impl Connection {
                                 Message::Ping(_) => {
                                     // Tungstenite queues the pong while reading. Flush it
                                     // without suspending reads or extending an active write.
-                                    write_deadline.get_or_insert_with(|| tokio::time::Instant::now() + TIMEOUT);
+                                    if write_deadline.is_none() {
+                                        write_deadline = Some(options::deadline(write_timeout, "write_timeout")?);
+                                    }
                                 }
                                 Message::Pong(_) => {}
                                 _ => return Err(Error::ConnectionClosed("non-text CDP frame".into())),
@@ -353,7 +355,7 @@ impl Connection {
                             if let Some(session_id) = &request.session_id { message["sessionId"] = session_id.clone().into(); }
                             pending.insert(id, request);
                             outbound = Some(Message::Text(serde_json::to_string(&message)?.into()));
-                            write_deadline = Some(tokio::time::Instant::now() + TIMEOUT);
+                            write_deadline = Some(options::deadline(write_timeout, "write_timeout")?);
                         }
                         _ = cleanup.tick() => pending.retain(|_, p| !p.reply.is_closed()),
                     }
@@ -388,15 +390,16 @@ impl Connection {
                 runtime: tokio::runtime::Handle::current(),
                 requests,
                 events,
+                event_capacity: options.event_capacity,
                 shutdown,
                 closed,
                 task: tokio::sync::Mutex::new(Some(task)),
-                permits: Semaphore::new(CAPACITY),
+                permits: Semaphore::new(options.max_in_flight),
                 sessions,
                 subscriptions,
                 auth_subscriptions,
             }),
-            Some(TIMEOUT),
+            options.command_timeout,
         ))
     }
 
@@ -622,7 +625,7 @@ impl Connection {
     }
 
     pub(crate) fn subscribe_typed(&self, method: &str, session: Option<String>) -> EventStream {
-        self.subscribe_filtered(&[method], session, CAPACITY)
+        self.subscribe_filtered(&[method], session, self.0.event_capacity)
     }
 
     pub(crate) fn subscribe_filtered(
@@ -669,7 +672,8 @@ impl Connection {
     }
 }
 
-/// Raw events across sessions, buffered up to 256 events per subscription.
+/// Raw events across sessions, buffered using the connection's configured event
+/// capacity (256 by default, rounded up to a power of two).
 /// Overflow reports [`Error::Lagged`]; buffered events are drained before terminal
 /// connection failure. Use ordinary Tokio tasks to run event handlers.
 pub struct EventStream {
