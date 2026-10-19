@@ -90,7 +90,21 @@ struct SessionEntry {
 }
 
 type EventKey = (Option<String>, String);
-type Subscriptions = Arc<Mutex<HashMap<EventKey, Vec<Weak<broadcast::Sender<RawEvent>>>>>>;
+// None in the method position means every method on this exact scope.
+type SubscriptionKey = (Option<String>, Option<String>);
+type Subscriptions = Arc<Mutex<HashMap<SubscriptionKey, Vec<Weak<broadcast::Sender<RawEvent>>>>>>;
+
+fn dispatch_events(subscriptions: &Subscriptions, event: &RawEvent) {
+    let subscriptions = subscriptions.lock().unwrap_or_else(|e| e.into_inner());
+    for method in [Some(event.method.clone()), None] {
+        let key = (event.session_id.clone(), method);
+        if let Some(senders) = subscriptions.get(&key) {
+            for sender in senders.iter().filter_map(Weak::upgrade) {
+                let _ = sender.send(event.clone());
+            }
+        }
+    }
+}
 
 pub(crate) struct SessionState {
     pub(crate) closed: watch::Receiver<bool>,
@@ -149,10 +163,17 @@ fn close_sessions(registry: &SessionRegistry, id: &str) -> Vec<String> {
 
 fn close_session_requests(
     registry: &SessionRegistry,
+    subscriptions: &Subscriptions,
     pending: &mut HashMap<u64, Request>,
     id: &str,
 ) {
     let removed = close_sessions(registry, id);
+    // Session removal happens first. Registration holds the registry lock while
+    // inserting, so it cannot recreate a subscription for a removed session.
+    subscriptions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(session, _), _| !session.as_ref().is_some_and(|id| removed.contains(id)));
     let cancelled: Vec<_> = pending
         .iter()
         .filter(|(_, request)| {
@@ -303,7 +324,7 @@ impl Connection {
                                                 && result.is_ok()
                                                 && let Some(id) = request.params["sessionId"].as_str()
                                             {
-                                                close_session_requests(&active_sessions, &mut pending, id);
+                                                close_session_requests(&active_sessions, &active_subscriptions, &mut pending, id);
                                             }
                                             let _ = request.reply.send(result);
                                         }
@@ -313,14 +334,11 @@ impl Connection {
                                             if event.method == "Target.attachedToTarget" {
                                                 register_session(&active_sessions, id, event.session_id.clone(), event.params["targetInfo"]["targetId"].as_str());
                                             } else if event.method == "Target.detachedFromTarget" {
-                                                close_session_requests(&active_sessions, &mut pending, id);
+                                                close_session_requests(&active_sessions, &active_subscriptions, &mut pending, id);
                                             }
                                         }
                                         // No subscribers is normal; subscribed readers detect lag explicitly.
-                                        let key = (event.session_id.clone(), event.method.clone());
-                                        if let Some(senders) = active_subscriptions.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-                                            for sender in senders.iter().filter_map(Weak::upgrade) { let _ = sender.send(event.clone()); }
-                                        }
+                                        dispatch_events(&active_subscriptions, &event);
                                         auth_events::dispatch(&active_auth_subscriptions, &event);
                                         let _ = event_sender.send(event);
                                     }
@@ -621,11 +639,17 @@ impl Connection {
             _sender: None,
             receiver: self.0.events.subscribe(),
             closed: self.0.closed.clone(),
+            session: None,
+            _attachment: None,
         }
     }
 
     pub(crate) fn subscribe_typed(&self, method: &str, session: Option<String>) -> EventStream {
         self.subscribe_filtered(&[method], session, self.0.event_capacity)
+    }
+
+    pub(crate) fn subscribe_session(&self, id: &str) -> EventStream {
+        self.subscribe_inner(None, Some(id.into()), self.0.event_capacity)
     }
 
     pub(crate) fn subscribe_filtered(
@@ -634,6 +658,25 @@ impl Connection {
         session: Option<String>,
         capacity: usize,
     ) -> EventStream {
+        // Private consumers remain non-owning, including execution-context
+        // watchers whose enclosing state already owns its session lifetime.
+        self.subscribe_inner(Some(methods), session, capacity)
+    }
+
+    fn subscribe_inner(
+        &self,
+        methods: Option<&[&str]>,
+        session: Option<String>,
+        capacity: usize,
+    ) -> EventStream {
+        // Lock order is session registry then subscriptions. Detachment removes
+        // the session before pruning subscriptions; no inverse order is used.
+        let sessions = self.0.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let live = session.as_ref().is_none_or(|id| {
+            sessions
+                .get(id)
+                .is_some_and(|entry| !*entry.closed.borrow())
+        });
         let mut subscriptions = self
             .0
             .subscriptions
@@ -644,16 +687,27 @@ impl Connection {
             !senders.is_empty()
         });
         let sender = Arc::new(broadcast::channel(capacity).0);
-        for method in methods {
-            subscriptions
-                .entry((session.clone(), (*method).to_owned()))
-                .or_default()
-                .push(Arc::downgrade(&sender));
+        if live {
+            let methods: HashSet<_> = match methods {
+                Some(methods) => methods
+                    .iter()
+                    .map(|method| Some((*method).to_owned()))
+                    .collect(),
+                None => HashSet::from([None]),
+            };
+            for method in methods {
+                subscriptions
+                    .entry((session.clone(), method))
+                    .or_default()
+                    .push(Arc::downgrade(&sender));
+            }
         }
         EventStream {
             receiver: sender.subscribe(),
             closed: self.0.closed.clone(),
             _sender: Some(sender),
+            session: None,
+            _attachment: None,
         }
     }
 
@@ -672,20 +726,41 @@ impl Connection {
     }
 }
 
-/// Raw events across sessions, buffered using the connection's configured event
+/// Raw events in the subscribed scope, buffered using the connection's configured event
 /// capacity (256 by default, rounded up to a power of two).
 /// Overflow reports [`Error::Lagged`]; buffered events are drained before terminal
 /// connection failure. Use ordinary Tokio tasks to run event handlers.
+/// Streams from [`crate::Session::subscribe`] retain attachment ownership and
+/// wake on detachment, delivering buffered events before [`Error::SessionClosed`].
 pub struct EventStream {
     _sender: Option<Arc<broadcast::Sender<RawEvent>>>,
     receiver: broadcast::Receiver<RawEvent>,
     closed: watch::Receiver<CloseState>,
+    session: Option<(String, watch::Receiver<bool>)>,
+    _attachment: Option<Arc<Attachment>>,
 }
 
 impl EventStream {
+    pub(crate) fn with_session(
+        mut self,
+        id: String,
+        closed: watch::Receiver<bool>,
+        attachment: Arc<Attachment>,
+    ) -> Self {
+        self.session = Some((id, closed));
+        self._attachment = Some(attachment);
+        self
+    }
+
     pub(crate) fn try_recv(&mut self) -> Result<Option<RawEvent>> {
         // Snapshot terminal state before draining: publication follows the final
         // event, so a known terminal state cannot hide an earlier queued event.
+        let session_error = self.session.as_ref().and_then(|(id, closed)| {
+            (*closed.borrow() || closed.has_changed().is_err())
+                .then(|| Error::SessionClosed(id.clone()))
+        });
+        // Read the connection cause after observing session closure: connection
+        // teardown publishes its cause before closing the session watches.
         let state = self.closed.borrow().clone();
         let stopped = self.closed.has_changed().is_err();
         match self.receiver.try_recv() {
@@ -696,11 +771,20 @@ impl EventStream {
                 } else if stopped {
                     Err(close_error(&self.closed.borrow()))
                 } else {
-                    Ok(None)
+                    session_error.map_or(Ok(None), Err)
                 }
             }
             Err(broadcast::error::TryRecvError::Lagged(count)) => Err(Error::Lagged(count)),
-            Err(broadcast::error::TryRecvError::Closed) => Err(close_error(&self.closed.borrow())),
+            Err(broadcast::error::TryRecvError::Closed) => {
+                // Channel closure may follow terminal publication after the
+                // snapshot above; preserve that newly published failure cause.
+                let state = self.closed.borrow().clone();
+                if state.is_some() || self.closed.has_changed().is_err() {
+                    Err(close_error(&state))
+                } else {
+                    Err(session_error.unwrap_or_else(|| close_error(&state)))
+                }
+            }
         }
     }
 
@@ -708,15 +792,26 @@ impl EventStream {
     /// so this can be used in `tokio::select!`.
     /// [`Error::Lagged`] reports lost events; call again to receive retained events.
     pub async fn recv(&mut self) -> Result<RawEvent> {
-        if let Some(event) = self.try_recv()? {
-            return Ok(event);
-        }
-        tokio::select! {
-            error = wait_closed_state(&mut self.closed) => self.try_recv()?.ok_or(error),
-            event = self.receiver.recv() => event.map_err(|error| match error {
-                broadcast::error::RecvError::Closed => close_error(&self.closed.borrow()),
-                broadcast::error::RecvError::Lagged(count) => Error::Lagged(count),
-            }),
+        loop {
+            if let Some(event) = self.try_recv()? {
+                return Ok(event);
+            }
+            let session_closed = async {
+                if let Some((_, closed)) = &mut self.session {
+                    let _ = closed.changed().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            };
+            tokio::select! {
+                _ = wait_closed_state(&mut self.closed) => {},
+                _ = session_closed => {},
+                event = self.receiver.recv() => match event {
+                    Ok(event) => return Ok(event),
+                    Err(broadcast::error::RecvError::Lagged(count)) => return Err(Error::Lagged(count)),
+                    Err(broadcast::error::RecvError::Closed) => {},
+                },
+            }
         }
     }
 }
@@ -724,6 +819,104 @@ impl EventStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(session: Option<&str>, method: &str) -> RawEvent {
+        RawEvent {
+            session_id: session.map(str::to_owned),
+            method: method.into(),
+            params: json!({}),
+        }
+    }
+
+    #[test]
+    fn exact_session_dispatch_stops_for_detached_session_and_descendants() {
+        let registry = SessionRegistry::default();
+        let subscriptions = Subscriptions::default();
+        register_session(&registry, "parent", None, None);
+        register_session(&registry, "child", Some("parent".into()), None);
+        let raw = Arc::new(broadcast::channel(8).0);
+        let typed = Arc::new(broadcast::channel(8).0);
+        let child = Arc::new(broadcast::channel(8).0);
+        let mut raw_events = raw.subscribe();
+        let mut typed_events = typed.subscribe();
+        let mut child_events = child.subscribe();
+        for (key, sender) in [
+            ((Some("parent".into()), None), &raw),
+            ((Some("parent".into()), Some("Example.one".into())), &typed),
+            ((Some("child".into()), None), &child),
+        ] {
+            subscriptions
+                .lock()
+                .unwrap()
+                .insert(key, vec![Arc::downgrade(sender)]);
+        }
+        dispatch_events(&subscriptions, &event(None, "Example.one"));
+        dispatch_events(&subscriptions, &event(Some("other"), "Example.one"));
+        dispatch_events(&subscriptions, &event(Some("child"), "Example.one"));
+        dispatch_events(&subscriptions, &event(Some("parent"), "Example.one"));
+        dispatch_events(&subscriptions, &event(Some("parent"), "Example.two"));
+        close_session_requests(&registry, &subscriptions, &mut HashMap::new(), "parent");
+        dispatch_events(&subscriptions, &event(Some("parent"), "Example.three"));
+        dispatch_events(&subscriptions, &event(Some("child"), "Example.three"));
+        assert_eq!(raw_events.try_recv().unwrap().method, "Example.one");
+        assert_eq!(raw_events.try_recv().unwrap().method, "Example.two");
+        assert_eq!(typed_events.try_recv().unwrap().method, "Example.one");
+        assert_eq!(child_events.try_recv().unwrap().method, "Example.one");
+        for receiver in [&mut raw_events, &mut typed_events, &mut child_events] {
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn session_stream_drains_lag_and_buffer_before_closure_and_preserves_connection_cause() {
+        let sender = Arc::new(broadcast::channel(1).0);
+        let (connection_closed, closed) = watch::channel(None);
+        let (session_closed, session) = watch::channel(false);
+        let mut stream = EventStream {
+            receiver: sender.subscribe(),
+            _sender: Some(sender.clone()),
+            closed,
+            session: Some(("session".into(), session)),
+            _attachment: None,
+        };
+        sender.send(event(Some("session"), "Example.one")).unwrap();
+        sender.send(event(Some("session"), "Example.two")).unwrap();
+        session_closed.send_replace(true);
+        assert!(matches!(stream.recv().await, Err(Error::Lagged(1))));
+        assert_eq!(stream.recv().await.unwrap().method, "Example.two");
+        assert!(matches!(stream.recv().await, Err(Error::SessionClosed(id)) if id == "session"));
+        let cause = Arc::new(Error::Timeout("transport write".into()));
+        connection_closed.send_replace(Some(Err(cause.clone())));
+        assert!(
+            matches!(stream.recv().await, Err(Error::ConnectionFailed(actual)) if Arc::ptr_eq(&actual, &cause))
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_session_stream_wakes_when_session_watch_sender_disappears() {
+        let sender = Arc::new(broadcast::channel(1).0);
+        let (_connection_closed, closed) = watch::channel(None);
+        let (session_closed, session) = watch::channel(false);
+        let mut stream = EventStream {
+            receiver: sender.subscribe(),
+            _sender: Some(sender),
+            closed,
+            session: Some(("session".into(), session)),
+            _attachment: None,
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(stream.recv(), async {
+                tokio::task::yield_now().await;
+                drop(session_closed);
+            })
+        })
+        .await
+        .expect("session closure must wake recv");
+        assert!(matches!(result, Err(Error::SessionClosed(id)) if id == "session"));
+    }
 
     #[test]
     fn parameterless_event_accepts_absent_params_but_preserves_explicit_null() {

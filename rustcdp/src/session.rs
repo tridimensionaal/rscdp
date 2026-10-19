@@ -126,9 +126,6 @@ impl Connection {
     pub fn listen<E: Event>(&self) -> TypedEvents<E> {
         TypedEvents {
             stream: self.subscribe_typed(E::METHOD, None),
-            session_id: None,
-            closed: None,
-            _attachment: None,
             marker: PhantomData,
         }
     }
@@ -244,12 +241,27 @@ impl Session {
         TypedEvents {
             stream: self
                 .connection
-                .subscribe_typed(E::METHOD, Some(self.id.0.clone())),
-            session_id: Some(self.id.0.clone()),
-            closed: Some(self.closed.clone()),
-            _attachment: Some(self.attachment.clone()),
+                .subscribe_typed(E::METHOD, Some(self.id.0.clone()))
+                .with_session(
+                    self.id.0.clone(),
+                    self.closed.clone(),
+                    self.attachment.clone(),
+                ),
             marker: PhantomData,
         }
+    }
+
+    /// Subscribe to all raw event methods on this exact session, not descendants.
+    /// Registers synchronously and retains this attachment and its ancestors.
+    /// No domain is enabled automatically. Buffered events precede detachment
+    /// errors; overflow reports [`Error::Lagged`]. The connection's event capacity
+    /// applies (256 by default, rounded up to a power of two).
+    pub fn subscribe(&self) -> EventStream {
+        self.connection.subscribe_session(&self.id.0).with_session(
+            self.id.0.clone(),
+            self.closed.clone(),
+            self.attachment.clone(),
+        )
     }
 
     /// Detach this session and its descendants.
@@ -271,7 +283,8 @@ impl Session {
     }
 }
 
-/// Events filtered by session and method before entering a 256-event buffer.
+/// Events filtered by session and method before buffering at the connection's
+/// configured event capacity (256 by default, rounded up to a power of two).
 /// Overflow reports [`Error::Lagged`]. Detachment wakes session listeners,
 /// including descendants; buffered events are delivered before closure.
 /// Register with [`Session::listen`] before the action that can emit the event.
@@ -279,9 +292,6 @@ impl Session {
 /// [`crate::Page::navigate`] to await a specific navigation.
 pub struct TypedEvents<E> {
     stream: EventStream,
-    session_id: Option<String>,
-    closed: Option<watch::Receiver<bool>>,
-    _attachment: Option<std::sync::Arc<Attachment>>,
     marker: PhantomData<E>,
 }
 
@@ -292,34 +302,8 @@ impl<E: Event> TypedEvents<E> {
     /// A typed decoding error consumes that event; later events remain receivable.
     /// [`Error::Decode`] retains its method, original payload, and cause.
     pub async fn recv(&mut self) -> Result<E> {
-        loop {
-            let event = if let Some(closed) = &mut self.closed {
-                if *closed.borrow() {
-                    match self.stream.try_recv()? {
-                        Some(event) => {
-                            if event.session_id == self.session_id && event.method == E::METHOD {
-                                return crate::error::decode(E::METHOD, event.params);
-                            }
-                            continue;
-                        }
-                        None => {
-                            return Err(Error::SessionClosed(
-                                self.session_id.clone().unwrap_or_default(),
-                            ));
-                        }
-                    }
-                }
-                tokio::select! {
-                    result = self.stream.recv() => result?,
-                    _ = closed.changed() => continue,
-                }
-            } else {
-                self.stream.recv().await?
-            };
-            if event.session_id == self.session_id && event.method == E::METHOD {
-                return crate::error::decode(E::METHOD, event.params);
-            }
-        }
+        let event = self.stream.recv().await?;
+        crate::error::decode(E::METHOD, event.params)
     }
 }
 
