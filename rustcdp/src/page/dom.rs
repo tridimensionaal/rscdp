@@ -3,6 +3,14 @@ use crate::{Error, Result, Session, cdp::dom::Node, error::with_cleanup};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
+/// Options for [`Page::search_dom`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DomSearchOptions {
+    /// Include user-agent shadow DOM in search results. Defaults to false.
+    /// Document preparation traverses frames and shadow roots independently.
+    pub include_user_agent_shadow_dom: bool,
+}
+
 impl Page {
     /// Read document HTML in a serialized, owned DOM transaction.
     /// The caller's deadline limits waiting, not ownership. Queueing and transaction
@@ -58,10 +66,16 @@ impl Page {
     }
 
     /// Search by plain text, CSS selector, or XPath using CDP DOM search.
-    /// Optionally include user-agent shadow DOM.
+    /// [`DomSearchOptions`] controls inclusion of user-agent shadow DOM in results.
+    /// Preparation always requests the full subtree with frame/shadow-root traversal.
+    /// Returned nodes are protocol snapshots, may include non-element nodes, and
+    /// do not own their originating target or document.
     /// Acquire an `enable_dom()` guard before searching and retain it while using
     /// the returned frontend node IDs.
-    /// `resolve_node()` uses backend IDs and does not require that extra guard.
+    /// `resolve_node()` uses backend IDs and does not require that extra guard,
+    /// but still requires the correct originating target and document. A search
+    /// result from a descendant frame is not necessarily resolvable in this
+    /// Page's root execution context.
     ///
     /// Once a search ID is known, cleanup makes one owned discard attempt capped
     /// at 30 seconds, preserving a shorter command timeout. Normal completion
@@ -78,7 +92,7 @@ impl Page {
     /// Recovery runs before releasing the transaction gate, with a one-second
     /// detach attempt before connection closure. Other decoding errors still await
     /// discard; [`Error::Cleanup`] preserves both errors if discard also fails.
-    pub async fn search_dom(&self, query: &str, include_shadow_dom: bool) -> Result<Vec<Node>> {
+    pub async fn search_dom(&self, query: &str, options: DomSearchOptions) -> Result<Vec<Node>> {
         let timeout = self.session.connection().command_timeout();
         let page = self.clone();
         let query = query.to_owned();
@@ -92,7 +106,7 @@ impl Page {
                     Duration::from_secs(30),
                     commands.search_dom_owned(
                         &query,
-                        include_shadow_dom,
+                        options,
                         &page.session,
                         &mut recovery_required,
                     ),
@@ -122,21 +136,18 @@ impl Page {
     async fn search_dom_owned(
         &self,
         query: &str,
-        include_shadow_dom: bool,
+        options: DomSearchOptions,
         cleanup_session: &Session,
         recovery_required: &mut bool,
     ) -> Result<Vec<Node>> {
         self.session
-            .execute_raw(
-                "DOM.getDocument",
-                json!({"depth":-1,"pierce":include_shadow_dom}),
-            )
+            .execute_raw("DOM.getDocument", json!({"depth":-1,"pierce":true}))
             .await?;
         let search = self
             .session
             .execute_raw(
                 "DOM.performSearch",
-                json!({"query":query,"includeUserAgentShadowDOM":include_shadow_dom}),
+                json!({"query":query,"includeUserAgentShadowDOM":options.include_user_agent_shadow_dom}),
             )
             .await?;
         let search_id = match serde_json::from_value::<String>(search["searchId"].clone()) {

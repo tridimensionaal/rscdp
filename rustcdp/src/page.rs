@@ -21,6 +21,7 @@ mod pdf;
 mod selectors;
 
 pub use capture::{ScreenshotBuilder, ScreenshotFormat};
+pub use dom::DomSearchOptions;
 pub use element::{ClickMethod, ClickOptions, Element, ElementPosition};
 pub use evaluation::{EvaluationBuilder, EvaluationWorld, RemoteValue};
 pub use frame::Frame;
