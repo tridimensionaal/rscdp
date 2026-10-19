@@ -1,7 +1,7 @@
 use crate::{
     Connection, Error, Result,
     cdp::target::{SessionId, TargetId},
-    connection::EventStream,
+    connection::{EventOptions, EventStream},
     protocol::{Command, Event},
 };
 use serde_json::Value;
@@ -128,6 +128,16 @@ impl Connection {
             stream: self.subscribe_typed(E::METHOD, None),
             marker: PhantomData,
         }
+    }
+
+    /// Listen to one root-session event with an explicit buffer capacity.
+    /// Capacity must be in 1..=usize::MAX / 2 and rounds up to a power of two.
+    /// Registers synchronously without enabling a domain or retaining attachments.
+    pub fn listen_with_capacity<E: Event>(&self, capacity: usize) -> Result<TypedEvents<E>> {
+        Ok(TypedEvents {
+            stream: self.subscribe_typed_with_capacity(E::METHOD, None, capacity)?,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -262,6 +272,38 @@ impl Session {
             self.closed.clone(),
             self.attachment.clone(),
         )
+    }
+
+    /// Subscribe to selected raw methods on this exact session, not descendants.
+    /// Filtering occurs before buffering, with matching methods in receive order.
+    /// Empty methods select all. Retains attachment ownership and wakes on detach,
+    /// like [`Self::subscribe`]. Invalid options fail before registration.
+    pub fn subscribe_with(&self, options: EventOptions) -> Result<EventStream> {
+        Ok(self
+            .connection
+            .subscribe_session_with(&self.id.0, options)?
+            .with_session(
+                self.id.0.clone(),
+                self.closed.clone(),
+                self.attachment.clone(),
+            ))
+    }
+
+    /// Listen to one exact-session event with an explicit buffer capacity.
+    /// Capacity must be in 1..=usize::MAX / 2 and rounds up to a power of two.
+    /// Retains attachment ownership and detach behavior, like [`Self::listen`].
+    pub fn listen_with_capacity<E: Event>(&self, capacity: usize) -> Result<TypedEvents<E>> {
+        Ok(TypedEvents {
+            stream: self
+                .connection
+                .subscribe_typed_with_capacity(E::METHOD, Some(self.id.0.clone()), capacity)?
+                .with_session(
+                    self.id.0.clone(),
+                    self.closed.clone(),
+                    self.attachment.clone(),
+                ),
+            marker: PhantomData,
+        })
     }
 
     /// Detach this session and its descendants.

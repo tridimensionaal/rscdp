@@ -18,6 +18,9 @@ mod auth_events;
 pub(crate) use auth_events::{AuthEvent, AuthEventKind, AuthEvents};
 mod options;
 pub use options::ConnectionOptions;
+mod events;
+use events::ScopeKey;
+pub use events::{EventOptions, EventScope};
 
 // None is running; a terminal value distinguishes normal close from failure.
 type CloseState = Option<std::result::Result<(), Arc<Error>>>;
@@ -90,17 +93,19 @@ struct SessionEntry {
 }
 
 type EventKey = (Option<String>, String);
-// None in the method position means every method on this exact scope.
-type SubscriptionKey = (Option<String>, Option<String>);
+// None in the method position means every method on the selected scope.
+type SubscriptionKey = (ScopeKey, Option<String>);
 type Subscriptions = Arc<Mutex<HashMap<SubscriptionKey, Vec<Weak<broadcast::Sender<RawEvent>>>>>>;
 
 fn dispatch_events(subscriptions: &Subscriptions, event: &RawEvent) {
     let subscriptions = subscriptions.lock().unwrap_or_else(|e| e.into_inner());
-    for method in [Some(event.method.clone()), None] {
-        let key = (event.session_id.clone(), method);
-        if let Some(senders) = subscriptions.get(&key) {
-            for sender in senders.iter().filter_map(Weak::upgrade) {
-                let _ = sender.send(event.clone());
+    for scope in [ScopeKey::All, ScopeKey::Exact(event.session_id.clone())] {
+        for method in [Some(event.method.clone()), None] {
+            let key = (scope.clone(), method);
+            if let Some(senders) = subscriptions.get(&key) {
+                for sender in senders.iter().filter_map(Weak::upgrade) {
+                    let _ = sender.send(event.clone());
+                }
             }
         }
     }
@@ -173,7 +178,9 @@ fn close_session_requests(
     subscriptions
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|(session, _), _| !session.as_ref().is_some_and(|id| removed.contains(id)));
+        .retain(
+            |(scope, _), _| !matches!(scope, ScopeKey::Exact(Some(id)) if removed.contains(id)),
+        );
     let cancelled: Vec<_> = pending
         .iter()
         .filter(|(_, request)| {
@@ -649,7 +656,11 @@ impl Connection {
     }
 
     pub(crate) fn subscribe_session(&self, id: &str) -> EventStream {
-        self.subscribe_inner(None, Some(id.into()), self.0.event_capacity)
+        self.subscribe_inner(
+            None,
+            ScopeKey::Exact(Some(id.into())),
+            self.0.event_capacity,
+        )
     }
 
     pub(crate) fn subscribe_filtered(
@@ -660,23 +671,24 @@ impl Connection {
     ) -> EventStream {
         // Private consumers remain non-owning, including execution-context
         // watchers whose enclosing state already owns its session lifetime.
-        self.subscribe_inner(Some(methods), session, capacity)
+        self.subscribe_inner(Some(methods), ScopeKey::Exact(session), capacity)
     }
 
     fn subscribe_inner(
         &self,
         methods: Option<&[&str]>,
-        session: Option<String>,
+        scope: ScopeKey,
         capacity: usize,
     ) -> EventStream {
         // Lock order is session registry then subscriptions. Detachment removes
         // the session before pruning subscriptions; no inverse order is used.
         let sessions = self.0.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let live = session.as_ref().is_none_or(|id| {
-            sessions
+        let live = match &scope {
+            ScopeKey::Exact(Some(id)) => sessions
                 .get(id)
-                .is_some_and(|entry| !*entry.closed.borrow())
-        });
+                .is_some_and(|entry| !*entry.closed.borrow()),
+            ScopeKey::All | ScopeKey::Exact(None) => true,
+        };
         let mut subscriptions = self
             .0
             .subscriptions
@@ -697,7 +709,7 @@ impl Connection {
             };
             for method in methods {
                 subscriptions
-                    .entry((session.clone(), method))
+                    .entry((scope.clone(), method))
                     .or_default()
                     .push(Arc::downgrade(&sender));
             }
@@ -829,6 +841,41 @@ mod tests {
     }
 
     #[test]
+    fn all_and_root_filters_exclude_unrelated_events_before_buffering() {
+        let subscriptions = Subscriptions::default();
+        let all = Arc::new(broadcast::channel(2).0);
+        let root = Arc::new(broadcast::channel(2).0);
+        let mut all_events = all.subscribe();
+        let mut root_events = root.subscribe();
+        for (scope, sender) in [(ScopeKey::All, &all), (ScopeKey::Exact(None), &root)] {
+            subscriptions.lock().unwrap().insert(
+                (scope, Some("Example.selected".into())),
+                vec![Arc::downgrade(sender)],
+            );
+        }
+        dispatch_events(&subscriptions, &event(None, "Example.selected"));
+        for _ in 0..10 {
+            dispatch_events(&subscriptions, &event(None, "Example.unrelated"));
+        }
+        dispatch_events(
+            &subscriptions,
+            &event(Some("unadopted"), "Example.selected"),
+        );
+        assert_eq!(all_events.try_recv().unwrap().session_id, None);
+        assert_eq!(
+            all_events.try_recv().unwrap().session_id.as_deref(),
+            Some("unadopted")
+        );
+        assert_eq!(root_events.try_recv().unwrap().session_id, None);
+        for receiver in [&mut all_events, &mut root_events] {
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[test]
     fn exact_session_dispatch_stops_for_detached_session_and_descendants() {
         let registry = SessionRegistry::default();
         let subscriptions = Subscriptions::default();
@@ -841,9 +888,15 @@ mod tests {
         let mut typed_events = typed.subscribe();
         let mut child_events = child.subscribe();
         for (key, sender) in [
-            ((Some("parent".into()), None), &raw),
-            ((Some("parent".into()), Some("Example.one".into())), &typed),
-            ((Some("child".into()), None), &child),
+            ((ScopeKey::Exact(Some("parent".into())), None), &raw),
+            (
+                (
+                    ScopeKey::Exact(Some("parent".into())),
+                    Some("Example.one".into()),
+                ),
+                &typed,
+            ),
+            ((ScopeKey::Exact(Some("child".into())), None), &child),
         ] {
             subscriptions
                 .lock()
