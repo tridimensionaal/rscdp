@@ -50,7 +50,7 @@ impl BrowserContext {
         joined?
     }
 
-    async fn create_owned(connection: &Connection, mut params: Value) -> Result<Self> {
+    pub(super) async fn create_owned(connection: &Connection, mut params: Value) -> Result<Self> {
         // Disconnection must resolve ownership even if the creation reply is lost.
         params["disposeOnDetach"] = true.into();
         let commands = connection.clone().with_command_timeout(None);

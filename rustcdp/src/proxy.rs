@@ -14,18 +14,6 @@ pub struct Proxy {
     credentials: Option<(String, String)>,
 }
 
-/// Authentication timing for browser/context proxy setup.
-/// Without configured credentials, neither mode starts a worker or preflight.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ProxyAuthMode {
-    /// Check readiness at `https://www.example.com/` before setup returns.
-    /// This is the default for a configured authentication worker.
-    #[default]
-    Preflight,
-    /// Handle challenges as requests occur; disable interception after verified authentication.
-    OnDemand,
-}
-
 impl Proxy {
     pub fn server(&self) -> &str {
         &self.server

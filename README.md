@@ -161,8 +161,10 @@ See [evaluation](rustcdp/src/page/evaluation.rs) for cancellation and lifetime d
 Recorded transport failures share their typed cause through
 `Error::ConnectionFailed(Arc<Error>)`; inspect the Arc or the standard error source
 chain. See [Connection](rustcdp/src/connection.rs) and [Error](rustcdp/src/error.rs) for delivery rules.
-Proxy readiness is not proof of proxy traversal or credential use; see
-[ProxyAuthMode](rustcdp/src/proxy.rs) and [authentication](rustcdp/src/proxy/auth.rs).
+Proxy setup arms authentication without navigating. Navigate to your own destination,
+then await `wait_for_proxy_ready` to distinguish authenticated from unchallenged traffic.
+Readiness is not proof of proxy traversal or credential use; see
+[authentication](rustcdp/src/proxy/auth.rs).
 
 ## Diagnostics
 

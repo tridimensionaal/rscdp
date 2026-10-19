@@ -3,29 +3,24 @@ use crate::{
     Error, Page, Result,
     error::with_cleanup,
     launcher::{LaunchOptions, args::validated_switch_name},
-    proxy::{Proxy, ProxyAuth, ProxyAuthMode, ProxyAuthStatus},
+    proxy::{Proxy, ProxyAuth, ProxyAuthStatus},
 };
 use serde_json::json;
 use std::time::Duration;
 
 impl Browser {
     /// Launch with a process-wide proxy and optional credential worker.
-    /// [`ProxyAuthMode`] selects preflight or on-demand authentication when
-    /// credentials are configured. Without credentials, neither worker nor
-    /// preflight runs. See [`Self::wait_for_proxy_ready`] for readiness semantics.
+    /// Credentials arm authentication before returning. Setup does not navigate;
+    /// navigate to your intended destination, then use [`Self::wait_for_proxy_ready`]
+    /// to observe authentication. Without credentials, no worker is started.
     /// The worker handles only the initial page's session; other tabs and separate
     /// child sessions do not automatically receive authentication workers.
-    /// With credentials, preflight navigates the initial page to
-    /// `https://www.example.com/` and does not restore its previous URL. It waits
-    /// for worker readiness, not for the page's load event.
+    /// Setup continues in an owned task after cancellation. An unclaimed browser
+    /// is dropped and its owned process is shut down.
     /// Raw `proxy-server`, `no-proxy-server`, `proxy-pac-url`, and
     /// `proxy-auto-detect` switches conflict with the explicit proxy and are
     /// rejected. `proxy-bypass-list` customization is allowed.
-    pub async fn launch_with_proxy(
-        mut options: LaunchOptions,
-        proxy: Proxy,
-        mode: ProxyAuthMode,
-    ) -> Result<Self> {
+    pub async fn launch_with_proxy(mut options: LaunchOptions, proxy: Proxy) -> Result<Self> {
         for arg in &options.args {
             if matches!(
                 validated_switch_name(arg)?.as_deref(),
@@ -39,42 +34,54 @@ impl Browser {
         options
             .args
             .push(format!("--proxy-server={}", proxy.server()).into());
-        let mut browser = Self::launch(options).await?;
-        match start_auth(&browser.page, proxy, mode).await {
-            Ok(auth) => {
-                browser.auth = auth;
-                Ok(browser)
+        tokio::spawn(async move {
+            let mut browser = Self::launch(options).await?;
+            match start_auth(&browser.page, proxy).await {
+                Ok(auth) => {
+                    browser.auth = auth;
+                    Ok(browser)
+                }
+                Err(error) => with_cleanup(Err(error), browser.close().await),
             }
-            Err(error) => with_cleanup(Err(error), browser.close().await),
-        }
+        })
+        .await?
     }
 
     /// Create an isolated context with its own proxy configuration.
     /// Context acquisition follows [`BrowserContext`]'s ownership contract.
-    /// Credentials start a worker using `mode`; without credentials, no worker
-    /// or preflight runs. Inspect [`BrowserContext::proxy_auth_status`] for evidence
-    /// of authentication, rather than assuming readiness proves proxy traversal.
-    /// The proxy configuration applies to the context, but the credential worker
-    /// handles only its initial page's session, not other tabs or child sessions.
-    /// With credentials, preflight navigates that page to `https://www.example.com/`
-    /// without restoring the previous URL; it waits for worker readiness, not a
-    /// page load event.
-    pub async fn new_context_with_proxy(
-        &self,
-        proxy: Proxy,
-        mode: ProxyAuthMode,
-    ) -> Result<BrowserContext> {
-        let mut context = BrowserContext::create(
-            &self.connection,
-            json!({"disposeOnDetach":true,"proxyServer":proxy.server()}),
-        )
-        .await?;
-        match start_auth(&context.page, proxy, mode).await {
-            Ok(auth) => {
-                context.auth = auth;
-                Ok(context)
+    /// Credentials arm authentication before returning; setup does not navigate.
+    /// Without credentials, no worker is started. The worker handles only the
+    /// initial page's session, not other tabs or separate child sessions.
+    /// Inspect [`BrowserContext::wait_for_proxy_ready`] after navigating to your
+    /// intended destination; readiness alone does not prove proxy traversal.
+    ///
+    /// The caller's command deadline limits waiting. Context acquisition and
+    /// authentication setup each have their own 30-second bounds and continue
+    /// after cancellation. Unclaimed contexts are disposed after setup finishes.
+    pub async fn new_context_with_proxy(&self, proxy: Proxy) -> Result<BrowserContext> {
+        let timeout = self.connection.command_timeout();
+        let connection = self.connection.clone();
+        let task = connection.runtime().spawn(async move {
+            // One owner retains the context through authentication setup.
+            let mut context = BrowserContext::create_owned(
+                &connection,
+                json!({"disposeOnDetach":true,"proxyServer":proxy.server()}),
+            )
+            .await?;
+            match start_auth(&context.page, proxy).await {
+                Ok(auth) => {
+                    context.auth = auth;
+                    Ok(context)
+                }
+                Err(error) => with_cleanup(Err(error), context.close().await),
             }
-            Err(error) => with_cleanup(Err(error), context.close().await),
+        });
+        if let Some(timeout) = timeout {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("creating proxy browser context".into()))??
+        } else {
+            task.await?
         }
     }
 
@@ -133,18 +140,12 @@ impl BrowserContext {
     }
 }
 
-async fn start_auth(page: &Page, proxy: Proxy, mode: ProxyAuthMode) -> Result<Option<ProxyAuth>> {
-    if !proxy.requires_authentication() {
-        return Ok(None);
+async fn start_auth(page: &Page, proxy: Proxy) -> Result<Option<ProxyAuth>> {
+    if proxy.requires_authentication() {
+        ProxyAuth::start(page.session().clone(), proxy)
+            .await
+            .map(Some)
+    } else {
+        Ok(None)
     }
-    let auth = ProxyAuth::start(page.session().clone(), proxy).await?;
-    if mode == ProxyAuthMode::Preflight {
-        tokio::time::timeout(Duration::from_secs(15), async {
-            page.start_navigation("https://www.example.com/").await?;
-            auth.wait_ready(Duration::from_secs(15)).await
-        })
-        .await
-        .map_err(|_| Error::Timeout("proxy authentication preflight".into()))??;
-    }
-    Ok(Some(auth))
 }

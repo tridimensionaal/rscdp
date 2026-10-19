@@ -170,15 +170,23 @@ impl ProxyAuth {
                 }
             }
         });
-        let auth = Self {
+        let mut auth = Self {
             stop,
             task: Some(task),
             status,
         };
-        started.await.map_err(|_| {
-            Error::ConnectionClosed("authentication worker stopped during setup".into())
-        })??;
-        Ok(auth)
+        let started = started
+            .await
+            .map_err(|_| {
+                Error::ConnectionClosed("authentication worker stopped during setup".into())
+            })
+            .and_then(|result| result);
+        match started {
+            Ok(()) => Ok(auth),
+            // Finish worker recovery before the owning browser/context can
+            // dispose resources after a setup failure.
+            Err(error) => crate::error::with_cleanup(Err(error), auth.stop().await),
+        }
     }
 
     pub fn status(&self) -> ProxyAuthStatus {
