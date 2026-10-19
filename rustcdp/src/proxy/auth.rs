@@ -186,16 +186,18 @@ impl ProxyAuth {
     }
 
     /// Wait for a successful request, with or without an observed proxy challenge.
-    /// Inspect [`Self::status`] to distinguish verified authentication from
-    /// unchallenged traffic. Cached credentials, bypasses, or a proxy without
+    /// Returns the observed `Authenticated` or `Unchallenged` status.
+    /// This observation distinguishes verified authentication from unchallenged traffic. Cached credentials, bypasses, or a proxy without
     /// authentication can yield an unchallenged response; readiness proves neither
     /// proxy traversal nor use of the supplied credentials.
-    pub async fn wait_ready(&self, timeout: Duration) -> Result<()> {
+    pub async fn wait_ready(&self, timeout: Duration) -> Result<ProxyAuthStatus> {
         let mut status = self.status.clone();
         tokio::time::timeout(timeout, async {
             loop {
                 match status.borrow().clone() {
-                    ProxyAuthStatus::Unchallenged | ProxyAuthStatus::Authenticated => return Ok(()),
+                    ready @ (ProxyAuthStatus::Unchallenged | ProxyAuthStatus::Authenticated) => {
+                        return Ok(ready);
+                    }
                     ProxyAuthStatus::Rejected => {
                         return Err(Error::ProxyAuthentication("credentials rejected".into()));
                     }

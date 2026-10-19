@@ -84,15 +84,14 @@ impl Browser {
     }
 
     /// Wait for a successful request without an observed authentication failure.
-    /// Without a credential worker, returns immediately without checking traffic.
-    /// Inspect [`Self::proxy_auth_status`] to distinguish verified authentication
-    /// from unchallenged traffic; readiness does not prove proxy traversal or that
-    /// supplied credentials were used.
-    pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<()> {
-        if let Some(auth) = &self.auth {
-            auth.wait_ready(timeout).await?;
+    /// Returns `None` without a credential worker, otherwise the observed
+    /// `Authenticated` or `Unchallenged` status. Readiness does not prove proxy
+    /// traversal or that supplied credentials were used.
+    pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<Option<ProxyAuthStatus>> {
+        match &self.auth {
+            Some(auth) => auth.wait_ready(timeout).await.map(Some),
+            None => Ok(None),
         }
-        Ok(())
     }
 
     /// Stop the initial page's authentication worker and await Fetch cleanup.
@@ -113,15 +112,14 @@ impl BrowserContext {
     }
 
     /// Wait for a successful request without an observed authentication failure.
-    /// Without a credential worker, returns immediately without checking traffic.
-    /// Inspect [`Self::proxy_auth_status`] to distinguish verified authentication
-    /// from unchallenged traffic; readiness does not prove proxy traversal or that
-    /// supplied credentials were used.
-    pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<()> {
-        if let Some(auth) = &self.auth {
-            auth.wait_ready(timeout).await?;
+    /// Returns `None` without a credential worker, otherwise the observed
+    /// `Authenticated` or `Unchallenged` status. Readiness does not prove proxy
+    /// traversal or that supplied credentials were used.
+    pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<Option<ProxyAuthStatus>> {
+        match &self.auth {
+            Some(auth) => auth.wait_ready(timeout).await.map(Some),
+            None => Ok(None),
         }
-        Ok(())
     }
 
     /// Stop the initial page's authentication worker and await Fetch cleanup.
