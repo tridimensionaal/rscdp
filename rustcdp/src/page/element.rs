@@ -51,7 +51,7 @@ pub struct Element(pub(super) Arc<RemoteObjectLease>);
 pub(super) struct RemoteObjectLease {
     pub(super) session: Session,
     pub(super) id: RemoteObjectId,
-    context_lease: Option<Arc<crate::browser::ContextLease>>,
+    pub(super) context_lease: Option<Arc<crate::browser::ContextLease>>,
     released: bool,
 }
 
@@ -319,7 +319,7 @@ impl Page {
     }
 }
 
-fn own_remote_object(
+pub(super) fn own_remote_object(
     session: &Session,
     context_lease: &Option<Arc<crate::browser::ContextLease>>,
     object: &Value,

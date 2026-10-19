@@ -1,4 +1,4 @@
-use super::{ClickMethod, Element, Page};
+use super::{ClickMethod, Element, Page, element::own_remote_object};
 use crate::{Error, Result, Session, cdp::input::commands::InsertText, error::with_cleanup};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -139,9 +139,91 @@ impl Element {
         insert_text(&self.0.session, text).await
     }
 
-    /// Alias for [`Self::insert_text`]; does not synthesize key events.
-    pub async fn type_text(&self, text: &str) -> Result<()> {
-        self.insert_text(text).await
+    /// Replace all text in a writable textarea or text/search/tel/url/password input.
+    /// Other input types, contenteditable, disconnected, disabled, and readonly
+    /// controls are rejected before editing. Native focus and selection precede
+    /// Unicode insertion through Chrome's input pipeline; an empty replacement
+    /// uses a Backspace press/release pair unless the control is already empty.
+    /// No extra change event, blur, or submission is synthesized.
+    ///
+    /// Once started, the owned operation retains this element and continues after
+    /// caller cancellation. Each command is capped at 30 seconds, preserving a
+    /// shorter handle deadline. This is not atomic: scripts or concurrent input
+    /// can change focus, selection, or value between commands. Errors and timeouts
+    /// can follow side effects; the operation is never retried or rolled back.
+    /// Received exception object IDs are released best-effort, not owned by errors.
+    pub async fn fill(&self, text: &str) -> Result<()> {
+        let element = self.clone();
+        let text = text.to_owned();
+        let limit = Duration::from_secs(30);
+        let timeout = self
+            .0
+            .session
+            .connection()
+            .command_timeout()
+            .unwrap_or(limit)
+            .min(limit);
+        let session = self.0.session.clone().with_command_timeout(Some(timeout));
+        self.0.session.connection().runtime().spawn(async move {
+            let result = async {
+                let response = session.execute_raw("Runtime.callFunctionOn", json!({
+                    "objectId": element.object_id(),
+                    "functionDeclaration": r#"function() {
+                        const view = this.ownerDocument && this.ownerDocument.defaultView;
+                        const input = view && this instanceof view.HTMLInputElement;
+                        const textarea = view && this instanceof view.HTMLTextAreaElement;
+                        const supported = () => textarea || (input &&
+                            ['text', 'search', 'tel', 'url', 'password'].includes(this.type));
+                        if (!supported()) return 'fill requires a textarea or text/search/tel/url/password input';
+                        const editable = () => this.isConnected && !this.matches(':disabled') && !this.readOnly;
+                        if (!editable()) return 'fill requires a connected, enabled, writable control';
+                        view.HTMLElement.prototype.focus.call(this);
+                        if (!supported() || !editable()) return 'fill control changed while focusing';
+                        // CDP input targets this session even when its document is not the active tab.
+                        const focused = () => this.getRootNode().activeElement === this;
+                        if (!focused()) return 'fill could not focus the control';
+                        const prototype = textarea ? view.HTMLTextAreaElement.prototype : view.HTMLInputElement.prototype;
+                        prototype.setSelectionRange.call(this, 0, this.value.length);
+                        if (!supported() || !editable() || !focused() ||
+                            this.selectionStart !== 0 || this.selectionEnd !== this.value.length)
+                            return 'fill could not select all text in the control';
+                        return this.value.length === 0;
+                    }"#,
+                    "userGesture": true,
+                    "returnByValue": true,
+                })).await?;
+                // Share ownership with any result/exception that aliases the
+                // original element, and release other received IDs exactly once.
+                let mut objects = vec![element.clone()];
+                for object in [&response["result"], &response["exceptionDetails"]["exception"]] {
+                    own_remote_object(&element.0.session, &element.0.context_lease, object, &mut objects);
+                }
+                drop(objects);
+                if let Some(error) = response.get("exceptionDetails") {
+                    return Err(Error::JavaScript(error.clone()));
+                }
+                let value = &response["result"]["value"];
+                if let Some(message) = value.as_str() {
+                    return Err(Error::InvalidArgument(message.to_owned()));
+                }
+                let empty = crate::error::decode::<bool>("Runtime.callFunctionOn", value.clone())?;
+                if !text.is_empty() {
+                    insert_text(&session, &text).await
+                } else if !empty {
+                    dispatch_pair(
+                        &session,
+                        element.0.context_lease.clone(),
+                        "Input.dispatchKeyEvent",
+                        json!({"type":"keyDown","key":"Backspace","code":"Backspace","windowsVirtualKeyCode":8,"modifiers":0}),
+                        json!({"type":"keyUp","key":"Backspace","code":"Backspace","windowsVirtualKeyCode":8,"modifiers":0}),
+                    ).await
+                } else {
+                    Ok(())
+                }
+            }.await;
+            drop(element);
+            result
+        }).await?
     }
 }
 
@@ -209,10 +291,6 @@ impl Page {
                 Ok(())
             }
         }
-    }
-
-    pub async fn press_escape(&self) -> Result<()> {
-        self.press_key("Escape").await
     }
 
     pub async fn flash_point(&self, x: f64, y: f64, duration: Duration, size: f64) -> Result<()> {
