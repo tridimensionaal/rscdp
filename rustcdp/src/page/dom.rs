@@ -1,4 +1,4 @@
-use super::Page;
+use super::{EvaluationBuilder, EvaluationWorld, Page};
 use crate::{Error, Result, Session, cdp::dom::Node, error::with_cleanup};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -12,57 +12,14 @@ pub struct DomSearchOptions {
 }
 
 impl Page {
-    /// Read document HTML in a serialized, owned DOM transaction.
-    /// The caller's deadline limits waiting, not ownership. Queueing and transaction
-    /// work each have a 30-second limit, excluding domain transitions and recovery.
-    /// An uncertain transaction timeout detaches this session (and descendants),
-    /// or closes the connection if detachment cannot be confirmed.
-    /// This resets frontend node IDs; raw commands and navigation are not serialized.
+    /// Serialize the current document, including its doctype when present.
+    ///
+    /// Uses an owned document reference in the isolated world without resetting
+    /// frontend DOM node IDs. Navigation can invalidate that reference; errors
+    /// propagate without retrying against a different document. Normal completion
+    /// awaits release; cancellation schedules best-effort release.
     pub async fn html(&self) -> Result<String> {
-        let timeout = self.session.connection().command_timeout();
-        let page = self.clone();
-        let task = self.session.connection().runtime().spawn(async move {
-            let domain = page.session.enable_dom().await?;
-            let result = async {
-                let gate = page.session.lock_dom_transaction().await?;
-                let commands = page.clone().with_command_timeout(None);
-                let result =
-                    tokio::time::timeout(Duration::from_secs(30), commands.document_html())
-                        .await
-                        .unwrap_or_else(|_| Err(Error::Timeout("reading document HTML".into())));
-                if result.as_ref().is_err_and(dom_timeout) {
-                    page.recover_session().await;
-                }
-                drop(gate);
-                result
-            }
-            .await;
-            let result = with_cleanup(result, domain.close().await);
-            drop(page);
-            result
-        });
-        if let Some(timeout) = timeout {
-            tokio::time::timeout(timeout, task)
-                .await
-                .map_err(|_| Error::Timeout("waiting for document HTML".into()))??
-        } else {
-            task.await?
-        }
-    }
-
-    async fn document_html(&self) -> Result<String> {
-        let response = self
-            .session
-            .execute_raw("DOM.getDocument", json!({}))
-            .await?;
-        let response = self
-            .session
-            .execute_raw(
-                "DOM.getOuterHTML",
-                json!({"nodeId":response["root"]["nodeId"]}),
-            )
-            .await?;
-        serde_json::from_value(response["outerHTML"].clone()).map_err(Into::into)
+        document_html(&self.session, self.evaluate("document")).await
     }
 
     /// Search by plain text, CSS selector, or XPath using CDP DOM search.
@@ -82,13 +39,12 @@ impl Page {
     /// awaits cleanup and reports failures; Drop schedules the same attempt
     /// best-effort, without retrying a failed explicit cleanup.
     ///
-    /// Transactions are serialized with `Page::html` across all handles for this
-    /// session. Caller cancellation or timeout leaves the owner running. Queueing
+    /// Searches are serialized across all handles for this session. Caller cancellation or timeout leaves the owner running. Queueing
     /// and transaction work each have a 30-second limit, excluding domain
     /// transitions and recovery. Uncertain timeouts or an invalid search identity
     /// detach the session and descendants, falling back to connection closure.
     /// A DOM guard prevents disable, not frontend ID invalidation: another search,
-    /// HTML read, raw document reset, or navigation can invalidate returned IDs.
+    /// raw document reset, or navigation can invalidate returned IDs.
     /// Recovery runs before releasing the transaction gate, with a one-second
     /// detach attempt before connection closure. Other decoding errors still await
     /// discard; [`Error::Cleanup`] preserves both errors if discard also fails.
@@ -196,6 +152,24 @@ impl Page {
         .await;
         with_cleanup(result, guard.close().await)
     }
+}
+
+pub(super) async fn document_html(
+    session: &Session,
+    evaluation: EvaluationBuilder<'_>,
+) -> Result<String> {
+    let document = evaluation.world(EvaluationWorld::Isolated).remote().await?;
+    let result = match document.object_id() {
+        Some(id) => session
+            .execute(&crate::cdp::dom::commands::GetOuterHtml::new().with_object_id(id.clone()))
+            .await
+            .map(|response| response.outer_html),
+        None => Err(Error::UnexpectedResponse {
+            method: "Runtime.evaluate".into(),
+            payload: serde_json::to_value(document.metadata())?,
+        }),
+    };
+    with_cleanup(result, document.release().await)
 }
 
 fn dom_timeout(error: &Error) -> bool {

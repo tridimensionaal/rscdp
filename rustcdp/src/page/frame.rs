@@ -1,4 +1,4 @@
-use super::{Element, EvaluationBuilder, EvaluationWorld, Page};
+use super::{Element, EvaluationBuilder, Page};
 use crate::{
     Error, Result,
     cdp::page::{Frame as FrameInfo, FrameId, FrameTree, commands::GetFrameTree},
@@ -181,11 +181,10 @@ impl Frame {
         EvaluationBuilder::for_frame(&self.page, self.id.clone(), expression)
     }
 
+    /// Serialize this frame's document, including its doctype when present.
+    /// Uses the same ownership and cleanup policy as [`Page::html`].
     pub async fn html(&self) -> Result<String> {
-        self.evaluate("document.documentElement.outerHTML")
-            .world(EvaluationWorld::Isolated)
-            .json()
-            .await
+        super::dom::document_html(&self.page.session, self.evaluate("document")).await
     }
 
     /// Find a node in this frame with the owned acquisition and cleanup policy
