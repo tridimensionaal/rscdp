@@ -72,7 +72,7 @@ impl Page {
                 let connection = session.connection().clone().with_command_timeout(None);
                 let id = self.id().clone();
                 state.task = Some(connection.runtime().spawn(async move {
-                    let result = tokio::time::timeout(limit, close_target(&connection, &id))
+                    let result = tokio::time::timeout(limit, Self::close_target(&connection, &id))
                         .await
                         .unwrap_or_else(|_| Err(Error::Timeout(format!("closing page {id}"))));
                     drop(session);
@@ -105,25 +105,27 @@ async fn target_kind(connection: &Connection, id: &TargetId) -> Result<Option<St
         .map(|target| target.type_))
 }
 
-async fn close_target(connection: &Connection, id: &TargetId) -> Result<()> {
-    match target_kind(connection, id).await?.as_deref() {
-        None => return Ok(()),
-        Some("page") => {}
-        Some(_) => {
-            return Err(Error::InvalidArgument(
-                "Page::close requires a page target".into(),
-            ));
+impl Page {
+    pub(crate) async fn close_target(connection: &Connection, id: &TargetId) -> Result<()> {
+        match target_kind(connection, id).await?.as_deref() {
+            None => return Ok(()),
+            Some("page") => {}
+            Some(_) => {
+                return Err(Error::InvalidArgument(
+                    "Page::close requires a page target".into(),
+                ));
+            }
         }
+        let response = connection.execute(&CloseTarget::new(id.clone())).await?;
+        if !response.success {
+            return Err(Error::UnexpectedResponse {
+                method: "Target.closeTarget".into(),
+                payload: serde_json::to_value(response)?,
+            });
+        }
+        while target_kind(connection, id).await?.is_some() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(())
     }
-    let response = connection.execute(&CloseTarget::new(id.clone())).await?;
-    if !response.success {
-        return Err(Error::UnexpectedResponse {
-            method: "Target.closeTarget".into(),
-            payload: serde_json::to_value(response)?,
-        });
-    }
-    while target_kind(connection, id).await?.is_some() {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    Ok(())
 }

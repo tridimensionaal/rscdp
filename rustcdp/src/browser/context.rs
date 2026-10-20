@@ -26,7 +26,7 @@ use serde_json::Value;
 /// its dependents. Await [`Self::close`] to observe cleanup errors.
 #[must_use = "retain this context while using its pages; dropping it schedules disposal"]
 pub struct BrowserContext {
-    lease: Option<ContextLease>,
+    pub(super) lease: Option<ContextLease>,
     pub(super) page: Page,
 }
 
@@ -82,10 +82,15 @@ impl BrowserContext {
         .await
         .unwrap_or_else(|_| Err(Error::Timeout("creating browser context".into())));
         match result {
-            Ok(page) => Ok(Self {
-                lease: Some(lease.expect("context ownership precedes page creation")),
-                page: page.with_command_timeout(connection.command_timeout()),
-            }),
+            Ok(page) => {
+                let lease = lease.expect("context ownership precedes page creation");
+                let page = page.with_command_timeout(connection.command_timeout());
+                lease.register_page(&page, None);
+                Ok(Self {
+                    lease: Some(lease),
+                    page,
+                })
+            }
             Err(error) => {
                 if let Some(lease) = lease {
                     let cleanup = lease.close().await;
@@ -111,6 +116,26 @@ impl BrowserContext {
     }
     pub fn page(&self) -> &Page {
         &self.page
+    }
+
+    /// Create an about:blank page with this context's proxy configuration.
+    /// The context retains its managed pages until disposal; dropping a returned
+    /// Page does not close its tab. Authentication covers each managed page's
+    /// session, not popups or separate child sessions.
+    ///
+    /// The command deadline limits the caller's wait. Acquisition continues in
+    /// an owned task after cancellation; an unclaimed page is closed. Gate admission
+    /// and target/session setup each have a 30-second bound. Authentication setup
+    /// and recovery finish separately before any failed acquisition is cleaned up.
+    /// An uncertain creation without a target ID disposes this entire context;
+    /// a protocol rejection leaves it usable. Failed known-target cleanup also
+    /// disposes the context, closing the connection if disposal cannot be confirmed.
+    pub async fn new_page(&self) -> Result<Page> {
+        self.lease
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument("browser context is closed".into()))?
+            .new_page()
+            .await
     }
 
     /// Read all cookies in this browser context using Storage, across all its pages.

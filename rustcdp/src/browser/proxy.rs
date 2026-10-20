@@ -50,8 +50,9 @@ impl Browser {
     /// Create an isolated context with its own proxy configuration.
     /// Context acquisition follows [`BrowserContext`]'s ownership contract.
     /// Credentials arm authentication before returning; setup does not navigate.
-    /// Without credentials, no worker is started. The worker handles only the
-    /// initial page's session, not other tabs or separate child sessions.
+    /// Without credentials, no worker is started. Each managed page, including
+    /// those created by BrowserContext::new_page, receives its own worker.
+    /// Popups and separate child sessions are not automatically authenticated.
     /// Inspect [`BrowserContext::wait_for_proxy_ready`] after navigating to your
     /// intended destination; readiness alone does not prove proxy traversal.
     ///
@@ -68,9 +69,14 @@ impl Browser {
                 json!({"disposeOnDetach":true,"proxyServer":proxy.server()}),
             )
             .await?;
-            match start_auth(&context.page, proxy).await {
+            match start_auth(&context.page, proxy.clone()).await {
                 Ok(auth) => {
                     context.page.auth = auth;
+                    context
+                        .lease
+                        .as_ref()
+                        .expect("context owns its lease")
+                        .register_page(&context.page, Some(proxy));
                     Ok(context)
                 }
                 Err(error) => with_cleanup(Err(error), context.close().await),
@@ -128,7 +134,10 @@ impl BrowserContext {
     }
 }
 
-async fn start_auth(page: &Page, proxy: Proxy) -> Result<Option<std::sync::Arc<ProxyAuth>>> {
+pub(super) async fn start_auth(
+    page: &Page,
+    proxy: Proxy,
+) -> Result<Option<std::sync::Arc<ProxyAuth>>> {
     if proxy.requires_authentication() {
         ProxyAuth::start(page.session().clone(), proxy)
             .await
