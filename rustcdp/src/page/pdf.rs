@@ -1,8 +1,5 @@
 use super::Page;
-use crate::{
-    Error, Result,
-    cdp::page::commands::{PrintToPdf, PrintToPdfTransferMode},
-};
+use crate::{Error, Result, cdp::page::commands::PrintToPdf};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
 /// Configure PDF output, then call [`Self::generate`] to return its bytes.
@@ -98,12 +95,14 @@ impl Page {
     /// Prefer [`Self::pdf`] for common settings. Stream transfer is available
     /// through [`crate::Session::execute`].
     pub async fn print_to_pdf(&self, options: &PrintToPdf) -> Result<Vec<u8>> {
-        if matches!(
-            options.transfer_mode,
-            Some(PrintToPdfTransferMode::ReturnAsStream)
-        ) {
+        if options
+            .transfer_mode
+            .as_ref()
+            .is_some_and(|mode| mode.as_str() != "ReturnAsBase64")
+        {
             return Err(Error::InvalidArgument(
-                "print_to_pdf returns bytes; use Session::execute for stream transfer".into(),
+                "print_to_pdf requires base64 transfer; use Session::execute for other modes"
+                    .into(),
             ));
         }
         let result = self.session.execute(options).await?;

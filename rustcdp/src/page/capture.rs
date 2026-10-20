@@ -52,7 +52,12 @@ impl ScreenshotBuilder<'_> {
             ));
         }
         if let Some(quality) = self.options.quality
-            && (quality > 100 || !matches!(self.options.format, Some(ScreenshotFormat::Jpeg)))
+            && (quality > 100
+                || self
+                    .options
+                    .format
+                    .as_ref()
+                    .is_none_or(|format| format.as_str() != "jpeg"))
         {
             return Err(Error::InvalidArgument(
                 "screenshot quality requires JPEG format and a value from 0 to 100".into(),
