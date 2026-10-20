@@ -1,9 +1,13 @@
 use super::{Element, EvaluationBuilder, Page};
 use crate::{
     Error, Result,
-    cdp::page::{Frame as FrameInfo, FrameId, FrameTree, commands::GetFrameTree},
+    cdp::{
+        dom::commands::GetFrameOwner,
+        page::{Frame as FrameInfo, FrameId, FrameTree, commands::GetFrameTree},
+        target::{TargetId, commands::GetTargetInfo},
+    },
+    error::with_cleanup,
 };
-use serde_json::json;
 use std::time::Duration;
 
 /// A frame within a CDP target. Clones share the page's resource ownership.
@@ -27,75 +31,112 @@ fn find<'a>(tree: &'a FrameTree, id: &FrameId) -> Option<&'a FrameTree> {
 }
 
 impl Page {
-    /// Attach to an out-of-process frame target owned by this page, not another tab.
-    /// `index` is zero-based in the filtered enumeration of owned OOPIF targets
-    /// returned by CDP. This order is not DOM child order and may change between
-    /// calls; the index is not a stable frame identity.
-    /// For same-process frames use [`Self::main_frame`] or [`Self::frames`].
-    /// After target selection, an owned task retains the parent Page through attach
-    /// and domain setup, even if the caller cancels or its handle timeout expires.
-    /// The child restores that handle timeout. With `None`, the caller waits for
-    /// setup while the independent attachment and domain-transition limits remain.
-    /// The returned Page shares any fallback-context ownership with its parent.
-    pub async fn frame(&self, index: usize) -> Result<Page> {
-        let connection = self.session.connection();
-        let targets = connection
-            .execute(&crate::cdp::target::commands::GetTargets::default())
-            .await?;
-        let mut matched = 0;
-        for target in targets.target_infos.into_iter().filter(|target| {
-            target.type_ == "iframe" && target.target_id != *self.session.target_id()
-        }) {
-            match self
-                .session
-                .execute_raw("DOM.getFrameOwner", json!({"frameId":target.target_id}))
-                .await
-            {
-                Ok(_) => {
-                    if matched == index {
-                        let parent = self.clone();
-                        let timeout = connection.command_timeout();
-                        let task = connection.runtime().spawn(async move {
-                            let session = parent
-                                .session
-                                .connection()
-                                .clone()
-                                .with_command_timeout(None)
-                                .attach(target.target_id)
-                                .await?
-                                .with_command_timeout(timeout);
-                            let mut page = Page::from_session(
-                                session,
-                                parent.context.clone(),
-                                super::TargetKind::Iframe,
-                            )
-                            .await?;
-                            page.context_lease = parent.context_lease.clone();
-                            drop(parent);
-                            Ok(page)
-                        });
-                        let joined = if let Some(timeout) = timeout {
-                            tokio::time::timeout(timeout, task)
-                                .await
-                                .map_err(|_| Error::Timeout("attaching frame".into()))?
-                        } else {
-                            task.await
-                        };
-                        return joined?;
-                    }
-                    matched += 1;
-                }
-                Err(Error::Protocol(error))
-                    if error.code == -32000
-                        && (error.message == "Frame with the given id was not found."
-                            || error.message
-                                == "Frame with the given id does not belong to the target.") => {}
-                Err(error) => return Err(error),
-            }
+    /// Attach to the specified out-of-process iframe target belonging to this page.
+    /// Discover candidate target IDs with typed `Target.getTargets`. Target IDs are
+    /// distinct from FrameIds: attachment reads the child's actual root FrameId
+    /// and validates its owner through this page's session. No target is retried
+    /// or substituted. Same-target frames use [`Self::main_frame`], [`Self::frames`]
+    /// or [`Self::frame_by_id`].
+    /// Ownership is a snapshot, not an atomic promise across navigation/process
+    /// swaps. Deeper remote descendants may require their containing target.
+    ///
+    /// An owned task retains the parent through attachment, validation and setup.
+    /// The handle timeout limits caller waiting, not that task. Target inspection
+    /// and ownership validation each have a 30-second bound; attachment and domain
+    /// setup retain their independent bounds. Failed adoption awaits detachment;
+    /// failed detachment closes the connection to resolve ownership. No target
+    /// close command is sent. Unclaimed success uses normal attachment Drop cleanup.
+    ///
+    /// The returned iframe Page retains any parent fallback-context lease and
+    /// restores the handle timeout. Separate child sessions do not automatically
+    /// receive proxy authentication workers. This does not enable auto-attach or
+    /// follow process swaps; callers must explicitly acquire a new attachment.
+    pub async fn attach_frame_target(&self, target: &TargetId) -> Result<Page> {
+        if target == self.session.target_id() {
+            return Err(Error::InvalidArgument(
+                "cannot attach this page as its own iframe".into(),
+            ));
         }
-        Err(Error::InvalidArgument(
-            "frame target index out of bounds".into(),
-        ))
+        let parent = self.clone();
+        let target = target.clone();
+        let connection = self.session.connection();
+        let timeout = connection.command_timeout();
+        let task = connection.runtime().spawn(async move {
+            let connection = parent
+                .session
+                .connection()
+                .clone()
+                .with_command_timeout(None);
+            let response = tokio::time::timeout(
+                Duration::from_secs(30),
+                connection.execute(&GetTargetInfo::default().with_target_id(target.clone())),
+            )
+            .await
+            .map_err(|_| Error::Timeout("inspecting iframe target".into()))??;
+            if response.target_info.target_id != target {
+                return Err(Error::UnexpectedResponse {
+                    method: "Target.getTargetInfo".into(),
+                    payload: serde_json::to_value(response)?,
+                });
+            }
+            if response.target_info.type_ != "iframe" {
+                return Err(Error::InvalidArgument("target is not an iframe".into()));
+            }
+            // Await attachment's own bounded acquisition/recovery, without an
+            // outer timeout that could abandon a still-acquiring nested owner.
+            let session = connection.attach(target).await?;
+            let adopted = async {
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    let response = session.execute(&GetFrameTree::default()).await?;
+                    if response.frame_tree.frame.id.0.is_empty() {
+                        return Err(Error::UnexpectedResponse {
+                            method: "Page.getFrameTree".into(),
+                            payload: serde_json::to_value(response)?,
+                        });
+                    }
+                    parent
+                        .session
+                        .clone()
+                        .with_command_timeout(None)
+                        .execute(&GetFrameOwner::new(response.frame_tree.frame.id))
+                        .await?;
+                    Ok::<(), Error>(())
+                })
+                .await
+                .map_err(|_| Error::Timeout("validating iframe ownership".into()))??;
+                // Domain acquisitions own their bounded transitions and recovery.
+                // Do not interrupt them with a competing setup timeout/detach.
+                let mut page = Page::from_session(
+                    session.clone(),
+                    parent.context.clone(),
+                    super::TargetKind::Iframe,
+                )
+                .await?;
+                page.context_lease = parent.context_lease.clone();
+                Ok(page.with_command_timeout(timeout))
+            }
+            .await;
+            let result = match adopted {
+                Ok(page) => Ok(page),
+                Err(error) => {
+                    let cleanup = session.detach().await;
+                    if cleanup.is_err() && !session.is_closed() {
+                        connection.close().await;
+                    }
+                    with_cleanup(Err(error), cleanup)
+                }
+            };
+            // Keep the parent and its fallback lease alive through all recovery.
+            drop(parent);
+            result
+        });
+        if let Some(timeout) = timeout {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("attaching iframe target".into()))??
+        } else {
+            task.await?
+        }
     }
 
     pub async fn main_frame(&self) -> Result<Frame> {
@@ -121,7 +162,8 @@ impl Page {
     }
 
     /// Snapshot all frames exposed by this target's frame tree, including its root.
-    /// OOPIF targets are separate: attach with `Page::frame`, then use `main_frame`.
+    /// OOPIF targets are separate: use [`Self::attach_frame_target`], then
+    /// [`Self::main_frame`].
     pub async fn frames(&self) -> Result<Vec<Frame>> {
         let tree = self.session.execute(&GetFrameTree::new()).await?.frame_tree;
         let mut stack = vec![tree];

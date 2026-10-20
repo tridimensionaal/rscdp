@@ -87,7 +87,8 @@ Each example awaits browser cleanup on success or failure. Report files go to
 
 - [Browser](rustcdp/src/browser.rs) and [BrowserContext](rustcdp/src/browser/context.rs):
   launch/connect, isolated contexts, context-wide cookie reads/updates/clearing,
-  and explicit cleanup. `new_context()` bypasses the parent browser's proxy;
+  and explicit cleanup. `new_context()` inherits the browser's proxy routing;
+  `new_context_direct()` explicitly bypasses it.
   [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
 - [Page](rustcdp/src/page.rs): navigation, JavaScript evaluation, HTML, and cookies.
   [Selectors](rustcdp/src/page/selectors.rs) provides optional lookup, required lookup,
@@ -96,7 +97,8 @@ Each example awaits browser cleanup on success or failure. Report files go to
   [Element](rustcdp/src/page/element.rs) owns remote nodes;
   [input](rustcdp/src/page/input.rs) provides keyboard and Unicode input.
 - [Frame](rustcdp/src/page/frame.rs): same-process frame traversal and scoped evaluation.
-  `Page::frame(index)` attaches to an out-of-process frame belonging to that page.
+  `Page::attach_frame_target(&target_id)` validates and attaches a specific
+  out-of-process frame belonging to that page.
 - [Capture](rustcdp/src/page/capture.rs): `page.screenshot().full_page(true).capture().await`
   returns image bytes; `screenshot_with_options` exposes all CDP screenshot options.
   [PDF export](rustcdp/src/page/pdf.rs) uses
