@@ -16,6 +16,8 @@ mod evaluation;
 mod execution_context;
 mod frame;
 mod input;
+mod lifecycle;
+pub(crate) use lifecycle::TargetKind;
 mod navigation;
 mod pdf;
 mod selectors;
@@ -34,9 +36,13 @@ pub use selectors::CountWaitOptions;
 /// A Page retains shared Page- and Runtime-domain guards for its lifetime and
 /// subscribes to context events before enabling them. See [`Self::evaluate`] for
 /// execution-world behavior and [`crate::Browser::connect`] for fallback lifetime.
+/// Dropping a Page does not close its tab. Use [`Self::close`] to close it explicitly;
+/// the owning browser or context can still dispose it independently.
 #[derive(Clone)]
 pub struct Page {
     session: Session,
+    target_kind: TargetKind,
+    close_state: std::sync::Arc<tokio::sync::Mutex<lifecycle::CloseState>>,
     _events: std::sync::Arc<[crate::session::DomainGuard; 2]>,
     worlds: execution_context::Worlds,
     context: Option<BrowserContextId>,
@@ -47,12 +53,15 @@ impl Page {
     pub(crate) async fn from_session(
         session: Session,
         context: Option<BrowserContextId>,
+        target_kind: TargetKind,
     ) -> Result<Self> {
         let worlds = execution_context::Worlds::new(&session);
         let page_events = session.enable_page().await?;
         let runtime_events = session.enable_runtime().await?;
         Ok(Self {
             session,
+            target_kind,
+            close_state: Default::default(),
             _events: std::sync::Arc::new([page_events, runtime_events]),
             worlds,
             context,
@@ -71,6 +80,8 @@ impl Page {
         let events = session.enable_page_runtime_in_context().await?;
         Ok(Self {
             session,
+            target_kind: TargetKind::Tab,
+            close_state: Default::default(),
             _events: std::sync::Arc::new(events),
             worlds,
             context: Some(context),

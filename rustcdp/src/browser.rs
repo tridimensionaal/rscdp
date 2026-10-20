@@ -101,7 +101,7 @@ impl Browser {
                 .browser_context_id
                 .filter(|id| contexts.browser_context_ids.contains(id));
             let session = connection.attach(target.target_id).await?;
-            Page::from_session(session, context).await
+            Page::from_session(session, context, crate::page::TargetKind::Tab).await
         } else {
             Ok(BrowserContext::create(connection, json!({}))
                 .await?

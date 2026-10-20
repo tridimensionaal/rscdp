@@ -61,8 +61,12 @@ impl Page {
                                 .attach(target.target_id)
                                 .await?
                                 .with_command_timeout(timeout);
-                            let mut page =
-                                Page::from_session(session, parent.context.clone()).await?;
+                            let mut page = Page::from_session(
+                                session,
+                                parent.context.clone(),
+                                super::TargetKind::Iframe,
+                            )
+                            .await?;
                             page.context_lease = parent.context_lease.clone();
                             drop(parent);
                             Ok(page)

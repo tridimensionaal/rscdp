@@ -30,6 +30,9 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    /// A decoded response violates the operation's expected protocol contract.
+    #[error("unexpected response to {method}: {payload}")]
+    UnexpectedResponse { method: String, payload: Value },
     #[error(transparent)]
     Base64(#[from] base64::DecodeError),
     #[error(transparent)]
