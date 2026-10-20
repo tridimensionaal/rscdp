@@ -1,4 +1,4 @@
-use crate::{Connection, Error, Result, error::with_cleanup};
+use crate::{Connection, Error, Result, connection::ConnectionOptions, error::with_cleanup};
 use std::{
     ffi::OsString,
     fs::File,
@@ -7,8 +7,29 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
+use tokio::time::Instant;
 
 pub(crate) mod args;
+
+pub(crate) fn startup_deadline(timeout: Duration) -> Result<Instant> {
+    if timeout.is_zero() {
+        return Err(Error::InvalidArgument(
+            "startup_timeout must be nonzero".into(),
+        ));
+    }
+    Instant::now().checked_add(timeout).ok_or_else(|| {
+        Error::InvalidArgument(
+            "startup_timeout exceeds the supported monotonic deadline range".into(),
+        )
+    })
+}
+
+fn startup_remaining(deadline: Instant, stage: &str) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| Error::Timeout(format!("starting Chrome: {stage}")))
+}
 
 fn lock_profile(profile: &Path) -> std::io::Result<File> {
     let name = profile.file_name().ok_or_else(|| {
@@ -68,8 +89,8 @@ fn fresh_endpoint(contents: &[u8], previous: Option<&[u8]>) -> Option<String> {
 }
 
 /// Chrome executable, arguments, profile location, and startup deadline.
-/// The launcher selects a debugging port through Chrome and makes up to three
-/// attempts for retryable startup failures. Use [`crate::Browser::connect`] for
+/// The launcher selects a debugging port through Chrome and spawns at most one
+/// child per invocation. Use [`crate::Browser::connect`] for
 /// an existing fixed endpoint. Headless mode is not enabled automatically.
 #[derive(Debug, Clone)]
 pub struct LaunchOptions {
@@ -88,8 +109,13 @@ pub struct LaunchOptions {
     pub base_temp_dir: PathBuf,
     /// `None` uses "tmp"; an empty prefix is preserved.
     pub dir_prefix: Option<String>,
-    /// Per-attempt connection-establishment timeout after process spawn; 15 seconds
-    /// by default. Profile preparation and spawning are outside this timeout.
+    /// One startup budget from the first poll through profile preparation, spawn,
+    /// endpoint discovery, handshake, and PID verification. Defaults to 15 seconds.
+    /// Zero and unrepresentable monotonic deadlines are rejected before I/O.
+    /// Synchronous OS work cannot be preempted, and already-started filesystem
+    /// work may overrun this budget. Failure cleanup is awaited outside the
+    /// budget, so returning can take longer. Caller cancellation uses Drop
+    /// cleanup. Browser's subsequent initial-page setup has independent bounds.
     pub startup_timeout: Duration,
 }
 
@@ -123,168 +149,167 @@ pub struct BrowserProcess {
 
 impl BrowserProcess {
     pub async fn launch(options: LaunchOptions) -> Result<(Self, Connection)> {
+        let deadline = startup_deadline(options.startup_timeout)?;
         for arg in &options.args {
             args::validated_switch_name(arg)?;
         }
-        let mut retries = 0;
-        loop {
-            match Self::launch_once(options.clone()).await {
-                Ok(browser) => return Ok(browser),
-                Err(
-                    Error::Launch(_) | Error::Timeout(_) | Error::Http(_) | Error::WebSocket(_),
-                ) if retries < 2 => {
-                    retries += 1;
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(target: "rustcdp", attempt = retries + 1, "retrying browser launch");
-                }
-                Err(error) => return Err(error),
-            }
+        let prefix = options.dir_prefix.as_deref().unwrap_or("tmp");
+        if options.profile_dir.is_none() && prefix.contains(['/', '\\']) {
+            return Err(Error::InvalidArgument(
+                "profile prefix must not contain path separators".into(),
+            ));
         }
-    }
-
-    async fn launch_once(options: LaunchOptions) -> Result<(Self, Connection)> {
-        let executable = options.executable.clone().map_or_else(find_chrome, Ok)?;
-        let (profile, temporary) = if let Some(path) = &options.profile_dir {
-            tokio::fs::create_dir_all(path).await?;
-            (tokio::fs::canonicalize(path).await?, None)
-        } else {
-            let prefix = options.dir_prefix.as_deref().unwrap_or("tmp");
-            if prefix.contains(['/', '\\']) {
-                return Err(Error::InvalidArgument(
-                    "profile prefix must not contain path separators".into(),
-                ));
-            }
-            tokio::fs::create_dir_all(&options.base_temp_dir).await?;
-            let directory = tempfile::Builder::new()
-                .prefix(prefix)
-                .tempdir_in(&options.base_temp_dir)?;
-            (std::fs::canonicalize(directory.path())?, Some(directory))
-        };
-        let profile_lock = match lock_profile(&profile) {
-            Ok(lock) => lock,
-            Err(error) => {
-                // A concurrent explicit-profile launch may already own this
-                // newly created path. Never remove it without holding its lock.
-                if let Some(directory) = temporary {
-                    let _ = directory.keep();
-                }
-                return Err(error.into());
-            }
-        };
-        // Own the temporary directory before any further await or fallible work.
-        // With no child yet, field drop order removes it before releasing the lock.
+        // Owners stay outside timed work: an ordinary failure awaits cleanup,
+        // while cancellation still reaches their Drop fallbacks.
         let mut process = Self {
             child: None,
-            temporary,
-            profile_lock: Some(profile_lock),
+            temporary: None,
+            profile_lock: None,
             cleanup: None,
-            profile,
+            profile: PathBuf::new(),
             endpoint: String::new(),
         };
-        let profile = &process.profile;
-        // Previous cleanup could have removed the directory between canonicalizing
-        // and acquiring the lock. Recreate it only now that removal is excluded.
-        std::fs::create_dir_all(profile)?;
-        let port_file = profile.join("DevToolsActivePort");
-        let previous_port_file = match tokio::fs::read(&port_file).await {
-            Ok(contents) => Some(contents),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-        let mut command = Command::new(executable);
-        let mut profile_arg = OsString::from("--user-data-dir=");
-        profile_arg.push(profile);
-        command
-            .arg(profile_arg)
-            .arg("--remote-debugging-port=0")
-            .args([
-                "--no-first-run",
-                "--no-service-autorun",
-                "--no-default-browser-check",
-                "--disable-backgrounding-occluded-windows",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        command.args(&options.args).arg("about:blank");
-        process.child = Some(
-            command
-                .spawn()
-                .map_err(|error| Error::Launch(format!("could not spawn Chrome: {error}")))?,
-        );
-        let connected = tokio::time::timeout(options.startup_timeout, async {
-            loop {
-                if let Some(status) = process
-                    .child
-                    .as_mut()
-                    .and_then(|child| child.try_wait().transpose())
-                    .transpose()?
-                {
-                    return Err(Error::Launch(format!("Chrome exited with {status}")));
-                }
-                let endpoint = match tokio::fs::read(&port_file).await {
-                    Ok(contents) => fresh_endpoint(&contents, previous_port_file.as_deref()),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(e) => return Err(e.into()),
-                };
-                if let Some(endpoint) = endpoint {
-                    match Connection::connect(&endpoint).await {
-                        Ok(connection) => {
-                            // A native Chrome launch does not honor our library lock.
-                            // Never accept its endpoint merely because the file changed.
-                            let ownership = connection
-                                .execute(
-                                    &crate::cdp::system_info::commands::GetProcessInfo::default(),
-                                )
-                                .await;
-                            let owned = match ownership {
-                                Ok(info) => info.process_info.iter().any(|info| {
-                                    info.type_ == "browser"
-                                        && Some(info.id) == process.id().map(i64::from)
-                                }),
-                                Err(error) => {
-                                    connection.close().await;
-                                    return Err(error);
-                                }
-                            };
-                            if !owned {
-                                connection.close().await;
-                                return Err(Error::Launch(
-                                    "debugging endpoint does not belong to the spawned browser PID"
-                                        .into(),
-                                ));
-                            }
-                            // Recheck after the asynchronous handshake/ownership query.
-                            // Do not publish a connection for an already exited child.
-                            match process.child.as_mut().expect("launched child").try_wait() {
-                                Ok(None) => {}
-                                Ok(Some(status)) => {
-                                    connection.close().await;
-                                    return Err(Error::Launch(format!(
-                                        "Chrome exited with {status}"
-                                    )));
-                                }
-                                Err(error) => {
-                                    connection.close().await;
-                                    return Err(error.into());
-                                }
-                            }
-                            process.endpoint = endpoint;
-                            return Ok(connection);
+        let mut candidate = None;
+        let started = async {
+            startup_remaining(deadline, "discovering executable")?;
+            let executable = options.executable.clone().map_or_else(find_chrome, Ok)?;
+            startup_remaining(deadline, "preparing profile")?;
+            process.profile = if let Some(path) = &options.profile_dir {
+                // Await mutating filesystem work rather than abandon a worker
+                // that could still be creating the directory during cleanup.
+                tokio::fs::create_dir_all(path).await?;
+                startup_remaining(deadline, "preparing profile")?;
+                let profile = tokio::fs::canonicalize(path).await?;
+                startup_remaining(deadline, "locking profile")?;
+                profile
+            } else {
+                tokio::fs::create_dir_all(&options.base_temp_dir).await?;
+                startup_remaining(deadline, "creating temporary profile")?;
+                process.temporary = Some(
+                    tempfile::Builder::new()
+                        .prefix(prefix)
+                        .tempdir_in(&options.base_temp_dir)?,
+                );
+                // Creation, canonicalization and try-lock form a synchronous
+                // acquisition section. Own the directory before fallible work,
+                // and establish its lock before checking expiry/removing it.
+                match std::fs::canonicalize(process.temporary.as_ref().expect("created profile").path()) {
+                    Ok(profile) => profile,
+                    Err(error) => {
+                        // The exposed path may already be owned by another
+                        // launcher. Preserve it because we have no lock yet.
+                        if let Some(directory) = process.temporary.take() {
+                            let _ = directory.keep();
                         }
-                        Err(Error::Http(_) | Error::WebSocket(_)) => {}
-                        Err(error) => return Err(error),
+                        return Err(error.into());
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            process.profile_lock = Some(match lock_profile(&process.profile) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    // Another launch may own this directory now. Never remove
+                    // it without the lock, even after our deadline has expired.
+                    if let Some(directory) = process.temporary.take() {
+                        let _ = directory.keep();
+                    }
+                    return Err(error.into());
+                }
+            });
+            startup_remaining(deadline, "preparing locked profile")?;
+            // Cleanup could have removed the path before we acquired its lock.
+            std::fs::create_dir_all(&process.profile)?;
+            startup_remaining(deadline, "reading previous endpoint")?;
+            let port_file = process.profile.join("DevToolsActivePort");
+            let previous_port_file = match tokio::fs::read(&port_file).await {
+                Ok(contents) => Some(contents),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.into()),
+            };
+            startup_remaining(deadline, "spawning browser")?;
+            let mut command = Command::new(executable);
+            let mut profile_arg = OsString::from("--user-data-dir=");
+            profile_arg.push(&process.profile);
+            command
+                .arg(profile_arg)
+                .arg("--remote-debugging-port=0")
+                .args([
+                    "--no-first-run",
+                    "--no-service-autorun",
+                    "--no-default-browser-check",
+                    "--disable-backgrounding-occluded-windows",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            command.args(&options.args).arg("about:blank");
+            startup_remaining(deadline, "spawning browser")?;
+            process.child = Some(
+                command
+                    .spawn()
+                    .map_err(|error| Error::Launch(format!("could not spawn Chrome: {error}")))?,
+            );
+            startup_remaining(deadline, "discovering endpoint")?;
+            tokio::time::timeout_at(deadline, async {
+                loop {
+                    startup_remaining(deadline, "discovering endpoint")?;
+                    if let Some(status) = process.child.as_mut().expect("launched child").try_wait()? {
+                        return Err(Error::Launch(format!("Chrome exited with {status}")));
+                    }
+                    startup_remaining(deadline, "reading endpoint")?;
+                    let endpoint = match tokio::fs::read(&port_file).await {
+                        Ok(contents) => fresh_endpoint(&contents, previous_port_file.as_deref()),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => return Err(e.into()),
+                    };
+                    if let Some(endpoint) = endpoint {
+                        let remaining = startup_remaining(deadline, "connecting to endpoint")?;
+                        match ConnectionOptions::default().connect_timeout(remaining).connect(&endpoint).await {
+                            Ok(connection) => {
+                                // Retain the connection outside this timed future
+                                // before any PID verification await can expire.
+                                candidate = Some(connection);
+                                startup_remaining(deadline, "verifying browser PID")?;
+                                let connection = candidate.as_ref().expect("connected browser")
+                                    .clone().with_command_timeout(None);
+                                let info = connection.execute(
+                                    &crate::cdp::system_info::commands::GetProcessInfo::default(),
+                                ).await?;
+                                let owned = info.process_info.iter().any(|info| {
+                                    info.type_ == "browser"
+                                        && Some(info.id) == process.id().map(i64::from)
+                                });
+                                if !owned {
+                                    return Err(Error::Launch(
+                                        "debugging endpoint does not belong to the spawned browser PID".into(),
+                                    ));
+                                }
+                                // Do not publish an exited child or a late success.
+                                if let Some(status) = process.child.as_mut().expect("launched child").try_wait()? {
+                                    return Err(Error::Launch(format!("Chrome exited with {status}")));
+                                }
+                                startup_remaining(deadline, "finishing startup")?;
+                                process.endpoint = endpoint;
+                                return Ok(());
+                            }
+                            // Discovery can race Chrome's listener becoming ready.
+                            // Retry only the handshake, not spawning, under the same deadline.
+                            Err(Error::Http(_) | Error::WebSocket(_)) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }).await.map_err(|_| Error::Timeout("starting Chrome: endpoint discovery or PID verification".into()))?
+        }.await;
+        match started {
+            Ok(()) => Ok((process, candidate.expect("verified browser connection"))),
+            Err(error) => {
+                if let Some(connection) = candidate {
+                    connection.close().await;
+                }
+                with_cleanup(Err(error), process.close().await)
             }
-        })
-        .await
-        .map_err(|_| Error::Timeout("starting Chrome".into()))
-        .and_then(|r| r);
-        match connected {
-            Ok(connection) => Ok((process, connection)),
-            Err(error) => with_cleanup(Err(error), process.close().await),
         }
     }
 
@@ -299,6 +324,7 @@ impl BrowserProcess {
     }
 
     /// Reap the child before removing its temporary profile. Fixed profiles remain.
+    /// Also removes an owned temporary profile when startup failed before spawning.
     /// On Unix, allow up to three seconds after TERM before forcing termination.
     /// Canceling the wait leaves cleanup running; a later call can await it.
     /// The profile lock is held through reaping and temporary-directory removal.
@@ -306,9 +332,9 @@ impl BrowserProcess {
     /// If termination fails, the lock is retained until the host application exits
     /// and the temporary directory is preserved to avoid reusing a live profile.
     pub async fn close(&mut self) -> Result<()> {
-        if let Some(child) = self.child.take() {
+        if self.child.is_some() || self.temporary.is_some() || self.profile_lock.is_some() {
             let cleanup = Cleanup {
-                child: Some(child),
+                child: self.child.take(),
                 temporary: self.temporary.take(),
                 profile_lock: self.profile_lock.take(),
             };
@@ -338,31 +364,37 @@ struct Cleanup {
 
 impl Cleanup {
     fn run(mut self) -> std::io::Result<()> {
-        if let Some(child) = self.child.take() {
-            let result = reap(child, self.temporary.take(), self.profile_lock.take());
-            #[cfg(feature = "tracing")]
-            tracing::debug!(target: "rustcdp", success = result.is_ok(), "browser cleanup finished");
-            result
-        } else {
-            Ok(())
-        }
+        let result = reap(
+            self.child.take(),
+            self.temporary.take(),
+            self.profile_lock.take(),
+        );
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: "rustcdp", success = result.is_ok(), "browser cleanup finished");
+        result
     }
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        if let Some(child) = self.child.take() {
-            let _ = reap(child, self.temporary.take(), self.profile_lock.take());
+        if self.child.is_some() || self.temporary.is_some() || self.profile_lock.is_some() {
+            let _ = reap(
+                self.child.take(),
+                self.temporary.take(),
+                self.profile_lock.take(),
+            );
         }
     }
 }
 
 fn reap(
-    mut child: Child,
+    child: Option<Child>,
     temporary: Option<TempDir>,
     profile_lock: Option<File>,
 ) -> std::io::Result<()> {
-    if let Err(error) = terminate(&mut child) {
+    if let Some(mut child) = child
+        && let Err(error) = terminate(&mut child)
+    {
         // Never delete a profile while its process could still be using it.
         if let Some(directory) = temporary {
             let _ = directory.keep();
@@ -423,9 +455,9 @@ fn terminate(child: &mut Child) -> std::io::Result<()> {
 
 impl Drop for BrowserProcess {
     fn drop(&mut self) {
-        if let Some(child) = self.child.take() {
+        if self.child.is_some() || self.temporary.is_some() || self.profile_lock.is_some() {
             let cleanup = Cleanup {
-                child: Some(child),
+                child: self.child.take(),
                 temporary: self.temporary.take(),
                 profile_lock: self.profile_lock.take(),
             };

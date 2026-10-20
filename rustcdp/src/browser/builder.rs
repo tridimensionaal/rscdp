@@ -1,7 +1,7 @@
 use super::Browser;
 use crate::{
     Error, Result,
-    launcher::{LaunchOptions, args::validated_switch_name},
+    launcher::{LaunchOptions, args::validated_switch_name, startup_deadline},
 };
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
@@ -19,7 +19,7 @@ use std::{ffi::OsString, path::PathBuf, time::Duration};
 /// | [`devtools`](Self::devtools) | Off | `--auto-open-devtools-for-tabs` |
 /// | [`executable`](Self::executable) | Discover Chrome / `CHROME_PATH` | — |
 /// | [`profile_dir`](Self::profile_dir) | Temporary profile | `--user-data-dir` |
-/// | [`startup_timeout`](Self::startup_timeout) | 15 seconds per attempt | — |
+/// | [`startup_timeout`](Self::startup_timeout) | 15 seconds total process startup | — |
 /// | [`base_temp_dir`](Self::base_temp_dir) | OS temporary directory | — |
 /// | [`dir_prefix`](Self::dir_prefix) | `tmp` | — |
 ///
@@ -70,8 +70,12 @@ impl BrowserBuilder {
         self
     }
 
-    /// Set the per-attempt connection deadline after process spawn.
-    /// Defaults to 15 seconds; excludes profile preparation and process spawn.
+    /// Set one process-startup budget, including profile preparation, spawn,
+    /// endpoint discovery, handshake and PID verification. Defaults to 15 seconds.
+    /// Zero and unrepresentable deadlines are rejected before I/O. Synchronous
+    /// OS work cannot be preempted; already-started filesystem work may overrun
+    /// the budget. Awaited failure cleanup can extend total elapsed time.
+    /// Initial-page attachment after process startup has independent bounds.
     pub fn startup_timeout(mut self, timeout: Duration) -> Self {
         self.options.startup_timeout = timeout;
         self
@@ -114,7 +118,10 @@ impl BrowserBuilder {
     /// launcher flags, the `--` terminator, and raw flags duplicating explicitly
     /// set typed options. Switch checks account for surrounding whitespace and
     /// Windows switch spelling; the original arguments are preserved.
+    /// Also rejects zero or unrepresentable startup deadlines. Validation does
+    /// not start the countdown; launch revalidates and starts its own deadline.
     pub fn build(mut self) -> Result<LaunchOptions> {
+        startup_deadline(self.options.startup_timeout)?;
         if matches!(self.window_size, Some((0, _)) | Some((_, 0))) {
             return Err(Error::InvalidArgument(
                 "window dimensions must be positive".into(),
