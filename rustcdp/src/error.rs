@@ -94,6 +94,18 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(method: &str, payload: Valu
     })
 }
 
+// Borrow for decoding; clone the full payload only when preserving a decode error.
+pub(crate) fn decode_ref<T: serde::de::DeserializeOwned>(
+    method: &str,
+    payload: &Value,
+) -> Result<T> {
+    T::deserialize(payload).map_err(|source| Error::Decode {
+        method: method.into(),
+        payload: payload.clone(),
+        source,
+    })
+}
+
 pub(crate) fn with_cleanup<T>(result: Result<T>, cleanup: Result<()>) -> Result<T> {
     match (result, cleanup) {
         (Ok(value), Ok(())) => Ok(value),

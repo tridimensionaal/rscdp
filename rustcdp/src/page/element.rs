@@ -1,9 +1,13 @@
 use super::{Page, input::click_cdp};
+use crate::error::decode_ref;
 use crate::{
     Error, Result, Session,
     cdp::{
-        dom::Node,
-        runtime::{RemoteObject, RemoteObjectId},
+        dom::{
+            Node,
+            commands::{GetBoxModelResponse, ResolveNodeResponse},
+        },
+        runtime::{RemoteObject, RemoteObjectId, commands::CallFunctionOnResponse},
     },
 };
 use serde_json::{Value, json};
@@ -34,11 +38,16 @@ impl Default for ClickOptions {
     }
 }
 
+/// Border-quad geometry in CSS pixels; this does not establish visibility or clickability.
 #[derive(Debug, Clone, Copy)]
 pub struct ElementPosition {
+    /// X coordinate of the first border-quad vertex, not the minimum bounding-box X.
     pub x: f64,
+    /// Y coordinate of the first border-quad vertex, not the minimum bounding-box Y.
     pub y: f64,
+    /// Arithmetic mean of the four border-quad vertices' X coordinates.
     pub center_x: f64,
+    /// Arithmetic mean of the four border-quad vertices' Y coordinates.
     pub center_y: f64,
 }
 
@@ -120,15 +129,34 @@ impl Element {
             .session
             .execute_raw("DOM.getBoxModel", json!({"objectId":self.0.id}))
             .await?;
-        let points: Vec<f64> = serde_json::from_value(result["model"]["border"].clone())?;
+        let decoded: GetBoxModelResponse = decode_ref("DOM.getBoxModel", &result)?;
+        let points = &decoded.model.border.0;
         if points.len() != 8 || points.iter().any(|p| !p.is_finite()) {
-            return Err(Error::InvalidArgument("invalid element box quad".into()));
+            return Err(Error::UnexpectedResponse {
+                method: "DOM.getBoxModel".into(),
+                payload: result,
+            });
+        }
+        // Divide before summing so finite extreme coordinates do not overflow
+        // merely while computing their arithmetic mean.
+        let center_x = points.iter().step_by(2).map(|x| x / 4.0).sum::<f64>();
+        let center_y = points
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|y| y / 4.0)
+            .sum::<f64>();
+        if !center_x.is_finite() || !center_y.is_finite() {
+            return Err(Error::UnexpectedResponse {
+                method: "DOM.getBoxModel".into(),
+                payload: result,
+            });
         }
         Ok(ElementPosition {
             x: points[0],
             y: points[1],
-            center_x: (points[0] + points[2] + points[4] + points[6]) / 4.0,
-            center_y: (points[1] + points[3] + points[5] + points[7]) / 4.0,
+            center_x,
+            center_y,
         })
     }
 
@@ -179,8 +207,19 @@ impl Element {
                 for object in [&result["result"], &result["exceptionDetails"]["exception"]] {
                     own_remote_object(&self.0.session, &self.0.context_lease, object, &mut objects);
                 }
+                let decoded: CallFunctionOnResponse =
+                    decode_ref("Runtime.callFunctionOn", &result)?;
+                validate_exception("Runtime.callFunctionOn", &result)?;
                 if let Some(error) = result.get("exceptionDetails") {
                     return Err(Error::JavaScript(error.clone()));
+                }
+                if decoded.result.type_.as_str() != "undefined"
+                    || result["result"].get("objectId").is_some()
+                {
+                    return Err(Error::UnexpectedResponse {
+                        method: "Runtime.callFunctionOn".into(),
+                        payload: result,
+                    });
                 }
                 Ok(())
             }
@@ -233,12 +272,16 @@ impl Page {
                 let mut objects = Vec::new();
                 unknown_resource =
                     !page.own_response_objects(&response, "object", false, &mut objects);
+                let _: ResolveNodeResponse = decode_ref("DOM.resolveNode", &response)?;
+                validate_exception("DOM.resolveNode", &response)?;
                 if let Some(error) = response.get("exceptionDetails") {
                     return Err(Error::JavaScript(error.clone()));
                 }
-                let element = node_result(&response["object"], &objects)?.ok_or_else(|| {
-                    Error::InvalidArgument("DOM.resolveNode returned null".into())
-                })?;
+                let element = node_result("DOM.resolveNode", &response, "object", &objects)?
+                    .ok_or_else(|| Error::UnexpectedResponse {
+                        method: "DOM.resolveNode".into(),
+                        payload: response.clone(),
+                    })?;
                 // The node is now owned. Validation uses the original shorter
                 // command deadline; owner expiry releases it without detachment.
                 let validation = page
@@ -258,21 +301,25 @@ impl Page {
                 // received, deduplicating against the provisional node as well.
                 unknown_resource =
                     !page.own_response_objects(&validation, "result", true, &mut objects);
+                let _: CallFunctionOnResponse = decode_ref("Runtime.callFunctionOn", &validation)?;
+                validate_exception("Runtime.callFunctionOn", &validation)?;
                 if let Some(error) = validation.get("exceptionDetails") {
                     return Err(Error::JavaScript(error.clone()));
                 }
                 if unknown_resource {
-                    return Err(Error::InvalidArgument(
-                        "invalid remote object ID in node validation".into(),
-                    ));
+                    return Err(Error::UnexpectedResponse {
+                        method: "Runtime.callFunctionOn".into(),
+                        payload: validation,
+                    });
                 }
                 if validation["result"]["type"].as_str() != Some("boolean")
                     || validation["result"]["value"].as_bool() != Some(true)
                     || validation["result"].get("objectId").is_some()
                 {
-                    return Err(Error::InvalidArgument(
-                        "unexpected resolved node context validation result".into(),
-                    ));
+                    return Err(Error::UnexpectedResponse {
+                        method: "Runtime.callFunctionOn".into(),
+                        payload: validation,
+                    });
                 }
                 Ok(element)
             })
@@ -354,8 +401,13 @@ fn is_null_object(object: &Value) -> bool {
         && object.get("value").is_none_or(Value::is_null)
 }
 
-pub(super) fn node_result(object: &Value, objects: &[Element]) -> Result<Option<Element>> {
-    let _: RemoteObject = serde_json::from_value(object.clone())?;
+pub(super) fn node_result(
+    method: &str,
+    response: &Value,
+    result_key: &str,
+    objects: &[Element],
+) -> Result<Option<Element>> {
+    let object = &response[result_key];
     if is_null_object(object) {
         return Ok(None);
     }
@@ -367,7 +419,30 @@ pub(super) fn node_result(object: &Value, objects: &[Element]) -> Result<Option<
     {
         return Ok(Some(element.clone()));
     }
-    Err(Error::InvalidArgument(
-        "element acquisition did not return a node or null".into(),
-    ))
+    Err(Error::UnexpectedResponse {
+        method: method.into(),
+        payload: response.clone(),
+    })
+}
+
+pub(super) fn validate_exception(method: &str, response: &Value) -> Result<()> {
+    // Optional serde fields accept null; a present exception must still be an object.
+    if response
+        .get("exceptionDetails")
+        .is_some_and(|details| !details.is_object())
+    {
+        return Err(Error::UnexpectedResponse {
+            method: method.into(),
+            payload: response.clone(),
+        });
+    }
+    if let Some(details) = response.get("exceptionDetails") {
+        let _: crate::cdp::runtime::ExceptionDetails = serde::Deserialize::deserialize(details)
+            .map_err(|source| Error::Decode {
+                method: method.into(),
+                payload: response.clone(),
+                source,
+            })?;
+    }
+    Ok(())
 }

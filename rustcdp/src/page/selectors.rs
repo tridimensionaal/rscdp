@@ -1,5 +1,12 @@
-use super::{Element, Page, element::node_result};
-use crate::{Error, Result, cdp::page::FrameId};
+use super::{
+    Element, Page,
+    element::{node_result, validate_exception},
+};
+use crate::{
+    Error, Result,
+    cdp::{page::FrameId, runtime::commands::EvaluateResponse},
+    error::decode_ref,
+};
 use serde_json::json;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -159,10 +166,12 @@ impl Page {
                 let mut objects = Vec::new();
                 unknown_resource =
                     !page.own_response_objects(&response, "result", false, &mut objects);
+                let _: EvaluateResponse = decode_ref("Runtime.evaluate", &response)?;
+                validate_exception("Runtime.evaluate", &response)?;
                 if let Some(error) = response.get("exceptionDetails") {
                     return Err(Error::JavaScript(error.clone()));
                 }
-                node_result(&response["result"], &objects)
+                node_result("Runtime.evaluate", &response, "result", &objects)
             })
             .await
             .unwrap_or_else(|_| Err(Error::Timeout("acquiring selector element".into())));
@@ -261,8 +270,9 @@ impl Page {
                     .json::<serde_json::Value>()
                     .await
                 {
-                    Ok(value) => value.as_u64().ok_or_else(|| {
-                        Error::InvalidArgument("selector count is not an integer".into())
+                    Ok(value) => value.as_u64().ok_or_else(|| Error::UnexpectedResponse {
+                        method: "Runtime.evaluate JSON value".into(),
+                        payload: value,
                     })?,
                     Err(error) if is_context_change(&error) => {
                         previous = 0;

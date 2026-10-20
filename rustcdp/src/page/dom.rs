@@ -1,5 +1,12 @@
 use super::{EvaluationBuilder, EvaluationWorld, Page};
-use crate::{Error, Result, Session, cdp::dom::Node, error::with_cleanup};
+use crate::{
+    Error, Result, Session,
+    cdp::dom::{
+        Node,
+        commands::{DescribeNodeResponse, GetSearchResultsResponse, PerformSearchResponse},
+    },
+    error::{decode_ref, with_cleanup},
+};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
@@ -106,15 +113,16 @@ impl Page {
                 json!({"query":query,"includeUserAgentShadowDOM":options.include_user_agent_shadow_dom}),
             )
             .await?;
-        let search_id = match serde_json::from_value::<String>(search["searchId"].clone()) {
-            Ok(id) if !id.is_empty() => id,
-            invalid => {
-                let error = match invalid {
-                    Err(error) => Error::Json(error),
-                    Ok(_) => Error::InvalidArgument("empty DOM search ID".into()),
-                };
+        // Capture a usable ID before decoding resultCount or any other fields.
+        let search_id = match search["searchId"].as_str().filter(|id| !id.is_empty()) {
+            Some(id) => id.to_owned(),
+            None => {
                 *recovery_required = true;
-                return Err(error);
+                let _: PerformSearchResponse = decode_ref("DOM.performSearch", &search)?;
+                return Err(Error::UnexpectedResponse {
+                    method: "DOM.performSearch".into(),
+                    payload: search,
+                });
             }
         };
         let guard = Search {
@@ -123,11 +131,13 @@ impl Page {
             context_lease: self.context_lease.clone(),
         };
         let result = async {
-            let count: i64 = serde_json::from_value(search["resultCount"].clone())?;
+            let decoded: PerformSearchResponse = decode_ref("DOM.performSearch", &search)?;
+            let count = decoded.result_count;
             if count < 0 {
-                return Err(Error::InvalidArgument(
-                    "search result count must be nonnegative".into(),
-                ));
+                return Err(Error::UnexpectedResponse {
+                    method: "DOM.performSearch".into(),
+                    payload: search,
+                });
             }
             let mut nodes = Vec::new();
             if count > 0 {
@@ -138,13 +148,21 @@ impl Page {
                         json!({"searchId":search_id,"fromIndex":0,"toIndex":count}),
                     )
                     .await?;
-                let ids: Vec<i64> = serde_json::from_value(response["nodeIds"].clone())?;
-                for id in ids {
+                let decoded: GetSearchResultsResponse =
+                    decode_ref("DOM.getSearchResults", &response)?;
+                if usize::try_from(count).ok() != Some(decoded.node_ids.len()) {
+                    return Err(Error::UnexpectedResponse {
+                        method: "DOM.getSearchResults".into(),
+                        payload: response,
+                    });
+                }
+                for id in decoded.node_ids {
                     let node = self
                         .session
                         .execute_raw("DOM.describeNode", json!({"nodeId":id}))
                         .await?;
-                    nodes.push(serde_json::from_value(node["node"].clone())?);
+                    let decoded: DescribeNodeResponse = decode_ref("DOM.describeNode", &node)?;
+                    nodes.push(decoded.node);
                 }
             }
             Ok(nodes)
