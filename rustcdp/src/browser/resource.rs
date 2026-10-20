@@ -14,23 +14,79 @@ use std::{
 };
 use tokio::{sync::Mutex, task::JoinHandle};
 
+struct Entry {
+    page: Page,
+    delivered: bool,
+}
+
 #[derive(Default)]
 struct State {
     closing: bool,
-    pages: Vec<Page>,
+    entries: Vec<Entry>,
     proxy: Option<Proxy>,
-    pending_auth: Option<Arc<ProxyAuth>>,
 }
 
-#[derive(Default)]
-struct Cleanup {
+// Shared page management has no context-disposal authority and no Drop cleanup.
+// A future browser/default scope can use it without owning a ContextLease.
+pub(super) struct ManagedPages {
+    connection: Connection,
     gate: Mutex<()>,
-    closed: AtomicBool,
     state: std::sync::Mutex<State>,
 }
 
+impl ManagedPages {
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            gate: Mutex::new(()),
+            state: Default::default(),
+        }
+    }
+
+    fn register(&self, page: &Page, delivered: bool) {
+        // Never introduce a cache -> Page -> ContextLease -> cache cycle.
+        let mut page = page.clone();
+        page.context_lease = None;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.entries.retain(|entry| entry.page.id() != page.id());
+        state.entries.push(Entry { page, delivered });
+    }
+
+    // The pending guard calls this synchronously on receipt. Future enumeration
+    // must also hold the gate so publication cannot race unclaimed-tab cleanup.
+    fn publish(&self, id: &TargetId) -> Result<Page> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closing {
+            return Err(Error::InvalidArgument("browser context is closing".into()));
+        }
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|entry| entry.page.id() == id)
+            .ok_or_else(|| Error::InvalidArgument("pending page is no longer managed".into()))?;
+        entry.delivered = true;
+        Ok(entry.page.clone())
+    }
+
+    fn is_pending(&self, id: &TargetId) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .iter()
+            .any(|entry| entry.page.id() == id && !entry.delivered)
+    }
+}
+
+// Context-specific cleanup stays separate from the reusable page collection.
+// Only ContextLease and the tasks it starts carry this disposal authority.
+struct Cleanup {
+    pages: Arc<ManagedPages>,
+    closed: AtomicBool,
+    pending_auth: std::sync::Mutex<Option<Arc<ProxyAuth>>>,
+}
+
 pub(crate) struct ContextLease {
-    connection: Connection,
     id: BrowserContextId,
     cleanup: Arc<Cleanup>,
 }
@@ -38,9 +94,12 @@ pub(crate) struct ContextLease {
 impl ContextLease {
     pub(super) fn new(connection: Connection, id: BrowserContextId) -> Self {
         Self {
-            connection,
             id,
-            cleanup: Arc::default(),
+            cleanup: Arc::new(Cleanup {
+                pages: Arc::new(ManagedPages::new(connection)),
+                closed: AtomicBool::new(false),
+                pending_auth: Default::default(),
+            }),
         }
     }
 
@@ -49,23 +108,23 @@ impl ContextLease {
     }
 
     pub(super) fn register_page(&self, page: &Page, proxy: Option<Proxy>) {
-        // Cached pages must never own this lease, including the fallback page.
-        let mut page = page.clone();
-        page.context_lease = None;
-        let mut state = self.cleanup.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.pages.retain(|existing| existing.id() != page.id());
-        state.pages.push(page);
-        state.proxy = proxy;
+        self.cleanup.pages.register(page, true);
+        self.cleanup
+            .pages
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .proxy = proxy;
     }
 
     pub(super) async fn new_page(&self) -> Result<Page> {
-        let connection = self.connection.clone();
+        let connection = self.cleanup.pages.connection.clone();
         let cleanup = self.cleanup.clone();
         let id = self.id.clone();
         let task = connection
             .runtime()
             .spawn(async move { acquire_page(connection, cleanup, id).await });
-        let pending = if let Some(timeout) = self.connection.command_timeout() {
+        let pending = if let Some(timeout) = self.cleanup.pages.connection.command_timeout() {
             tokio::time::timeout(timeout, task)
                 .await
                 .map_err(|_| Error::Timeout("creating context page".into()))??
@@ -81,28 +140,32 @@ impl ContextLease {
 
     pub(super) fn close_with_auth(&self, auth: Option<Arc<ProxyAuth>>) -> JoinHandle<Result<()>> {
         {
-            let mut state = self.cleanup.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self
+                .cleanup
+                .pages
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.closing = true;
-            if auth.is_some() {
-                state.pending_auth = auth;
-            }
+            // Register while holding publication state, as disposal snapshots
+            // both under this same lock order before it starts stopping workers.
+            self.register_auth(auth);
         }
-        let connection = self.connection.clone();
+        let connection = self.cleanup.pages.connection.clone();
         let cleanup = self.cleanup.clone();
         let id = self.id.clone();
-        self.connection.runtime().spawn(async move {
-            let _gate = cleanup.gate.lock().await;
+        self.cleanup.pages.connection.runtime().spawn(async move {
+            let _gate = cleanup.pages.gate.lock().await;
             dispose_context(&connection, &cleanup, &id).await
         })
     }
 
     pub(super) fn register_auth(&self, auth: Option<Arc<ProxyAuth>>) {
         if let Some(auth) = auth {
-            self.cleanup
-                .state
+            *self.cleanup
+                .pending_auth
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending_auth = Some(auth);
+                .unwrap_or_else(|e| e.into_inner()) = Some(auth);
         }
     }
 }
@@ -116,7 +179,6 @@ impl Drop for ContextLease {
 }
 
 struct PendingPage {
-    connection: Connection,
     cleanup: Arc<Cleanup>,
     context: BrowserContextId,
     page: Option<Page>,
@@ -124,15 +186,14 @@ struct PendingPage {
 
 impl PendingPage {
     fn publish(mut self) -> Result<Page> {
-        let state = self.cleanup.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.closing {
-            return Err(Error::InvalidArgument("browser context is closing".into()));
-        }
-        // No await between the closing check and transferring ownership.
-        Ok(self
-            .page
-            .take()
-            .expect("pending page has not been delivered"))
+        let page = self.cleanup.pages.publish(
+            self.page
+                .as_ref()
+                .expect("pending page has not been delivered")
+                .id(),
+        )?;
+        self.page = None;
+        Ok(page)
     }
 }
 
@@ -141,12 +202,12 @@ impl Drop for PendingPage {
         let Some(page) = self.page.take() else {
             return;
         };
-        let connection = self.connection.clone();
+        let connection = self.cleanup.pages.connection.clone();
         let cleanup = self.cleanup.clone();
         let context = self.context.clone();
-        self.connection.runtime().spawn(async move {
-            let _gate = cleanup.gate.lock().await;
-            if !cleanup.closed.load(Ordering::Acquire) {
+        self.cleanup.pages.connection.runtime().spawn(async move {
+            let _gate = cleanup.pages.gate.lock().await;
+            if !cleanup.closed.load(Ordering::Acquire) && cleanup.pages.is_pending(page.id()) {
                 let _ = cleanup_target(&connection, &cleanup, &context, page.id()).await;
             }
             drop(page);
@@ -159,11 +220,15 @@ async fn acquire_page(
     cleanup: Arc<Cleanup>,
     context: BrowserContextId,
 ) -> Result<PendingPage> {
-    let _gate = tokio::time::timeout(Duration::from_secs(30), cleanup.gate.lock())
+    let _gate = tokio::time::timeout(Duration::from_secs(30), cleanup.pages.gate.lock())
         .await
         .map_err(|_| Error::Timeout("waiting to create context page".into()))?;
     let proxy = {
-        let state = cleanup.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = cleanup
+            .pages
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if state.closing {
             return Err(Error::InvalidArgument("browser context is closing".into()));
         }
@@ -212,16 +277,10 @@ async fn acquire_page(
             }
         }
     }
-    cleanup
-        .state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .pages
-        .push(page.clone());
+    cleanup.pages.register(&page, false);
     // This result owns no gate. Context close can run even if nobody ever polls
     // the completed acquisition handle to retrieve or drop its result.
     Ok(PendingPage {
-        connection,
         cleanup: cleanup.clone(),
         context,
         page: Some(page),
@@ -236,13 +295,14 @@ async fn cleanup_target(
     id: &TargetId,
 ) -> Result<()> {
     let page = cleanup
+        .pages
         .state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .pages
+        .entries
         .iter()
-        .find(|page| page.id() == id)
-        .cloned();
+        .find(|entry| entry.page.id() == id)
+        .map(|entry| entry.page.clone());
     let auth_result = match &page {
         Some(page) => page.stop_proxy_auth().await,
         None => Ok(()),
@@ -253,11 +313,12 @@ async fn cleanup_target(
         .unwrap_or_else(|_| Err(Error::Timeout(format!("closing unclaimed page {id}"))));
     let result = if closed.is_ok() {
         cleanup
+            .pages
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .pages
-            .retain(|page| page.id() != id);
+            .entries
+            .retain(|entry| entry.page.id() != id);
         closed
     } else {
         with_cleanup(
@@ -286,9 +347,23 @@ async fn dispose_context(
     id: &BrowserContextId,
 ) -> Result<()> {
     let (pages, auth) = {
-        let mut state = cleanup.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = cleanup
+            .pages
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.closing = true;
-        (state.pages.clone(), state.pending_auth.take())
+        let pages: Vec<_> = state
+            .entries
+            .iter()
+            .map(|entry| entry.page.clone())
+            .collect();
+        let auth = cleanup
+            .pending_auth
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        (pages, auth)
     };
     let mut auth_result = Ok(());
     for page in &pages {
@@ -314,8 +389,12 @@ async fn dispose_context(
         }
         if result.is_ok() {
             cleanup.closed.store(true, Ordering::Release);
-            let mut state = cleanup.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.pages.clear();
+            let mut state = cleanup
+                .pages
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.entries.clear();
             state.proxy = None;
         }
         result.map(|_| ())
