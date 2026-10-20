@@ -1,7 +1,7 @@
 //! Single-flight authentication for a session already configured to use a proxy.
 //!
 //! Only challenges from the configured proxy origin receive credentials.
-//! Rejection stays latched until teardown; successful verification disables Fetch.
+//! Rejection stays latched until teardown; Fetch stays enabled for later challenges.
 //! Authentication buffering and held requests/challenges are bounded. Overflow
 //! fails authentication explicitly. Fatal worker failures close the target;
 //! if closing it and disabling Fetch both fail, the connection is closed.
@@ -30,6 +30,7 @@ pub enum ProxyAuthStatus {
     Pending,
     /// A request completed without a proxy challenge; credentials remain unverified.
     Unchallenged,
+    /// A credential-bearing probe succeeded; later challenges start a new probe.
     Authenticated,
     Rejected,
     Stopped,
@@ -46,10 +47,10 @@ enum Stop {
 ///
 /// Credentials are sent only for challenges matching the configured proxy's
 /// scheme, host, and port; mismatches are canceled. The cold request burst is
-/// serialized and credential rejection stays latched. Unchallenged traffic leaves
-/// Fetch enabled for later challenges; verified authentication disables it.
-/// Network failures do not establish credential rejection. If cached credentials
-/// later expire, retire the context rather than expecting automatic rearming.
+/// serialized and credential rejection stays latched. Fetch remains enabled after
+/// verification to handle later challenges, including expired cached credentials.
+/// Each new credential-bearing probe resets readiness to Pending. Network failures
+/// do not establish credential rejection; they leave that probe unverified.
 ///
 /// The event queue holds at most 4,096 compact events and 4 MiB of request-ID/origin
 /// text, without headers or bodies. Held requests and challenges are each capped
@@ -121,13 +122,13 @@ impl ProxyAuth {
                 rejected: false,
             };
             let outcome = if *stopped.borrow() != Stop::Running {
-                Ok(false)
+                Ok(())
             } else {
                 tokio::select! {
                     result = handler.run(&mut events) => result,
                     _ = failure.changed() => Err(event_failure(&failure)),
-                    _ = stopped.changed() => Ok(false),
-                    _ = session.closed() => Ok(false),
+                    _ = stopped.changed() => Ok(()),
+                    _ = session.closed() => Ok(()),
                 }
             };
             if session.is_closed() {
@@ -151,14 +152,10 @@ impl ProxyAuth {
             let outcome = if failure.borrow().is_some() {
                 Err(event_failure(&failure))
             } else {
-                outcome.and_then(|authenticated| disabled.map(|_| authenticated))
+                disabled
             };
             match outcome {
-                Ok(true) => {
-                    status_sender.send_replace(ProxyAuthStatus::Authenticated);
-                    Ok(())
-                }
-                Ok(false) => {
+                Ok(()) => {
                     status_sender.send_replace(ProxyAuthStatus::Stopped);
                     Ok(())
                 }
@@ -198,6 +195,8 @@ impl ProxyAuth {
     /// This observation distinguishes verified authentication from unchallenged traffic. Cached credentials, bypasses, or a proxy without
     /// authentication can yield an unchallenged response; readiness proves neither
     /// proxy traversal nor use of the supplied credentials.
+    /// A ready status describes an observed request, not a guarantee for future
+    /// requests. A later credential-bearing probe returns the status to Pending.
     pub async fn wait_ready(&self, timeout: Duration) -> Result<ProxyAuthStatus> {
         let mut status = self.status.clone();
         tokio::time::timeout(timeout, async {
@@ -265,25 +264,23 @@ struct Handler {
 }
 
 impl Handler {
-    async fn run(&mut self, events: &mut AuthEvents) -> Result<bool> {
+    async fn run(&mut self, events: &mut AuthEvents) -> Result<()> {
         loop {
             let event = events.recv().await?;
-            if self.event(event).await? {
-                return Ok(true);
-            }
+            self.event(event).await?;
         }
     }
 
-    async fn event(&mut self, event: AuthEvent) -> Result<bool> {
+    async fn event(&mut self, event: AuthEvent) -> Result<()> {
         let AuthEvent { id, kind } = event;
         let (rejected, failed) = match kind {
             AuthEventKind::Challenge { is_proxy, origin } => {
                 self.challenge(id, is_proxy, origin.as_deref()).await?;
-                return Ok(false);
+                return Ok(());
             }
             AuthEventKind::Request => {
                 self.request(id).await?;
-                return Ok(false);
+                return Ok(());
             }
             AuthEventKind::Response { rejected, failed } => (rejected, failed),
         };
@@ -307,16 +304,17 @@ impl Handler {
             {
                 self.status.send_replace(ProxyAuthStatus::Unchallenged);
             }
-            return Ok(false);
+            return Ok(());
         }
         if rejected {
             self.reject().await?;
-            return Ok(false);
+            return Ok(());
         }
         if !failed {
             self.gate_open = true;
             if attempted {
                 self.verified = true;
+                self.status.send_replace(ProxyAuthStatus::Authenticated);
             } else if self.probe.is_none() && !self.verified {
                 // A bypassed request or cached credentials do not verify this proxy.
                 self.status.send_replace(ProxyAuthStatus::Unchallenged);
@@ -340,9 +338,8 @@ impl Handler {
                     self.continue_request(id).await?;
                 }
             }
-            return Ok(self.verified);
         }
-        Ok(false)
+        Ok(())
     }
 
     async fn request(&mut self, id: String) -> Result<()> {
@@ -394,6 +391,7 @@ impl Handler {
             .proxy
             .credentials()
             .ok_or_else(|| Error::ProxyAuthentication("missing credentials".into()))?;
+        self.verified = false;
         self.status.send_replace(ProxyAuthStatus::Pending);
         self.probe = Some(id.clone());
         self.attempted.insert(id.clone());
