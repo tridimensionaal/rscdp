@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{oneshot, watch},
+    sync::{Mutex, oneshot, watch},
     task::JoinHandle,
 };
 
@@ -59,7 +59,7 @@ enum Stop {
 #[must_use = "retain this worker while authentication is needed; await stop() to finish cleanup"]
 pub struct ProxyAuth {
     stop: watch::Sender<Stop>,
-    task: Option<JoinHandle<Result<()>>>,
+    task: Mutex<Option<JoinHandle<Result<()>>>>,
     status: watch::Receiver<ProxyAuthStatus>,
 }
 
@@ -170,9 +170,9 @@ impl ProxyAuth {
                 }
             }
         });
-        let mut auth = Self {
+        let auth = Self {
             stop,
-            task: Some(task),
+            task: Mutex::new(Some(task)),
             status,
         };
         let started = started
@@ -229,11 +229,13 @@ impl ProxyAuth {
     /// Stop the worker and await cleanup. Fetch disable has a one-second limit
     /// before recovery, even when ordinary command timeouts are disabled.
     /// Canceling this wait leaves cleanup running; another call can await it.
-    pub async fn stop(&mut self) -> Result<()> {
+    /// Concurrent calls serialize; only the call that joins reports a worker error.
+    pub async fn stop(&self) -> Result<()> {
         self.stop.send_replace(Stop::Shutdown);
-        if let Some(task) = &mut self.task {
+        let mut pending = self.task.lock().await;
+        if let Some(task) = &mut *pending {
             let result = task.await;
-            self.task = None;
+            *pending = None;
             result??;
         }
         Ok(())
@@ -243,6 +245,8 @@ impl ProxyAuth {
 impl Drop for ProxyAuth {
     fn drop(&mut self) {
         self.stop.send_replace(Stop::Shutdown);
+        // Dropping the handle detaches the owned worker so recovery can finish.
+        drop(self.task.get_mut().take());
     }
 }
 
@@ -451,6 +455,65 @@ fn event_failure(failure: &watch::Receiver<Option<&'static str>>) -> Error {
             .unwrap_or("authentication event channel stopped")
             .into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn canceled_stop_preserves_worker_and_shared_stops_report_error_once() {
+        let (stop, stopped) = watch::channel(Stop::Running);
+        let (_status, status) = watch::channel(ProxyAuthStatus::Pending);
+        let (finish, cleanup) = oneshot::channel();
+        let auth = ProxyAuth {
+            stop,
+            task: Mutex::new(Some(tokio::spawn(async move {
+                cleanup.await.unwrap();
+                Err(Error::ProxyAuthentication("worker failed".into()))
+            }))),
+            status,
+        };
+        tokio::select! {
+            biased;
+            _ = auth.stop() => panic!("cleanup has not finished"),
+            _ = std::future::ready(()) => {},
+        }
+        assert!(*stopped.borrow() == Stop::Shutdown);
+        assert!(auth.task.lock().await.is_some());
+        finish.send(()).unwrap();
+        let (first, second) = tokio::join!(auth.stop(), auth.stop());
+        assert_eq!(
+            usize::from(first.is_err()) + usize::from(second.is_err()),
+            1
+        );
+        let error = first.err().or_else(|| second.err()).unwrap();
+        assert!(matches!(error, Error::ProxyAuthentication(message) if message == "worker failed"));
+        auth.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_auth_signals_shutdown_and_allows_worker_cleanup() {
+        let (stop, mut stopped) = watch::channel(Stop::Running);
+        let (_status, status) = watch::channel(ProxyAuthStatus::Pending);
+        let (finished, cleanup) = oneshot::channel();
+        let auth = ProxyAuth {
+            stop,
+            task: Mutex::new(Some(tokio::spawn(async move {
+                while *stopped.borrow_and_update() == Stop::Running {
+                    stopped.changed().await.unwrap();
+                }
+                finished.send(()).unwrap();
+                Ok(())
+            }))),
+            status,
+        };
+        drop(auth);
+        tokio::time::timeout(Duration::from_secs(1), cleanup)
+            .await
+            .expect("detached worker must finish cleanup")
+            .unwrap();
+    }
 }
 
 async fn recover_interception(session: &Session) {
