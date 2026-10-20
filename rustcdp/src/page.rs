@@ -20,6 +20,7 @@ mod lifecycle;
 pub(crate) use lifecycle::TargetKind;
 mod navigation;
 mod pdf;
+mod proxy;
 mod selectors;
 
 pub use capture::{ScreenshotBuilder, ScreenshotFormat};
@@ -42,6 +43,7 @@ pub use selectors::CountWaitOptions;
 pub struct Page {
     session: Session,
     target_kind: TargetKind,
+    pub(crate) auth: Option<std::sync::Arc<crate::proxy::ProxyAuth>>,
     close_state: std::sync::Arc<tokio::sync::Mutex<lifecycle::CloseState>>,
     _events: std::sync::Arc<[crate::session::DomainGuard; 2]>,
     worlds: execution_context::Worlds,
@@ -62,6 +64,7 @@ impl Page {
             session,
             target_kind,
             close_state: Default::default(),
+            auth: None,
             _events: std::sync::Arc::new([page_events, runtime_events]),
             worlds,
             context,
@@ -82,6 +85,7 @@ impl Page {
             session,
             target_kind: TargetKind::Tab,
             close_state: Default::default(),
+            auth: None,
             _events: std::sync::Arc::new(events),
             worlds,
             context: Some(context),

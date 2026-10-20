@@ -68,6 +68,7 @@ impl Page {
             if state.task.is_none() {
                 let session = self.session.clone();
                 let lease = self.context_lease.clone();
+                let auth = self.auth.clone();
                 let connection = session.connection().clone().with_command_timeout(None);
                 let id = self.id().clone();
                 state.task = Some(connection.runtime().spawn(async move {
@@ -75,6 +76,7 @@ impl Page {
                         .await
                         .unwrap_or_else(|_| Err(Error::Timeout(format!("closing page {id}"))));
                     drop(session);
+                    drop(auth);
                     drop(lease);
                     result
                 }));

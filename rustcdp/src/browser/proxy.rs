@@ -38,7 +38,7 @@ impl Browser {
             let mut browser = Self::launch(options).await?;
             match start_auth(&browser.page, proxy).await {
                 Ok(auth) => {
-                    browser.auth = auth;
+                    browser.page.auth = auth;
                     Ok(browser)
                 }
                 Err(error) => with_cleanup(Err(error), browser.close().await),
@@ -70,7 +70,7 @@ impl Browser {
             .await?;
             match start_auth(&context.page, proxy).await {
                 Ok(auth) => {
-                    context.auth = auth;
+                    context.page.auth = auth;
                     Ok(context)
                 }
                 Err(error) => with_cleanup(Err(error), context.close().await),
@@ -87,7 +87,7 @@ impl Browser {
 
     /// Worker status, or `None` when no credential worker is configured.
     pub fn proxy_auth_status(&self) -> Option<ProxyAuthStatus> {
-        self.auth.as_ref().map(ProxyAuth::status)
+        self.page.proxy_auth_status()
     }
 
     /// Wait for a successful request without an observed authentication failure.
@@ -95,27 +95,21 @@ impl Browser {
     /// `Authenticated` or `Unchallenged` status. Readiness does not prove proxy
     /// traversal or that supplied credentials were used.
     pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<Option<ProxyAuthStatus>> {
-        match &self.auth {
-            Some(auth) => auth.wait_ready(timeout).await.map(Some),
-            None => Ok(None),
-        }
+        self.page.wait_for_proxy_ready(timeout).await
     }
 
     /// Stop the initial page's authentication worker and await Fetch cleanup.
     /// Canceling the wait leaves cleanup running; call again to observe completion.
     /// The proxy route remains configured, so later requests may require credentials.
-    pub async fn stop_proxy_auth(&mut self) -> Result<()> {
-        if let Some(auth) = &mut self.auth {
-            auth.stop().await?;
-        }
-        Ok(())
+    pub async fn stop_proxy_auth(&self) -> Result<()> {
+        self.page.stop_proxy_auth().await
     }
 }
 
 impl BrowserContext {
     /// Worker status, or `None` when no credential worker is configured.
     pub fn proxy_auth_status(&self) -> Option<ProxyAuthStatus> {
-        self.auth.as_ref().map(ProxyAuth::status)
+        self.page.proxy_auth_status()
     }
 
     /// Wait for a successful request without an observed authentication failure.
@@ -123,28 +117,22 @@ impl BrowserContext {
     /// `Authenticated` or `Unchallenged` status. Readiness does not prove proxy
     /// traversal or that supplied credentials were used.
     pub async fn wait_for_proxy_ready(&self, timeout: Duration) -> Result<Option<ProxyAuthStatus>> {
-        match &self.auth {
-            Some(auth) => auth.wait_ready(timeout).await.map(Some),
-            None => Ok(None),
-        }
+        self.page.wait_for_proxy_ready(timeout).await
     }
 
     /// Stop the initial page's authentication worker and await Fetch cleanup.
     /// Canceling the wait leaves cleanup running; call again to observe completion.
     /// The proxy route remains configured, so later requests may require credentials.
-    pub async fn stop_proxy_auth(&mut self) -> Result<()> {
-        if let Some(auth) = &mut self.auth {
-            auth.stop().await?;
-        }
-        Ok(())
+    pub async fn stop_proxy_auth(&self) -> Result<()> {
+        self.page.stop_proxy_auth().await
     }
 }
 
-async fn start_auth(page: &Page, proxy: Proxy) -> Result<Option<ProxyAuth>> {
+async fn start_auth(page: &Page, proxy: Proxy) -> Result<Option<std::sync::Arc<ProxyAuth>>> {
     if proxy.requires_authentication() {
         ProxyAuth::start(page.session().clone(), proxy)
             .await
-            .map(Some)
+            .map(|auth| Some(std::sync::Arc::new(auth)))
     } else {
         Ok(None)
     }

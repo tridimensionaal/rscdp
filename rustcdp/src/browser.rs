@@ -21,7 +21,6 @@ pub struct Browser {
     connection: Connection,
     page: Page,
     process: Option<BrowserProcess>,
-    auth: Option<crate::proxy::ProxyAuth>,
     shutdown: Option<tokio::task::JoinHandle<Result<()>>>,
     shutdown_complete: bool,
 }
@@ -42,7 +41,6 @@ impl Browser {
                 connection,
                 page,
                 process: Some(process),
-                auth: None,
                 shutdown: None,
                 shutdown_complete: false,
             }),
@@ -72,7 +70,6 @@ impl Browser {
                 connection,
                 page,
                 process: None,
-                auth: None,
                 shutdown: None,
                 shutdown_complete: false,
             }),
@@ -164,7 +161,7 @@ impl Browser {
         // including when the Browser itself is dropped while shutdown is running.
         let page = self.page.clone();
         let mut process = self.process.take();
-        let mut auth = self.auth.take();
+        let mut auth = self.page.auth.clone();
         self.shutdown = Some(self.connection.runtime().spawn(async move {
             let page_result = if let Some(lease) = &page.context_lease {
                 lease
@@ -196,9 +193,13 @@ impl Drop for Browser {
         } else if self.shutdown.is_none() && !self.shutdown_complete {
             // Preserve external connections and fallback leases retained by
             // dependent handles when explicit shutdown was never requested.
-            // Dropping the worker requests its owned Fetch cleanup rather than
-            // aborting it while dependent pages can still use the connection.
-            drop(self.auth.take());
+            // Request cleanup even when dependent pages retain the shared worker.
+            // The owned task finishes without aborting Fetch cleanup.
+            if let Some(auth) = self.page.auth.clone() {
+                self.connection.runtime().spawn(async move {
+                    let _ = auth.stop().await;
+                });
+            }
         }
         // Dropping a JoinHandle detaches the task; it does not abort shutdown.
     }

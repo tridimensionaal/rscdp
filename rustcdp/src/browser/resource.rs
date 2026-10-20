@@ -16,7 +16,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 struct Cleanup {
     gate: Mutex<()>,
     closed: AtomicBool,
-    pending_auth: std::sync::Mutex<Option<ProxyAuth>>,
+    pending_auth: std::sync::Mutex<Option<Arc<ProxyAuth>>>,
 }
 
 pub(crate) struct ContextLease {
@@ -42,7 +42,7 @@ impl ContextLease {
         self.close_with_auth(None).await?
     }
 
-    pub(super) fn close_with_auth(&self, auth: Option<ProxyAuth>) -> JoinHandle<Result<()>> {
+    pub(super) fn close_with_auth(&self, auth: Option<Arc<ProxyAuth>>) -> JoinHandle<Result<()>> {
         self.register_auth(auth);
         self.connection.runtime().spawn(dispose_context(
             self.connection.clone(),
@@ -51,7 +51,7 @@ impl ContextLease {
         ))
     }
 
-    pub(super) fn register_auth(&self, auth: Option<ProxyAuth>) {
+    pub(super) fn register_auth(&self, auth: Option<Arc<ProxyAuth>>) {
         // Transfer the context's auth owner before any cleanup task can race
         // for the gate. Retries with no auth must leave this pending owner intact.
         if let Some(auth) = auth {

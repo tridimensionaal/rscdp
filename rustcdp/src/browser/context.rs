@@ -28,7 +28,6 @@ use serde_json::Value;
 pub struct BrowserContext {
     lease: Option<ContextLease>,
     pub(super) page: Page,
-    pub(super) auth: Option<crate::proxy::ProxyAuth>,
 }
 
 impl BrowserContext {
@@ -86,7 +85,6 @@ impl BrowserContext {
             Ok(page) => Ok(Self {
                 lease: Some(lease.expect("context ownership precedes page creation")),
                 page: page.with_command_timeout(connection.command_timeout()),
-                auth: None,
             }),
             Err(error) => {
                 if let Some(lease) = lease {
@@ -156,7 +154,7 @@ impl BrowserContext {
     pub(super) fn into_owned_page(mut self) -> Page {
         let mut page = self.page.clone();
         let lease = self.lease.take().expect("context owns its lease");
-        lease.register_auth(self.auth.take());
+        lease.register_auth(self.page.auth.clone());
         page.context_lease = Some(std::sync::Arc::new(lease));
         page
     }
@@ -174,7 +172,7 @@ impl BrowserContext {
     /// connection teardown after an uncertain timeout can take additional time.
     pub async fn close(&mut self) -> Result<()> {
         if let Some(lease) = &self.lease {
-            lease.close_with_auth(self.auth.take()).await?
+            lease.close_with_auth(self.page.auth.clone()).await?
         } else {
             Ok(())
         }
@@ -184,7 +182,7 @@ impl BrowserContext {
 impl Drop for BrowserContext {
     fn drop(&mut self) {
         if let Some(lease) = &self.lease {
-            lease.register_auth(self.auth.take());
+            lease.register_auth(self.page.auth.clone());
         }
     }
 }
