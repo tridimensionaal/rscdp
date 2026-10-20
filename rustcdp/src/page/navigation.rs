@@ -1,13 +1,22 @@
 use super::Page;
 use crate::{
     Error, Result,
-    cdp::page::{
-        commands::{GetNavigationHistory, NavigateResponse},
-        events::{FrameNavigated, LifecycleEvent},
+    cdp::{
+        network::LoaderId,
+        page::{
+            FrameId,
+            commands::{GetFrameTree, GetNavigationHistory, NavigateResponse},
+            events::{
+                FrameDetached, FrameNavigated, FrameStartedNavigating, LifecycleEvent,
+                NavigatedWithinDocument,
+            },
+        },
     },
+    connection::{EventOptions, EventStream, RawEvent},
 };
 use serde_json::json;
 use std::time::Duration;
+use tokio::time::Instant;
 
 /// The milestone to observe for the document created by a navigation.
 ///
@@ -22,6 +31,290 @@ pub enum WaitUntil {
     /// The requested document has fired `load`.
     #[default]
     Load,
+}
+
+/// Configure observation before a click, key press, or history command.
+/// Defaults to [`WaitUntil::Load`] and one 30-second budget starting at prepare.
+/// Construction has no protocol side effects.
+#[must_use = "call prepare().await before performing the action"]
+pub struct NavigationObserverBuilder<'a> {
+    page: &'a Page,
+    wait_until: WaitUntil,
+    timeout: Duration,
+}
+
+/// One navigation observed after preparation, not proof of what caused it.
+#[derive(Debug, Clone)]
+pub struct ObservedNavigation {
+    /// The root frame captured during preparation.
+    pub frame_id: FrameId,
+    /// The selected document's loader, or None for same-document navigation.
+    pub loader_id: Option<LoaderId>,
+    /// URL from the selected commit or same-document event, including its fragment.
+    pub url: String,
+}
+
+/// An armed observer retaining its Page and exact-session event subscription.
+///
+/// The first qualifying root commit or same-document event is selected. Another
+/// script or a navigation already in flight can win; there is no action ID in CDP
+/// events. This does not prove that the action between prepare and wait caused it.
+/// No navigation or action is retried.
+#[must_use = "perform the action, then call wait().await"]
+pub struct PreparedNavigation<'a> {
+    _page: &'a Page,
+    events: EventStream,
+    frame_id: FrameId,
+    baseline_loader: LoaderId,
+    wait_until: WaitUntil,
+    deadline: Instant,
+}
+
+const OBSERVATION_METHODS: [&str; 5] = [
+    "Page.frameNavigated",
+    "Page.navigatedWithinDocument",
+    "Page.lifecycleEvent",
+    "Page.frameDetached",
+    "Page.frameStartedNavigating",
+];
+
+enum ObservationEvent {
+    Commit(Box<FrameNavigated>),
+    SameDocument(NavigatedWithinDocument),
+    Lifecycle(LifecycleEvent),
+    Detached(FrameDetached),
+    Started(FrameStartedNavigating),
+}
+
+impl ObservationEvent {
+    fn decode(event: RawEvent) -> Result<Self> {
+        match event.method.as_str() {
+            "Page.frameNavigated" => crate::error::decode(&event.method, event.params)
+                .map(|event| Self::Commit(Box::new(event))),
+            "Page.navigatedWithinDocument" => {
+                crate::error::decode(&event.method, event.params).map(Self::SameDocument)
+            }
+            "Page.lifecycleEvent" => {
+                crate::error::decode(&event.method, event.params).map(Self::Lifecycle)
+            }
+            "Page.frameDetached" => {
+                crate::error::decode(&event.method, event.params).map(Self::Detached)
+            }
+            "Page.frameStartedNavigating" => {
+                crate::error::decode(&event.method, event.params).map(Self::Started)
+            }
+            _ => Err(Error::UnexpectedResponse {
+                method: event.method,
+                payload: event.params,
+            }),
+        }
+    }
+
+    fn changes_root(&self, root: &FrameId) -> bool {
+        match self {
+            Self::Commit(event) => event.frame.id == *root || event.frame.parent_id.is_none(),
+            Self::SameDocument(event) => event.frame_id == *root,
+            Self::Detached(event) => event.frame_id == *root,
+            Self::Started(event) => event.frame_id == *root,
+            Self::Lifecycle(_) => false,
+        }
+    }
+}
+
+fn observation_timeout() -> Error {
+    Error::Timeout("observing prepared navigation".into())
+}
+
+fn check_observation_deadline(deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        return Err(observation_timeout());
+    }
+    Ok(())
+}
+
+impl<'a> NavigationObserverBuilder<'a> {
+    pub fn wait_until(mut self, milestone: WaitUntil) -> Self {
+        self.wait_until = milestone;
+        self
+    }
+
+    /// Set one budget for preparation, intervening action time, and waiting.
+    /// Zero expires before setup; an unrepresentable deadline is invalid.
+    /// The observer cannot preempt an action awaited outside its own future.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Register one ordered stream before lifecycle setup and the frame snapshot.
+    ///
+    /// Visible root navigation during setup is an error, not a new baseline.
+    /// This conservative check is not an atomic browser-side barrier: an earlier
+    /// in-flight navigation can still become the first event after preparation.
+    /// Shorter session command deadlines still apply. Lifecycle reporting remains
+    /// enabled for other listeners after this observer is dropped.
+    pub async fn prepare(self) -> Result<PreparedNavigation<'a>> {
+        let deadline = Instant::now().checked_add(self.timeout).ok_or_else(|| {
+            Error::InvalidArgument("navigation timeout exceeds the monotonic deadline range".into())
+        })?;
+        check_observation_deadline(deadline)?;
+        let prepared = tokio::time::timeout_at(deadline, async {
+            let mut events = self
+                .page
+                .session
+                .subscribe_with(EventOptions::default().methods(OBSERVATION_METHODS))?;
+            if self.wait_until != WaitUntil::Commit {
+                self.page
+                    .session
+                    .execute_raw("Page.setLifecycleEventsEnabled", json!({"enabled": true}))
+                    .await?;
+            }
+            let root = self
+                .page
+                .session
+                .execute(&GetFrameTree::default())
+                .await?
+                .frame_tree
+                .frame;
+            loop {
+                check_observation_deadline(deadline)?;
+                let Some(event) = events.try_recv()? else {
+                    break;
+                };
+                if ObservationEvent::decode(event)?.changes_root(&root.id) {
+                    return Err(Error::Navigation(
+                        "root navigation changed during preparation".into(),
+                    ));
+                }
+            }
+            Ok(PreparedNavigation {
+                _page: self.page,
+                events,
+                frame_id: root.id,
+                baseline_loader: root.loader_id,
+                wait_until: self.wait_until,
+                deadline,
+            })
+        })
+        .await
+        .map_err(|_| observation_timeout())??;
+        check_observation_deadline(deadline)?;
+        Ok(prepared)
+    }
+}
+
+impl PreparedNavigation<'_> {
+    /// The shared deadline; use with `tokio::time::timeout_at` to bound the action too.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// Observe the first root navigation after preparation within the original budget.
+    ///
+    /// A commit must have a nonempty loader different from the baseline. Load
+    /// milestones must follow that commit in stream order and match its frame
+    /// and loader. Subframes, old-loader loads, and pre-commit lifecycle events
+    /// never satisfy the wait. Same-document events complete at every milestone.
+    /// A different root commit or same-document event before the selected
+    /// milestone is a supersession error; root detachment/replacement also fails.
+    /// Later events do not revoke a milestone already observed in stream order.
+    ///
+    /// Events buffered during the action are retained, but an expired budget
+    /// cannot return success. Lost events, decode errors and session closure
+    /// propagate. A download, aborted navigation, or restoration without the
+    /// requested lifecycle event may time out. Prefer Commit for BFCache history.
+    /// HTTP status is not checked; success does not promise application readiness.
+    ///
+    /// Cancellation or Drop only stops observation; it does not undo the action,
+    /// stop loading, disable events, detach the session, or close the page.
+    pub async fn wait(mut self) -> Result<ObservedNavigation> {
+        let deadline = self.deadline;
+        check_observation_deadline(deadline)?;
+        let observed = tokio::time::timeout_at(deadline, async {
+            let mut selected: Option<ObservedNavigation> = None;
+            loop {
+                check_observation_deadline(deadline)?;
+                match ObservationEvent::decode(self.events.recv().await?)? {
+                    ObservationEvent::Commit(event) => {
+                        if event.frame.id != self.frame_id {
+                            if event.frame.parent_id.is_none() {
+                                return Err(Error::Navigation(
+                                    "root frame replaced during navigation observation".into(),
+                                ));
+                            }
+                            continue;
+                        }
+                        if event.frame.parent_id.is_some() || event.frame.loader_id.0.is_empty() {
+                            return Err(Error::Navigation(
+                                "root commit has no usable document identity".into(),
+                            ));
+                        }
+                        if let Some(current) = &selected {
+                            if current.loader_id.as_ref() != Some(&event.frame.loader_id) {
+                                return Err(Error::Navigation(
+                                    "observed navigation was superseded".into(),
+                                ));
+                            }
+                            continue;
+                        }
+                        if event.frame.loader_id == self.baseline_loader {
+                            continue;
+                        }
+                        let navigation = ObservedNavigation {
+                            frame_id: event.frame.id,
+                            loader_id: Some(event.frame.loader_id),
+                            url: format!(
+                                "{}{}",
+                                event.frame.url,
+                                event.frame.url_fragment.unwrap_or_default()
+                            ),
+                        };
+                        if self.wait_until == WaitUntil::Commit {
+                            return Ok(navigation);
+                        }
+                        selected = Some(navigation);
+                    }
+                    ObservationEvent::SameDocument(event) if event.frame_id == self.frame_id => {
+                        if selected.is_some() {
+                            return Err(Error::Navigation(
+                                "observed navigation was superseded by same-document navigation"
+                                    .into(),
+                            ));
+                        }
+                        return Ok(ObservedNavigation {
+                            frame_id: event.frame_id,
+                            loader_id: None,
+                            url: event.url,
+                        });
+                    }
+                    ObservationEvent::Lifecycle(event) => {
+                        if let Some(current) = &selected {
+                            let name = match self.wait_until {
+                                WaitUntil::DomContentLoaded => "DOMContentLoaded",
+                                _ => "load",
+                            };
+                            if event.frame_id == self.frame_id
+                                && current.loader_id.as_ref() == Some(&event.loader_id)
+                                && event.name == name
+                            {
+                                return Ok(selected.take().expect("selected navigation"));
+                            }
+                        }
+                    }
+                    ObservationEvent::Detached(event) if event.frame_id == self.frame_id => {
+                        return Err(Error::Navigation(
+                            "root frame detached during navigation observation".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| observation_timeout())??;
+        check_observation_deadline(deadline)?;
+        Ok(observed)
+    }
 }
 
 /// A navigation request, defaulting to [`WaitUntil::Load`] and 30 seconds.
@@ -120,6 +413,33 @@ impl NavigationBuilder<'_> {
 }
 
 impl Page {
+    /// Prepare to observe navigation before performing a click, Enter, or history action.
+    /// Observe the first qualifying root navigation, not proven action causality.
+    ///
+    /// ```no_run
+    /// # async fn example(page: &rustcdp::Page) -> rustcdp::Result<()> {
+    /// use rustcdp::page::WaitUntil;
+    /// let navigation = page.expect_navigation()
+    ///     .wait_until(WaitUntil::Commit)
+    ///     .prepare().await?;
+    /// // For click or Enter, perform that action here instead.
+    /// if !page.start_go_back().await? {
+    ///     drop(navigation); // No preceding history entry: nothing to wait for.
+    ///     return Ok(());
+    /// }
+    /// let observed = navigation.wait().await?;
+    /// println!("Observed {}", observed.url);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn expect_navigation(&self) -> NavigationObserverBuilder<'_> {
+        NavigationObserverBuilder {
+            page: self,
+            wait_until: WaitUntil::default(),
+            timeout: Duration::from_secs(30),
+        }
+    }
+
     /// Configure navigation, defaulting to the document's load event and 30 seconds.
     ///
     /// ```no_run

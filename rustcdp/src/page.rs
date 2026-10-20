@@ -29,7 +29,9 @@ pub use element::{ClickMethod, ClickOptions, Element, ElementPosition};
 pub use evaluation::{EvaluationBuilder, EvaluationWorld, RemoteValue};
 pub use frame::Frame;
 pub use input::KeyModifiers;
-pub use navigation::{NavigationBuilder, WaitUntil};
+pub use navigation::{
+    NavigationBuilder, NavigationObserverBuilder, ObservedNavigation, PreparedNavigation, WaitUntil,
+};
 pub use pdf::PdfBuilder;
 pub use selectors::CountWaitOptions;
 
