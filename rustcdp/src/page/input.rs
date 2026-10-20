@@ -42,6 +42,13 @@ impl Page {
     }
 
     /// Dispatch a press/release pair that continues after caller cancellation.
+    ///
+    /// The key is a literal logical key, not a physical keyboard-layout mapping.
+    /// Shift does not uppercase character text: pass `"A"` with Shift for an
+    /// uppercase A. Control, Meta, or Alt suppress the text payload while leaving
+    /// the supplied key unchanged. For arbitrary text use [`Self::insert_text`];
+    /// for physical-key sequences use the typed Input commands.
+    ///
     /// Each command has its own deadline, capped at 30 seconds while preserving
     /// a shorter handle deadline. Release is attempted even if pressing fails.
     pub async fn press_key_with_modifiers(&self, key: &str, modifiers: KeyModifiers) -> Result<()> {
@@ -278,6 +285,15 @@ async fn dispatch_pair(
 }
 
 impl Page {
+    /// Click a point in CSS pixels relative to the target's viewport.
+    ///
+    /// [`ClickMethod::Cdp`] sends a left-button press/release pair, without a
+    /// preceding mouse move. [`ClickMethod::JavaScript`] finds the node with
+    /// `document.elementFromPoint` and dispatches an untrusted, bubbling,
+    /// cancelable `MouseEvent("click")` in the isolated world. It does not invoke
+    /// the node's `click()` method or send pointer input; cancellation of the
+    /// synthetic event is not reported as an error. No node at the point is a
+    /// JavaScript error. Neither method waits for navigation or retries input.
     pub async fn click_position(&self, x: f64, y: f64, method: ClickMethod) -> Result<()> {
         if !x.is_finite() || !y.is_finite() {
             return Err(Error::InvalidArgument(
@@ -293,11 +309,25 @@ impl Page {
         }
     }
 
+    /// Schedule a diagnostic flash centered at viewport CSS-pixel coordinates.
+    /// `size` is its initial diameter in CSS pixels and must be positive and finite;
+    /// coordinates must also be finite. Completion means the animation and removal
+    /// timer were scheduled, not that the animation finished or the marker vanished.
+    /// This is a visual diagnostic, not a readiness or interaction barrier.
+    ///
+    /// Duration is rounded down to whole milliseconds, including zero for sub-ms
+    /// values. Values exceeding `i32::MAX` whole milliseconds return
+    /// [`Error::InvalidArgument`] before JavaScript runs, avoiding timer overflow.
     pub async fn flash_point(&self, x: f64, y: f64, duration: Duration, size: f64) -> Result<()> {
         if !x.is_finite() || !y.is_finite() || !size.is_finite() || size <= 0.0 {
             return Err(Error::InvalidArgument("invalid flash geometry".into()));
         }
         let millis = duration.as_millis();
+        if millis > i32::MAX as u128 {
+            return Err(Error::InvalidArgument(
+                "flash duration exceeds i32::MAX milliseconds".into(),
+            ));
+        }
         self.evaluate(format!("(() => {{ const d = document.createElement('div'); Object.assign(d.style, {{position:'fixed',pointerEvents:'none',zIndex:2147483647,left:'{}px',top:'{}px',width:'{size}px',height:'{size}px',borderRadius:'50%',background:'red'}}); document.documentElement.appendChild(d); d.animate([{{opacity:1,transform:'scale(1)'}},{{opacity:0,transform:'scale(3)'}}],{{duration:{millis}}}); setTimeout(() => d.remove(), {millis}); }})()",x-size/2.0,y-size/2.0)).world(super::EvaluationWorld::Isolated).run().await?;
         Ok(())
     }

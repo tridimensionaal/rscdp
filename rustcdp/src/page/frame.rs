@@ -28,6 +28,9 @@ fn find<'a>(tree: &'a FrameTree, id: &FrameId) -> Option<&'a FrameTree> {
 
 impl Page {
     /// Attach to an out-of-process frame target owned by this page, not another tab.
+    /// `index` is zero-based in the filtered enumeration of owned OOPIF targets
+    /// returned by CDP. This order is not DOM child order and may change between
+    /// calls; the index is not a stable frame identity.
     /// For same-process frames use [`Self::main_frame`] or [`Self::frames`].
     /// After target selection, an owned task retains the parent Page through attach
     /// and domain setup, even if the caller cancels or its handle timeout expires.
