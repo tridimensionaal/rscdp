@@ -34,6 +34,16 @@ pub struct DomainGuard {
     runtime: tokio::runtime::Handle,
 }
 
+impl std::fmt::Debug for DomainGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DomainGuard")
+            .field("domain", &METHODS[self.index].0.trim_end_matches(".enable"))
+            .field("active", &self.active)
+            .field("session", &self.session)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Session {
     /// Enable DOM until the last shared guard is released.
     /// Retain the guard while using the domain; subscribe before enabling events.

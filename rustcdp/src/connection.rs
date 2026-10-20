@@ -245,6 +245,16 @@ impl Drop for Inner {
 #[derive(Clone)]
 pub struct Connection(Arc<Inner>, Option<Duration>);
 
+impl std::fmt::Debug for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connection")
+            .field("request_channel_closed", &self.0.requests.is_closed())
+            .field("command_timeout", &self.1)
+            .field("event_capacity", &self.0.event_capacity)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Connection {
     /// Connect to a ws/wss endpoint or discover it via HTTP(S) `/json/version`.
     pub async fn connect(endpoint: &str) -> Result<Self> {
@@ -776,6 +786,26 @@ pub struct EventStream {
     closed: watch::Receiver<CloseState>,
     session: Option<(String, watch::Receiver<bool>)>,
     _attachment: Option<Arc<Attachment>>,
+}
+
+impl std::fmt::Debug for EventStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventStream")
+            .field("session_id", &self.session.as_ref().map(|(id, _)| id))
+            .field(
+                "connection_watch_closed",
+                &self.closed.has_changed().is_err(),
+            )
+            .field(
+                "session_watch_closed",
+                &self
+                    .session
+                    .as_ref()
+                    .map(|(_, closed)| closed.has_changed().is_err()),
+            )
+            .field("owns_attachment", &self._attachment.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl EventStream {

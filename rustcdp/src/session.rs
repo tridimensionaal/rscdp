@@ -34,6 +34,17 @@ pub struct Session {
     dom_transaction: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("target_id", &self.target)
+            .field("session_watch_closed", &self.closed.has_changed().is_err())
+            .field("connection", &self.connection)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Connection {
     /// Attach with shared ownership: the last session handle or session listener
     /// schedules detachment.
@@ -335,6 +346,15 @@ impl Session {
 pub struct TypedEvents<E> {
     stream: EventStream,
     marker: PhantomData<E>,
+}
+
+impl<E: Event> std::fmt::Debug for TypedEvents<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypedEvents")
+            .field("method", &E::METHOD)
+            .field("stream", &self.stream)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<E: Event> TypedEvents<E> {
