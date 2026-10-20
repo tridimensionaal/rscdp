@@ -71,10 +71,11 @@ pub use session::Session;
 /// and chainable `with_*` setters for optional fields. Protocol descriptions and
 /// experimental/deprecated status come from the pinned schema.
 ///
-/// Enums contain only values in the pinned schema. A different browser version
-/// can return new variants or shapes that fail typed deserialization even after
-/// a successful CDP exchange. Use [`Connection::execute_raw`] or
-/// [`Session::execute_raw`] to inspect such responses without typed decoding.
+/// Protocol enums are non-exhaustive and preserve unknown wire strings in
+/// `Unrecognized(String)`. Their `as_str()` method returns the original wire value.
+/// Other schema changes can still cause typed decoding to fail after a successful
+/// CDP exchange. [`Error::Decode`] preserves the received payload; use
+/// [`Connection::execute_raw`] or [`Session::execute_raw`] for untyped responses.
 #[allow(clippy::large_enum_variant)]
 pub mod cdp {
     include!(concat!(env!("OUT_DIR"), "/cdp.rs"));

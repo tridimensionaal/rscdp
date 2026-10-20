@@ -20,9 +20,11 @@ implement `protocol::Event`. Optional properties are omitted when `None`.
 Identifiers use transparent newtypes. Cyclic inline object references are boxed;
 arrays use `Vec` as their indirection. Unstructured objects and `any` retain JSON.
 
-Generated types reflect this exact snapshot. Enums are closed: unknown enum
-strings from newer browsers cause typed deserialization errors. Use
-`Connection::execute_raw` or `Session::execute_raw` to work with JSON responses
-outside the generated schema.
+Generated types reflect this snapshot. Protocol enums are non-exhaustive and
+preserve unknown strings in `Unrecognized(String)`, including when serialized
+again. `as_str()` returns the wire value for both known and unknown variants.
+Other incompatible response shapes can still fail typed decoding;
+`Error::Decode` retains the received payload. Use `Connection::execute_raw` or
+`Session::execute_raw` to work with untyped JSON responses.
 
 Upstream: https://github.com/ChromeDevTools/devtools-protocol (BSD-3-Clause).
