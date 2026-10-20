@@ -89,7 +89,7 @@ impl ConnectionOptions {
             .map_err(|_| Error::Timeout("connecting to CDP".into()))?
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         for (name, duration) in [
             ("connect_timeout", self.connect_timeout),
             ("write_timeout", self.write_timeout),

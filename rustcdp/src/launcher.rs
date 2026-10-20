@@ -31,6 +31,16 @@ fn startup_remaining(deadline: Instant, stage: &str) -> Result<Duration> {
         .ok_or_else(|| Error::Timeout(format!("starting Chrome: {stage}")))
 }
 
+pub(crate) fn validated_profile_prefix(options: &LaunchOptions) -> Result<&str> {
+    let prefix = options.dir_prefix.as_deref().unwrap_or("tmp");
+    if options.profile_dir.is_none() && prefix.contains(['/', '\\']) {
+        return Err(Error::InvalidArgument(
+            "profile prefix must not contain path separators".into(),
+        ));
+    }
+    Ok(prefix)
+}
+
 fn lock_profile(profile: &Path) -> std::io::Result<File> {
     let name = profile.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -88,7 +98,7 @@ fn fresh_endpoint(contents: &[u8], previous: Option<&[u8]>) -> Option<String> {
     Some(endpoint)
 }
 
-/// Chrome executable, arguments, profile location, and startup deadline.
+/// Chrome executable, arguments, profile location, startup deadline, and connection settings.
 /// The launcher selects a debugging port through Chrome and spawns at most one
 /// child per invocation. Use [`crate::Browser::connect`] for
 /// an existing fixed endpoint. Headless mode is not enabled automatically.
@@ -117,6 +127,11 @@ pub struct LaunchOptions {
     /// budget, so returning can take longer. Caller cancellation uses Drop
     /// cleanup. Browser's subsequent initial-page setup has independent bounds.
     pub startup_timeout: Duration,
+    /// Transport limits and initial command timeout; defaults to [`ConnectionOptions::default`].
+    /// Validated before launch I/O. The handshake uses the smaller of its connect
+    /// timeout and the remaining startup budget. PID verification uses the startup
+    /// deadline; the returned connection retains the configured command timeout.
+    pub connection_options: ConnectionOptions,
 }
 
 impl Default for LaunchOptions {
@@ -128,6 +143,7 @@ impl Default for LaunchOptions {
             base_temp_dir: std::env::temp_dir(),
             dir_prefix: None,
             startup_timeout: Duration::from_secs(15),
+            connection_options: ConnectionOptions::default(),
         }
     }
 }
@@ -150,15 +166,11 @@ pub struct BrowserProcess {
 impl BrowserProcess {
     pub async fn launch(options: LaunchOptions) -> Result<(Self, Connection)> {
         let deadline = startup_deadline(options.startup_timeout)?;
+        options.connection_options.validate()?;
         for arg in &options.args {
             args::validated_switch_name(arg)?;
         }
-        let prefix = options.dir_prefix.as_deref().unwrap_or("tmp");
-        if options.profile_dir.is_none() && prefix.contains(['/', '\\']) {
-            return Err(Error::InvalidArgument(
-                "profile prefix must not contain path separators".into(),
-            ));
-        }
+        let prefix = validated_profile_prefix(&options)?;
         // Owners stay outside timed work: an ordinary failure awaits cleanup,
         // while cancellation still reaches their Drop fallbacks.
         let mut process = Self {
@@ -264,7 +276,9 @@ impl BrowserProcess {
                     };
                     if let Some(endpoint) = endpoint {
                         let remaining = startup_remaining(deadline, "connecting to endpoint")?;
-                        match ConnectionOptions::default().connect_timeout(remaining).connect(&endpoint).await {
+                        match options.connection_options.clone()
+                            .connect_timeout(options.connection_options.connect_timeout.min(remaining))
+                            .connect(&endpoint).await {
                             Ok(connection) => {
                                 // Retain the connection outside this timed future
                                 // before any PID verification await can expire.

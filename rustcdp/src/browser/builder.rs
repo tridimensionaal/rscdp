@@ -1,7 +1,10 @@
 use super::Browser;
 use crate::{
     Error, Result,
-    launcher::{LaunchOptions, args::validated_switch_name, startup_deadline},
+    connection::ConnectionOptions,
+    launcher::{
+        LaunchOptions, args::validated_switch_name, startup_deadline, validated_profile_prefix,
+    },
 };
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
@@ -20,6 +23,8 @@ use std::{ffi::OsString, path::PathBuf, time::Duration};
 /// | [`executable`](Self::executable) | Discover Chrome / `CHROME_PATH` | — |
 /// | [`profile_dir`](Self::profile_dir) | Temporary profile | `--user-data-dir` |
 /// | [`startup_timeout`](Self::startup_timeout) | 15 seconds total process startup | — |
+/// | [`connection_options`](Self::connection_options) | [`ConnectionOptions::default`] | — |
+/// | [`command_timeout`](Self::command_timeout) | Some(30 seconds) | — |
 /// | [`base_temp_dir`](Self::base_temp_dir) | OS temporary directory | — |
 /// | [`dir_prefix`](Self::dir_prefix) | `tmp` | — |
 ///
@@ -81,6 +86,22 @@ impl BrowserBuilder {
         self
     }
 
+    /// Replace all connection settings, including any earlier command timeout.
+    /// Limits are validated before launch I/O. The handshake timeout is capped by
+    /// the remaining startup budget; PID verification uses the startup deadline.
+    pub fn connection_options(mut self, options: ConnectionOptions) -> Self {
+        self.options.connection_options = options;
+        self
+    }
+
+    /// Set the initial connection's command timeout, preserving its other settings.
+    /// None disables caller command deadlines, not startup, transport, or owned
+    /// acquisition/cleanup bounds. A later `connection_options` call replaces this.
+    pub fn command_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.options.connection_options.command_timeout = timeout;
+        self
+    }
+
     /// Set the parent directory for temporary profiles.
     /// Defaults to [`std::env::temp_dir`].
     /// Ignored when [`Self::profile_dir`] supplies a persistent profile.
@@ -90,7 +111,8 @@ impl BrowserBuilder {
     }
 
     /// Set the temporary-profile prefix. Defaults to `tmp`; empty is allowed.
-    /// Path separators are rejected when creating a temporary profile.
+    /// Path separators are rejected by build and launch for temporary profiles.
+    /// Ignored when a persistent profile is configured.
     pub fn dir_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.options.dir_prefix = Some(prefix.into());
         self
@@ -118,10 +140,13 @@ impl BrowserBuilder {
     /// launcher flags, the `--` terminator, and raw flags duplicating explicitly
     /// set typed options. Switch checks account for surrounding whitespace and
     /// Windows switch spelling; the original arguments are preserved.
-    /// Also rejects zero or unrepresentable startup deadlines. Validation does
+    /// Also validates connection limits and temporary-profile prefixes, and
+    /// rejects zero or unrepresentable startup deadlines. Validation does
     /// not start the countdown; launch revalidates and starts its own deadline.
     pub fn build(mut self) -> Result<LaunchOptions> {
         startup_deadline(self.options.startup_timeout)?;
+        self.options.connection_options.validate()?;
+        validated_profile_prefix(&self.options)?;
         if matches!(self.window_size, Some((0, _)) | Some((_, 0))) {
             return Err(Error::InvalidArgument(
                 "window dimensions must be positive".into(),
