@@ -457,6 +457,36 @@ fn event_failure(failure: &watch::Receiver<Option<&'static str>>) -> Error {
     )
 }
 
+async fn recover_interception(session: &Session) {
+    if session.is_closed() {
+        return;
+    }
+    let closed = tokio::time::timeout(
+        Duration::from_secs(1),
+        session.connection().execute_raw(
+            "Target.closeTarget",
+            json!({"targetId":session.target_id()}),
+        ),
+    )
+    .await;
+    if matches!(closed, Ok(Ok(ref value)) if value["success"] == true) || session.is_closed() {
+        return;
+    }
+    if matches!(
+        tokio::time::timeout(
+            DRAIN_TIMEOUT,
+            session.execute_raw("Fetch.disable", json!({}))
+        )
+        .await,
+        Ok(Ok(_))
+    ) || session.is_closed()
+    {
+        return;
+    }
+    // Last resort: detach the failed session and dispose disposeOnDetach contexts.
+    session.connection().close().await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,34 +544,4 @@ mod tests {
             .expect("detached worker must finish cleanup")
             .unwrap();
     }
-}
-
-async fn recover_interception(session: &Session) {
-    if session.is_closed() {
-        return;
-    }
-    let closed = tokio::time::timeout(
-        Duration::from_secs(1),
-        session.connection().execute_raw(
-            "Target.closeTarget",
-            json!({"targetId":session.target_id()}),
-        ),
-    )
-    .await;
-    if matches!(closed, Ok(Ok(ref value)) if value["success"] == true) || session.is_closed() {
-        return;
-    }
-    if matches!(
-        tokio::time::timeout(
-            DRAIN_TIMEOUT,
-            session.execute_raw("Fetch.disable", json!({}))
-        )
-        .await,
-        Ok(Ok(_))
-    ) || session.is_closed()
-    {
-        return;
-    }
-    // Last resort: detach the failed session and dispose disposeOnDetach contexts.
-    session.connection().close().await;
 }
