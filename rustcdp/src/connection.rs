@@ -25,6 +25,28 @@ pub use events::{EventOptions, EventScope};
 // None is running; a terminal value distinguishes normal close from failure.
 type CloseState = Option<std::result::Result<(), Arc<Error>>>;
 
+enum ActorTask {
+    Running(tokio::task::JoinHandle<()>),
+    Finished { failed: bool },
+}
+
+impl ActorTask {
+    async fn wait(&mut self, closed: &watch::Receiver<CloseState>) -> Result<()> {
+        if let Self::Running(task) = self {
+            // Keep the handle in place until completion so cancellation can resume.
+            let failed = task.await.is_err();
+            *self = Self::Finished { failed };
+        }
+        match &*closed.borrow() {
+            Some(Err(cause)) => Err(Error::ConnectionFailed(cause.clone())),
+            Some(Ok(())) if matches!(self, Self::Finished { failed: false }) => Ok(()),
+            _ => Err(Error::ConnectionClosed(
+                "connection actor stopped unexpectedly".into(),
+            )),
+        }
+    }
+}
+
 fn close_error(state: &CloseState) -> Error {
     match state {
         Some(Err(cause)) => Error::ConnectionFailed(cause.clone()),
@@ -73,7 +95,7 @@ struct Inner {
     event_capacity: usize,
     shutdown: watch::Sender<bool>,
     closed: watch::Receiver<CloseState>,
-    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: tokio::sync::Mutex<ActorTask>,
     permits: Semaphore,
     sessions: SessionRegistry,
     subscriptions: Subscriptions,
@@ -418,7 +440,7 @@ impl Connection {
                 event_capacity: options.event_capacity,
                 shutdown,
                 closed,
-                task: tokio::sync::Mutex::new(Some(task)),
+                task: tokio::sync::Mutex::new(ActorTask::Running(task)),
                 permits: Semaphore::new(options.max_in_flight),
                 sessions,
                 subscriptions,
@@ -727,14 +749,18 @@ impl Connection {
         self.0.shutdown.send_replace(true);
     }
 
+    /// Observe actor termination, including transport teardown, without requesting shutdown.
+    /// Normal closure returns Ok; recorded failures retain their shared cause.
+    /// Unexpected actor termination without a recorded failure returns ConnectionClosed.
+    /// Concurrent and repeated observers share completion. Canceling this wait is harmless.
+    pub async fn closed(&self) -> Result<()> {
+        self.0.task.lock().await.wait(&self.0.closed).await
+    }
+
     /// Disconnect and await transport teardown. A canceled wait can be resumed.
     pub async fn close(&self) {
         self.signal_shutdown();
-        let mut task = self.0.task.lock().await;
-        if let Some(pending) = &mut *task {
-            let _ = pending.await;
-            *task = None;
-        }
+        let _ = self.closed().await;
     }
 }
 
@@ -831,6 +857,66 @@ impl EventStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn actor_observer_waits_for_teardown_and_survives_cancellation() {
+        let (published, closed) = watch::channel(Some(Ok(())));
+        let (finish, teardown) = oneshot::channel::<()>();
+        let task = tokio::sync::Mutex::new(ActorTask::Running(tokio::spawn(async move {
+            let _published = published;
+            teardown.await.unwrap();
+        })));
+        {
+            let mut guard = task.lock().await;
+            tokio::select! {
+                biased;
+                _ = guard.wait(&closed) => panic!("publication must not complete the observer"),
+                _ = std::future::ready(()) => {},
+            }
+            assert!(matches!(*guard, ActorTask::Running(_)));
+        }
+        finish.send(()).unwrap();
+        let observe = || async { task.lock().await.wait(&closed).await };
+        let (first, second) = tokio::join!(observe(), observe());
+        first.unwrap();
+        second.unwrap();
+        observe().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn actor_observer_retains_recorded_failure_over_join_failure() {
+        let cause = Arc::new(Error::Timeout("transport write".into()));
+        let (published, closed) = watch::channel(Some(Err(cause.clone())));
+        let mut task = ActorTask::Running(tokio::spawn(async move {
+            drop(published);
+            panic!("actor teardown panic");
+        }));
+        for _ in 0..2 {
+            assert!(matches!(task.wait(&closed).await,
+                Err(Error::ConnectionFailed(actual)) if Arc::ptr_eq(&actual, &cause)));
+        }
+    }
+
+    #[tokio::test]
+    async fn actor_observer_rejects_panic_after_normal_publication_and_lost_publication() {
+        let (published, closed) = watch::channel(Some(Ok(())));
+        let mut task = ActorTask::Running(tokio::spawn(async move {
+            drop(published);
+            panic!("actor teardown panic");
+        }));
+        for _ in 0..2 {
+            assert!(matches!(
+                task.wait(&closed).await,
+                Err(Error::ConnectionClosed(_))
+            ));
+        }
+        let (published, closed) = watch::channel(None);
+        let mut task = ActorTask::Running(tokio::spawn(async move { drop(published) }));
+        assert!(matches!(
+            task.wait(&closed).await,
+            Err(Error::ConnectionClosed(_))
+        ));
+    }
 
     fn event(session: Option<&str>, method: &str) -> RawEvent {
         RawEvent {
