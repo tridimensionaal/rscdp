@@ -107,7 +107,7 @@ struct SessionEntry {
     target_id: Option<String>,
     closed: watch::Sender<bool>,
     auth_owner: Arc<std::sync::atomic::AtomicBool>,
-    domains: Arc<[tokio::sync::Mutex<usize>; 3]>,
+    domains: Arc<crate::session::Domains>,
     detach: Arc<tokio::sync::Mutex<()>>,
     dom_transaction: Arc<tokio::sync::Mutex<()>>,
     attachment: Weak<Attachment>,
@@ -137,7 +137,7 @@ pub(crate) struct SessionState {
     pub(crate) closed: watch::Receiver<bool>,
     pub(crate) target_id: Option<String>,
     pub(crate) auth_owner: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) domains: Arc<[tokio::sync::Mutex<usize>; 3]>,
+    pub(crate) domains: Arc<crate::session::Domains>,
     pub(crate) attachment: Arc<Attachment>,
     pub(crate) dom_transaction: Arc<tokio::sync::Mutex<()>>,
 }

@@ -10,6 +10,7 @@ use tokio::sync::watch;
 
 mod domain;
 pub use domain::DomainGuard;
+pub(crate) use domain::Domains;
 mod attachment;
 pub(crate) use attachment::Attachment;
 
@@ -29,7 +30,7 @@ pub struct Session {
     target: TargetId,
     closed: watch::Receiver<bool>,
     auth_owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    domains: std::sync::Arc<[tokio::sync::Mutex<usize>; 3]>,
+    domains: std::sync::Arc<Domains>,
     attachment: std::sync::Arc<Attachment>,
     dom_transaction: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
