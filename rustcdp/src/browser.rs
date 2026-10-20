@@ -2,6 +2,7 @@ use crate::{
     Connection, Page, Result,
     error::with_cleanup,
     launcher::{BrowserProcess, LaunchOptions},
+    proxy::Proxy,
 };
 use serde_json::json;
 
@@ -21,6 +22,7 @@ pub struct Browser {
     connection: Connection,
     page: Page,
     process: Option<BrowserProcess>,
+    process_proxy: Option<Proxy>,
     shutdown: Option<tokio::task::JoinHandle<Result<()>>>,
     shutdown_complete: bool,
 }
@@ -34,6 +36,8 @@ impl Browser {
     /// Launch Chrome with the supplied options and attach to its initial page.
     /// Headless mode is opt-in through [`LaunchOptions::args`]. See
     /// [`Self::connect`] for initial-page selection and fallback ownership.
+    /// Raw proxy flags configure routing but are not parsed as known credentials;
+    /// use [`Self::launch_with_proxy`] to retain credentials for managed contexts.
     pub async fn launch(options: LaunchOptions) -> Result<Self> {
         let (mut process, connection) = BrowserProcess::launch(options).await?;
         match Self::initial_page(&connection).await {
@@ -41,6 +45,7 @@ impl Browser {
                 connection,
                 page,
                 process: Some(process),
+                process_proxy: None,
                 shutdown: None,
                 shutdown_complete: false,
             }),
@@ -63,6 +68,8 @@ impl Browser {
     /// schedules disposal; explicit [`Self::close`] invalidates all dependents.
     /// Standalone Sessions and listeners do not retain the context. Browser Drop
     /// stops proxy authentication even when dependents keep the context alive.
+    /// External proxy credentials are unknown to this handle. New contexts inherit
+    /// browser routing, but no authentication worker is inferred from that routing.
     pub async fn connect(endpoint: &str) -> Result<Self> {
         let connection = Connection::connect(endpoint).await?;
         match Self::initial_page(&connection).await {
@@ -70,6 +77,7 @@ impl Browser {
                 connection,
                 page,
                 process: None,
+                process_proxy: None,
                 shutdown: None,
                 shutdown_complete: false,
             }),
@@ -119,13 +127,28 @@ impl Browser {
         self.process.as_ref()
     }
 
-    /// Create an isolated context that explicitly bypasses the browser's proxy.
-    /// See [`BrowserContext`] for acquisition and lifetime guarantees, or
-    /// [`Self::new_context_with_proxy`] to configure a context-specific proxy.
+    /// Create an isolated context inheriting the browser's proxy routing and bypass rules.
+    /// Credentials retained by [`Self::launch_with_proxy`] arm authentication on
+    /// each managed page, including [`BrowserContext::new_page`]. Credentials from
+    /// external browsers or raw launch flags are unknown and are not inferred.
+    /// Popups and separate child sessions do not automatically receive workers.
+    /// See [`BrowserContext`] for acquisition and lifetime guarantees. The caller's
+    /// command deadline limits waiting; owned setup and authentication recovery
+    /// continue after cancellation, disposing any unclaimed context.
+    /// Use [`Self::new_context_with_proxy`] to override routing or
+    /// [`Self::new_context_direct`] to explicitly bypass the process proxy.
     pub async fn new_context(&self) -> Result<BrowserContext> {
-        BrowserContext::create(
-            &self.connection,
+        self.create_context_with_auth(json!({"disposeOnDetach":true}), self.process_proxy.clone())
+            .await
+    }
+
+    /// Create an isolated context that explicitly bypasses the browser's proxy.
+    /// No proxy authentication worker is started. Acquisition and cancellation
+    /// follow the same ownership policy as [`Self::new_context`].
+    pub async fn new_context_direct(&self) -> Result<BrowserContext> {
+        self.create_context_with_auth(
             json!({"disposeOnDetach":true,"proxyServer":"","proxyBypassList":"*"}),
+            None,
         )
         .await
     }

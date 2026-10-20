@@ -5,7 +5,7 @@ use crate::{
     launcher::{LaunchOptions, args::validated_switch_name},
     proxy::{Proxy, ProxyAuth, ProxyAuthStatus},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::time::Duration;
 
 impl Browser {
@@ -15,6 +15,9 @@ impl Browser {
     /// to observe authentication. Without credentials, no worker is started.
     /// The worker handles only the initial page's session; other tabs and separate
     /// child sessions do not automatically receive authentication workers.
+    /// The supplied configuration is retained after successful setup so
+    /// [`Self::new_context`] can authenticate its managed pages while inheriting
+    /// the process routing and bypass rules unchanged.
     /// Setup continues in an owned task after cancellation. An unclaimed browser
     /// is dropped and its owned process is shut down.
     /// Raw `proxy-server`, `no-proxy-server`, `proxy-pac-url`, and
@@ -36,9 +39,10 @@ impl Browser {
             .push(format!("--proxy-server={}", proxy.server()).into());
         tokio::spawn(async move {
             let mut browser = Self::launch(options).await?;
-            match start_auth(&browser.page, proxy).await {
+            match start_auth(&browser.page, proxy.clone()).await {
                 Ok(auth) => {
                     browser.page.auth = auth;
+                    browser.process_proxy = Some(proxy);
                     Ok(browser)
                 }
                 Err(error) => with_cleanup(Err(error), browser.close().await),
@@ -60,23 +64,37 @@ impl Browser {
     /// authentication setup each have their own 30-second bounds and continue
     /// after cancellation. Unclaimed contexts are disposed after setup finishes.
     pub async fn new_context_with_proxy(&self, proxy: Proxy) -> Result<BrowserContext> {
+        self.create_context_with_auth(
+            json!({"disposeOnDetach":true,"proxyServer":proxy.server()}),
+            Some(proxy),
+        )
+        .await
+    }
+
+    pub(super) async fn create_context_with_auth(
+        &self,
+        params: Value,
+        proxy: Option<Proxy>,
+    ) -> Result<BrowserContext> {
         let timeout = self.connection.command_timeout();
         let connection = self.connection.clone();
         let task = connection.runtime().spawn(async move {
             // One owner retains the context through authentication setup.
-            let mut context = BrowserContext::create_owned(
-                &connection,
-                json!({"disposeOnDetach":true,"proxyServer":proxy.server()}),
-            )
-            .await?;
-            match start_auth(&context.page, proxy.clone()).await {
+            let mut context = BrowserContext::create_owned(&connection, params).await?;
+            // Await bounded auth setup/recovery in this owner before disposal;
+            // the caller's timeout only stops waiting for the owned task.
+            let auth = match proxy.as_ref() {
+                Some(proxy) => start_auth(&context.page, proxy.clone()).await,
+                None => Ok(None),
+            };
+            match auth {
                 Ok(auth) => {
                     context.page.auth = auth;
                     context
                         .lease
                         .as_ref()
                         .expect("context owns its lease")
-                        .register_page(&context.page, Some(proxy));
+                        .register_page(&context.page, proxy);
                     Ok(context)
                 }
                 Err(error) => with_cleanup(Err(error), context.close().await),
@@ -85,7 +103,7 @@ impl Browser {
         if let Some(timeout) = timeout {
             tokio::time::timeout(timeout, task)
                 .await
-                .map_err(|_| Error::Timeout("creating proxy browser context".into()))??
+                .map_err(|_| Error::Timeout("creating browser context".into()))??
         } else {
             task.await?
         }
