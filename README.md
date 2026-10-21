@@ -111,7 +111,7 @@ For ordinary interactions, wait for a matching element and use direct actions:
 
 ```rust
 let input = page.wait_for_element("input[name=email]", std::time::Duration::from_secs(5)).await?;
-input.insert_text("reader@example.com").await?;
+input.fill("reader@example.com").await?;
 page.require_element("button[type=submit]").await?.click().await?;
 ```
 
@@ -123,6 +123,24 @@ Actions are not automatically retried. `wait_for_selector_count_stable` and
 `wait_for_xpath_count_stable` use `CountWaitOptions` to wait for a sampled nonzero
 match count to stay unchanged. They return a timeout error if it never stabilizes
 and add no delay after success. This does not check node identity or readiness.
+
+`fill` replaces the value of a supported text input or textarea. `insert_text`
+inserts at the current selection; `page.insert_text` uses the focused element.
+Neither operation implicitly submits the form.
+
+When an action causes navigation, prepare observation before performing it:
+
+```rust
+let submit = page.require_element("button[type=submit]").await?;
+let navigation = page.expect_navigation().prepare().await?;
+submit.click().await?;
+let destination = navigation.wait().await?;
+println!("Arrived at {}", destination.url);
+```
+
+The observer's timeout includes the action and the wait. It observes the next
+qualifying navigation, so avoid unrelated navigation during that interval.
+For navigation to a known URL, use `page.navigate(url).send().await?` directly.
 
 The [generated `cdp` API](rustcdp/src/lib.rs) groups types, commands, and events by domain.
 Commands implement `protocol::Command` with an associated response type. Commands
