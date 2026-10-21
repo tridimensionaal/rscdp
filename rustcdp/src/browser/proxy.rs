@@ -10,7 +10,9 @@ use std::time::Duration;
 
 impl Browser {
     /// Launch with a process-wide proxy and optional credential worker.
-    /// Credentials arm authentication before returning. Setup does not navigate;
+    /// Credentials arm authentication on an initial page with known inherited
+    /// routing before returning. A foreign context's unknown routing receives no
+    /// inferred credentials. Setup does not navigate;
     /// navigate to your intended destination, then use [`Self::wait_for_proxy_ready`]
     /// to observe authentication. Without credentials, no worker is started.
     /// The worker handles only the initial page's session; other tabs and separate
@@ -39,9 +41,18 @@ impl Browser {
             .push(format!("--proxy-server={}", proxy.server()).into());
         tokio::spawn(async move {
             let mut browser = Self::launch(options).await?;
-            match start_auth(&browser.page, proxy.clone()).await {
+            let auth = if browser.pages.initial_uses_process_proxy() {
+                start_auth(&browser.page, proxy.clone()).await
+            } else {
+                // An existing foreign context can override process routing.
+                Ok(None)
+            };
+            match auth {
                 Ok(auth) => {
                     browser.page.auth = auth;
+                    browser
+                        .pages
+                        .set_process_proxy(&browser.page, proxy.clone());
                     browser.process_proxy = Some(proxy);
                     Ok(browser)
                 }
@@ -76,9 +87,16 @@ impl Browser {
         params: Value,
         proxy: Option<Proxy>,
     ) -> Result<BrowserContext> {
+        self.pages.ensure_open()?;
         let timeout = self.connection.command_timeout();
         let connection = self.connection.clone();
+        let pages = self.pages.clone();
         let task = connection.runtime().spawn(async move {
+            let _acquisition =
+                tokio::time::timeout(Duration::from_secs(30), pages.acquisition_gate.lock())
+                    .await
+                    .map_err(|_| Error::Timeout("waiting to create browser context".into()))?;
+            pages.ensure_open()?;
             // One owner retains the context through authentication setup.
             let mut context = BrowserContext::create_owned(&connection, params).await?;
             // Await bounded auth setup/recovery in this owner before disposal;
@@ -95,7 +113,12 @@ impl Browser {
                         .as_ref()
                         .expect("context owns its lease")
                         .register_page(&context.page, proxy);
-                    Ok(context)
+                    let registered = pages
+                        .register_context(context.lease.as_ref().expect("context owns its lease"));
+                    match registered {
+                        Ok(()) => Ok(context),
+                        Err(error) => with_cleanup(Err(error), context.close().await),
+                    }
                 }
                 Err(error) => with_cleanup(Err(error), context.close().await),
             }

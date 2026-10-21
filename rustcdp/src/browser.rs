@@ -1,3 +1,4 @@
+use crate::cdp::browser::BrowserContextId;
 use crate::{
     Connection, Page, Result,
     error::with_cleanup,
@@ -5,6 +6,7 @@ use crate::{
     proxy::Proxy,
 };
 use serde_json::json;
+use std::sync::Arc;
 
 mod builder;
 pub use builder::BrowserBuilder;
@@ -21,6 +23,7 @@ pub(crate) use resource::ContextLease;
 pub struct Browser {
     connection: Connection,
     page: Page,
+    pages: Arc<resource::BrowserPages>,
     process: Option<BrowserProcess>,
     process_proxy: Option<Proxy>,
     shutdown: Option<tokio::task::JoinHandle<Result<()>>>,
@@ -41,7 +44,8 @@ impl Browser {
     pub async fn launch(options: LaunchOptions) -> Result<Self> {
         let (mut process, connection) = BrowserProcess::launch(options).await?;
         match Self::initial_page(&connection).await {
-            Ok(page) => Ok(Self {
+            Ok((page, context)) => Ok(Self {
+                pages: Arc::new(resource::BrowserPages::new(&connection, &page, context)),
                 connection,
                 page,
                 process: Some(process),
@@ -67,13 +71,15 @@ impl Browser {
     /// Element, or out-of-process-frame Page handles remain. The last dependent
     /// schedules disposal; explicit [`Self::close`] invalidates all dependents.
     /// Standalone Sessions and listeners do not retain the context. Browser Drop
-    /// stops proxy authentication even when dependents keep the context alive.
+    /// stops browser-owned proxy workers even when dependents keep the fallback
+    /// alive. Independently owned BrowserContexts and their workers are untouched.
     /// External proxy credentials are unknown to this handle. New contexts inherit
     /// browser routing, but no authentication worker is inferred from that routing.
     pub async fn connect(endpoint: &str) -> Result<Self> {
         let connection = Connection::connect(endpoint).await?;
         match Self::initial_page(&connection).await {
-            Ok(page) => Ok(Self {
+            Ok((page, context)) => Ok(Self {
+                pages: Arc::new(resource::BrowserPages::new(&connection, &page, context)),
                 connection,
                 page,
                 process: None,
@@ -88,9 +94,15 @@ impl Browser {
         }
     }
 
-    async fn initial_page(connection: &Connection) -> Result<Page> {
+    async fn initial_page(connection: &Connection) -> Result<(Page, Option<BrowserContextId>)> {
         let targets = connection
-            .execute(&crate::cdp::target::commands::GetTargets::default())
+            .execute(
+                &crate::cdp::target::commands::GetTargets::default().with_filter(
+                    crate::cdp::target::TargetFilter(vec![
+                        crate::cdp::target::FilterEntry::default(),
+                    ]),
+                ),
+            )
             .await?;
         if let Some(target) = targets
             .target_infos
@@ -106,11 +118,13 @@ impl Browser {
                 .browser_context_id
                 .filter(|id| contexts.browser_context_ids.contains(id));
             let session = connection.attach(target.target_id).await?;
-            Page::from_session(session, context, crate::page::TargetKind::Tab).await
+            let page =
+                Page::from_session(session, context.clone(), crate::page::TargetKind::Tab).await?;
+            Ok((page, context))
         } else {
-            Ok(BrowserContext::create(connection, json!({}))
-                .await?
-                .into_owned_page())
+            let context = BrowserContext::create(connection, json!({})).await?;
+            let id = context.id().cloned();
+            Ok((context.into_owned_page(), id))
         }
     }
 
@@ -153,7 +167,8 @@ impl Browser {
         .await
     }
 
-    /// Stop authentication, dispose any owned fallback context, and disconnect.
+    /// Wait for managed setup, stop all managed authentication workers, dispose
+    /// any owned fallback context, and disconnect.
     /// An owned Chrome process is also reaped; an external process is not killed.
     /// On first poll, an owned task takes over the entire shutdown sequence.
     /// Connection and process cleanup are attempted even if earlier cleanup fails.
@@ -179,32 +194,29 @@ impl Browser {
         if self.shutdown.is_some() || self.shutdown_complete {
             return;
         }
+        let scopes = self.pages.begin_shutdown(true);
+        let pages = self.pages.clone();
         let connection = self.connection.clone();
-        // Retain the page's session/domain guards through authentication cleanup,
-        // including when the Browser itself is dropped while shutdown is running.
+        // Retain the initial Page and any fallback lease through shutdown.
         let page = self.page.clone();
         let mut process = self.process.take();
-        let mut auth = self.page.auth.clone();
         self.shutdown = Some(self.connection.runtime().spawn(async move {
-            let page_result = if let Some(lease) = &page.context_lease {
-                lease
-                    .close_with_auth(auth.take())
-                    .await
-                    .unwrap_or_else(|error| Err(error.into()))
-            } else if let Some(auth) = &mut auth {
-                auth.stop().await
-            } else {
-                Ok(())
-            };
+            // Setup that has not reached registration must finish and dispose
+            // its rejected late result before connection teardown can proceed.
+            let _acquisition = pages.acquisition_gate.lock().await;
+            let mut cleanup = resource::BrowserPages::stop_scopes(&scopes).await;
+            if let Some(lease) = pages.fallback() {
+                cleanup = with_cleanup(cleanup, lease.close().await);
+            }
             connection.close().await;
+            pages.clear_owned();
             let process_result = if let Some(process) = &mut process {
                 process.close().await
             } else {
                 Ok(())
             };
-            // Also force whole-Page capture rather than only context_lease.
             drop(page);
-            with_cleanup(page_result, process_result)
+            with_cleanup(cleanup, process_result)
         }));
     }
 }
@@ -214,15 +226,14 @@ impl Drop for Browser {
         if self.process.is_some() {
             self.start_shutdown();
         } else if self.shutdown.is_none() && !self.shutdown_complete {
-            // Preserve external connections and fallback leases retained by
-            // dependent handles when explicit shutdown was never requested.
-            // Request cleanup even when dependent pages retain the shared worker.
-            // The owned task finishes without aborting Fetch cleanup.
-            if let Some(auth) = self.page.auth.clone() {
-                self.connection.runtime().spawn(async move {
-                    let _ = auth.stop().await;
-                });
-            }
+            // External Drop must not stop independent contexts or their workers.
+            // Their weak registrations never transfer ownership to this Browser.
+            let scopes = self.pages.begin_shutdown(false);
+            let pages = self.pages.clone();
+            self.connection.runtime().spawn(async move {
+                let _ = resource::BrowserPages::stop_scopes(&scopes).await;
+                pages.clear_owned();
+            });
         }
         // Dropping a JoinHandle detaches the task; it does not abort shutdown.
     }
