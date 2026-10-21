@@ -1,11 +1,11 @@
-use super::{Element, Page};
+use super::{Element, Page, element::validate_exception};
 use crate::{
     Error, Result,
     cdp::{
         page::FrameId,
-        runtime::{RemoteObject, RemoteObjectId},
+        runtime::{RemoteObject, RemoteObjectId, commands::EvaluateResponse},
     },
-    error::{decode, with_cleanup},
+    error::{decode, decode_ref, with_cleanup},
 };
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -190,15 +190,17 @@ impl<'a> EvaluationBuilder<'a> {
                 };
                 unknown_resource =
                     !page.own_response_objects(&response, "result", by_value, &mut objects);
+                let decoded: EvaluateResponse = decode_ref("Runtime.evaluate", &response)?;
+                validate_exception("Runtime.evaluate", &response)?;
                 if let Some(details) = response.get("exceptionDetails") {
                     return Err(Error::JavaScript(details.clone()));
                 }
-                let metadata: RemoteObject =
-                    decode("Runtime.evaluate result", response["result"].clone())?;
+                let metadata = decoded.result;
                 if unknown_resource {
-                    return Err(Error::InvalidArgument(
-                        "invalid remote evaluation result identity".into(),
-                    ));
+                    return Err(Error::UnexpectedResponse {
+                        method: "Runtime.evaluate".into(),
+                        payload: response,
+                    });
                 }
                 let resource = if matches!(mode, ResultMode::Remote) {
                     match metadata.object_id.as_ref() {
@@ -206,10 +208,9 @@ impl<'a> EvaluationBuilder<'a> {
                             let index = objects
                                 .iter()
                                 .position(|object| object.object_id() == id)
-                                .ok_or_else(|| {
-                                    Error::InvalidArgument(
-                                        "unowned remote evaluation result".into(),
-                                    )
+                                .ok_or_else(|| Error::UnexpectedResponse {
+                                    method: "Runtime.evaluate".into(),
+                                    payload: response.clone(),
                                 })?;
                             Some(objects.swap_remove(index))
                         }
