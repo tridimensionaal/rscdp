@@ -76,7 +76,19 @@ impl Browser {
     /// External proxy credentials are unknown to this handle. New contexts inherit
     /// browser routing, but no authentication worker is inferred from that routing.
     pub async fn connect(endpoint: &str) -> Result<Self> {
-        let connection = Connection::connect(endpoint).await?;
+        Self::connect_with_options(endpoint, crate::connection::ConnectionOptions::default()).await
+    }
+
+    /// Connect with transport limits and an initial command timeout.
+    /// Uses the same page selection and ownership policy as [`Self::connect`].
+    /// Options are validated before network activity. The connect timeout covers
+    /// discovery and the WebSocket handshake; initial-page setup has its own
+    /// command and acquisition bounds.
+    pub async fn connect_with_options(
+        endpoint: &str,
+        options: crate::connection::ConnectionOptions,
+    ) -> Result<Self> {
+        let connection = options.connect(endpoint).await?;
         match Self::initial_page(&connection).await {
             Ok((page, context)) => Ok(Self {
                 pages: Arc::new(resource::BrowserPages::new(&connection, &page, context)),
