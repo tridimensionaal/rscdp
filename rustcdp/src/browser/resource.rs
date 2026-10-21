@@ -67,6 +67,184 @@ impl ManagedPages {
         pending.publish()
     }
 
+    async fn pages(self: &Arc<Self>) -> Result<Vec<Page>> {
+        self.ensure_open()?;
+        let pages = self.clone();
+        let task = self
+            .connection
+            .runtime()
+            .spawn(async move { pages.list_owned().await });
+        let result = if let Some(timeout) = self.connection.command_timeout() {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("listing context pages".into()))??
+        } else {
+            task.await?
+        }?;
+        // A completed task can sit unpolled while the context closes. Never
+        // deliver that result after observing scope closure; no await follows.
+        self.ensure_open()?;
+        Ok(result)
+    }
+
+    fn ensure_open(&self) -> Result<()> {
+        if self.state.lock().unwrap_or_else(|e| e.into_inner()).closing {
+            return Err(Error::InvalidArgument("page scope is closing".into()));
+        }
+        Ok(())
+    }
+
+    async fn target_snapshot(&self) -> Result<Vec<crate::cdp::target::TargetInfo>> {
+        let commands = self
+            .connection
+            .clone()
+            .with_command_timeout(Some(Duration::from_secs(30)));
+        Ok(commands
+            .execute(
+                &crate::cdp::target::commands::GetTargets::new().with_filter(
+                    crate::cdp::target::TargetFilter(vec![
+                        crate::cdp::target::FilterEntry::default(),
+                    ]),
+                ),
+            )
+            .await?
+            .target_infos)
+    }
+
+    async fn list_owned(&self) -> Result<Vec<Page>> {
+        let _gate = tokio::time::timeout(Duration::from_secs(30), self.gate.lock())
+            .await
+            .map_err(|_| Error::Timeout("waiting to list pages".into()))?;
+        self.ensure_open()?;
+        let targets = self.target_snapshot().await?;
+        // Chrome may report a default-profile ID which Storage must not receive.
+        // This branch supports the same helper's eventual default-scope caller;
+        // Context.pages always filters by the exact explicit context ID.
+        let isolated = if self.scope == Scope::Default {
+            self.connection
+                .clone()
+                .with_command_timeout(Some(Duration::from_secs(30)))
+                .execute(&crate::cdp::target::commands::GetBrowserContexts::default())
+                .await?
+                .browser_context_ids
+        } else {
+            Vec::new()
+        };
+        let mut targets: Vec<_> = targets
+            .into_iter()
+            .filter(|target| {
+                target.type_ == "page"
+                    && match &self.scope {
+                        Scope::Context(id) => target.browser_context_id.as_ref() == Some(id),
+                        Scope::Default => !target
+                            .browser_context_id
+                            .as_ref()
+                            .is_some_and(|id| isolated.contains(id)),
+                    }
+            })
+            .collect();
+        targets.sort_by(|a, b| a.target_id.0.cmp(&b.target_id.0));
+        let mut pages = Vec::with_capacity(targets.len());
+        for target in targets {
+            self.ensure_open()?;
+            if let Some(page) = self.adopt_owned(&target.target_id).await? {
+                pages.push(page);
+            }
+        }
+        // Atomically publish the complete successful selection while holding the
+        // gate. In particular, a PendingPage guard cannot later delete a created
+        // tab now adopted by this enumeration. Failed lists publish no pending IDs.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closing {
+            return Err(Error::InvalidArgument("page scope is closing".into()));
+        }
+        for page in &pages {
+            if let Some(entry) = state
+                .entries
+                .iter_mut()
+                .find(|entry| entry.page.id() == page.id())
+            {
+                entry.delivered = true;
+            }
+            state.unclaimed.retain(|id| id != page.id());
+        }
+        Ok(pages)
+    }
+
+    // Caller owns the scope gate. Reuse this for later browser lookup as well as
+    // enumeration: this operation never owns permission to close an existing tab.
+    async fn adopt_owned(&self, id: &TargetId) -> Result<Option<Page>> {
+        let (cached, proxy) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.page.id() == id)
+                    .map(|entry| entry.page.clone()),
+                state.proxy.clone(),
+            )
+        };
+        if let Some(page) = cached {
+            if !page.session().is_closed() {
+                return Ok(Some(page));
+            }
+            // A manual detach can leave the target alive. Await the old worker
+            // before creating a replacement session rather than duplicate auth.
+            page.stop_proxy_auth().await?;
+        }
+        let commands = self.connection.clone().with_command_timeout(None);
+        let session = match commands.attach(id.clone()).await {
+            Ok(session) => session,
+            Err(error) => {
+                // Only confirmed target disappearance is a skippable race.
+                return match self.target_snapshot().await {
+                    Ok(targets) if !targets.iter().any(|target| &target.target_id == id) => {
+                        Ok(None)
+                    }
+                    Ok(_) => Err(error),
+                    Err(reconcile) => with_cleanup(Err(error), Err(reconcile)),
+                };
+            }
+        };
+        let context = match &self.scope {
+            Scope::Default => None,
+            Scope::Context(id) => Some(id.clone()),
+        };
+        // Do not wrap these owned helpers in a cancellation-prone timeout. They
+        // each bound their transitions and finish recovery before returning.
+        let setup =
+            Page::from_session(session.clone(), context, crate::page::TargetKind::Tab).await;
+        let mut page = match setup {
+            Ok(page) => page.with_command_timeout(self.connection.command_timeout()),
+            Err(error) => return with_cleanup(Err(error), detach_adopted_session(&session).await),
+        };
+        if let Some(proxy) = proxy {
+            match super::proxy::start_auth(&page, proxy).await {
+                Ok(auth) => page.auth = auth,
+                // Existing ProxyAuth fatal recovery can close its target or
+                // connection. Await it, then detach; do not add acquisition close.
+                Err(error) => {
+                    return with_cleanup(Err(error), detach_adopted_session(&session).await);
+                }
+            }
+        }
+        // Preserve a created target's pending obligation until the whole list
+        // succeeds, including when replacing a manually detached cached session.
+        // Synchronous PendingPage publication does not acquire the gate, so read
+        // the current obligation under the same lock that replaces the entry.
+        let mut cached = page.clone();
+        cached.context_lease = None;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let delivered = !state.unclaimed.contains(id);
+        state.entries.retain(|entry| entry.page.id() != id);
+        state.entries.push(Entry {
+            page: cached,
+            delivered,
+        });
+        Ok(Some(page))
+    }
+
     fn mark_closing(&self) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).closing = true;
     }
@@ -354,6 +532,10 @@ impl ContextLease {
             .await
     }
 
+    pub(super) async fn pages(&self) -> Result<Vec<Page>> {
+        self.cleanup.pages.pages().await
+    }
+
     pub(super) async fn close(&self) -> Result<()> {
         self.close_with_auth(None).await?
     }
@@ -556,6 +738,18 @@ async fn acquire_page(
         cleanup,
         page: Some(page),
     })
+}
+
+async fn detach_adopted_session(session: &crate::Session) -> Result<()> {
+    if session.is_closed() {
+        Ok(())
+    } else {
+        let cleanup = session.detach().await;
+        if cleanup.is_err() && !session.is_closed() {
+            session.connection().close().await;
+        }
+        cleanup
+    }
 }
 
 // All helpers below run under the acquisition/disposal gate; none reacquires it.

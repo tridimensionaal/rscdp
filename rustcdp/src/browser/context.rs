@@ -138,6 +138,34 @@ impl BrowserContext {
             .await
     }
 
+    /// Return a snapshot of this context's page targets, sorted by target ID.
+    /// Reuses managed sessions/auth workers and adopts previously unmanaged tabs.
+    /// Closing/closed contexts reject the operation. These handles do not extend
+    /// the context's lifetime; dropping the context still disposes all its tabs.
+    /// A tab can disappear after the snapshot. Only confirmed disappearance after
+    /// failed attachment is skipped; other errors fail the whole operation.
+    ///
+    /// The handle deadline bounds waiting, not the owned enumeration task. After
+    /// cancellation, completed adoptions remain managed. A successful enumeration
+    /// also publishes any selected pending-created tabs before returning its task
+    /// result, so their original canceled acquisitions no longer close them.
+    /// Gate admission and discovery commands have 30-second bounds; attachment,
+    /// domain and authentication helpers finish their own bounded recovery.
+    /// There is no single total work deadline across all targets.
+    ///
+    /// Acquisition cleanup detaches its owned session, never closes an adopted
+    /// tab. Exception: with known credentials, the existing ProxyAuth fatal-recovery
+    /// policy can close its target or connection. Uncertain attachment/domain or
+    /// detach recovery can also disconnect, disposing disposeOnDetach contexts.
+    /// Unknown or credentialless configuration starts no authentication worker.
+    pub async fn pages(&self) -> Result<Vec<Page>> {
+        self.lease
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument("browser context is closed".into()))?
+            .pages()
+            .await
+    }
+
     /// Read all cookies in this browser context using Storage, across all its pages.
     /// After acknowledged disposal, returns an error locally; it never selects the
     /// default context. External disposal may instead produce a remote error.
