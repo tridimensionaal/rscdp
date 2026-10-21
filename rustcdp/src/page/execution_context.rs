@@ -1,8 +1,17 @@
 use super::Page;
 use crate::{
     Error, Result, Session,
-    cdp::page::{FrameId, commands::GetFrameTree},
+    cdp::{
+        page::{
+            FrameId,
+            commands::{CreateIsolatedWorldResponse, GetFrameTree},
+        },
+        runtime::events::{
+            ExecutionContextCreated, ExecutionContextDestroyed, ExecutionContextsCleared,
+        },
+    },
     connection::{EventStream, RawEvent},
+    error::{decode, decode_ref},
 };
 use serde_json::json;
 use std::{
@@ -58,7 +67,7 @@ struct MainContexts {
 }
 
 fn invalid_main_context() -> Error {
-    Error::InvalidArgument(
+    Error::ExecutionContextUnavailable(
         "main execution context correlation unavailable or ambiguous; navigate or reattach the page"
             .into(),
     )
@@ -126,7 +135,9 @@ fn subscribe(session: &Session) -> EventStream {
 }
 
 fn invalid_context() -> Error {
-    Error::InvalidArgument("invalid isolated execution context correlation".into())
+    Error::ExecutionContextUnavailable(
+        "isolated execution context correlation unavailable or ambiguous".into(),
+    )
 }
 
 impl Worlds {
@@ -271,7 +282,7 @@ impl State {
         if self.namespace.is_none() {
             let nonce = NEXT_WORLD
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                .map_err(|_| Error::InvalidArgument("isolated world names exhausted".into()))?;
+                .map_err(|_| Error::ResourceExhausted("isolated world names"))?;
             self.namespace = Some(format!("rustcdp-private-{}-{nonce}-", session.id().0));
         }
         Ok(())
@@ -281,21 +292,45 @@ impl State {
         self.generation = self
             .generation
             .checked_add(1)
-            .ok_or_else(|| Error::InvalidArgument("isolated world generations exhausted".into()))?;
+            .ok_or(Error::ResourceExhausted("isolated world generations"))?;
         Ok(self.generation)
     }
 
-    fn lose_correlation(&mut self) -> Error {
+    fn lose_correlation(&mut self) {
         self.frames.clear();
         self.namespace = None;
-        invalid_context()
+    }
+
+    fn decode_event<E: crate::protocol::Event>(&mut self, event: &RawEvent) -> Result<E> {
+        decode_ref(E::METHOD, &event.params).inspect_err(|_| {
+            // A malformed lifecycle event cannot leave cached identities usable.
+            self.main.lose_correlation();
+            self.lose_correlation();
+        })
     }
 
     fn handle(&mut self, event: RawEvent) -> Result<()> {
         match event.method.as_str() {
             "Runtime.executionContextCreated" => {
+                let created: ExecutionContextCreated = self.decode_event(&event)?;
+                if created.context.unique_id.is_empty() {
+                    self.main.lose_correlation();
+                    self.lose_correlation();
+                    return Err(Error::UnexpectedResponse {
+                        method: event.method,
+                        payload: event.params,
+                    });
+                }
                 let context = &event.params["context"];
                 self.main.created(context);
+                if context["auxData"]["isDefault"].as_bool() == Some(true)
+                    && context["auxData"]["frameId"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .is_none()
+                {
+                    return Err(invalid_main_context());
+                }
                 let Some(frame) = self
                     .namespace
                     .as_ref()
@@ -303,16 +338,31 @@ impl State {
                 else {
                     return Ok(());
                 };
-                if frame.is_empty() || context["auxData"]["frameId"].as_str() != Some(frame) {
-                    return Err(self.lose_correlation());
+                if frame.is_empty() {
+                    self.lose_correlation();
+                    return Err(Error::UnexpectedResponse {
+                        method: event.method,
+                        payload: event.params,
+                    });
+                }
+                let Some(correlated_frame) = context["auxData"]["frameId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                else {
+                    self.lose_correlation();
+                    return Err(invalid_context());
+                };
+                if correlated_frame != frame {
+                    self.lose_correlation();
+                    return Err(Error::UnexpectedResponse {
+                        method: event.method,
+                        payload: event.params,
+                    });
                 }
                 let frame = frame.to_owned();
-                let identity = match (context["id"].as_i64(), context["uniqueId"].as_str()) {
-                    (Some(numeric), Some(unique)) if !unique.is_empty() => ContextIdentity {
-                        numeric,
-                        unique: unique.into(),
-                    },
-                    _ => return Err(self.lose_correlation()),
+                let identity = ContextIdentity {
+                    numeric: created.context.id.0,
+                    unique: created.context.unique_id,
                 };
                 if let Some(world) = self.frames.get_mut(&frame) {
                     if world.candidate.as_ref().is_some_and(|old| old != &identity) {
@@ -338,14 +388,17 @@ impl State {
                 }
             }
             "Runtime.executionContextDestroyed" => {
-                let Some(unique) = event.params["executionContextUniqueId"]
-                    .as_str()
-                    .filter(|id| !id.is_empty())
-                else {
+                let destroyed: ExecutionContextDestroyed = self.decode_event(&event)?;
+                let unique = destroyed.execution_context_unique_id;
+                if unique.is_empty() {
                     self.main.lose_correlation();
-                    return Err(self.lose_correlation());
-                };
-                self.main.destroyed(unique);
+                    self.lose_correlation();
+                    return Err(Error::UnexpectedResponse {
+                        method: event.method,
+                        payload: event.params,
+                    });
+                }
+                self.main.destroyed(&unique);
                 self.frames.retain(|_, world| {
                     world.conflicted
                         || !world
@@ -355,6 +408,7 @@ impl State {
                 });
             }
             "Runtime.executionContextsCleared" => {
+                let _: ExecutionContextsCleared = self.decode_event(&event)?;
                 self.frames.clear();
                 self.main = MainContexts::default();
             }
@@ -456,10 +510,11 @@ impl State {
             tokio::select! {
                 response = &mut command => {
                     let response = response?;
-                    let Some(numeric) = response["executionContextId"].as_i64() else {
-                        return Err(self.lose_correlation());
-                    };
-                    break numeric;
+                    let response: CreateIsolatedWorldResponse = decode("Page.createIsolatedWorld", response)
+                        .inspect_err(|_| {
+                            self.lose_correlation();
+                        })?;
+                    break response.execution_context_id.0;
                 }
                 event = self.events.recv() => {
                     let event = event.map_err(|error| self.stream_error(session, error))?;

@@ -195,7 +195,7 @@ impl Frame {
             .frame_tree;
         find(&tree, &self.id)
             .map(|tree| tree.frame.clone())
-            .ok_or_else(|| Error::InvalidArgument("frame is no longer in this target".into()))
+            .ok_or_else(|| Error::FrameNotFound(self.id.clone()))
     }
 
     /// Snapshot direct children belonging to this target's frame tree.
@@ -206,8 +206,7 @@ impl Frame {
             .execute(&GetFrameTree::new())
             .await?
             .frame_tree;
-        let tree = find(&tree, &self.id)
-            .ok_or_else(|| Error::InvalidArgument("frame is no longer in this target".into()))?;
+        let tree = find(&tree, &self.id).ok_or_else(|| Error::FrameNotFound(self.id.clone()))?;
         Ok(tree
             .child_frames
             .as_deref()

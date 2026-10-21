@@ -30,7 +30,7 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
-    /// A decoded response violates the operation's expected protocol contract.
+    /// A decoded response or event payload violates the operation's expected protocol contract.
     #[error("unexpected response to {method}: {payload}")]
     UnexpectedResponse { method: String, payload: Value },
     #[error(transparent)]
@@ -53,6 +53,16 @@ pub enum Error {
     /// The context disappeared or changed while preparing an operation.
     #[error("execution context changed during acquisition")]
     ExecutionContextChanged,
+    /// A safe execution-context identity cannot be established. This does not
+    /// imply a transient context change and is not automatically retried.
+    #[error("execution context unavailable: {0}")]
+    ExecutionContextUnavailable(String),
+    /// A previously acquired frame is absent from this target's current tree.
+    #[error("frame {0} is no longer in this target")]
+    FrameNotFound(crate::cdp::page::FrameId),
+    /// A local resource or identity counter cannot allocate another value.
+    #[error("resource exhausted: {0}")]
+    ResourceExhausted(&'static str),
     /// A required element lookup found no matching node.
     #[error("element not found: {0}")]
     ElementNotFound(String),
