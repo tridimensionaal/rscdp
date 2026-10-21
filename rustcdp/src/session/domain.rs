@@ -170,12 +170,12 @@ impl Session {
         self.enable_domain(Acquisition::Runtime, json!({})).await
     }
 
-    /// Only for setup whose enclosing ContextLease owns all failure recovery.
-    /// The caller must disable command timeouts, bound setup, and dispose the
-    /// context on error or cancellation, including partially completed enables.
+    /// Only for a newly created target whose enclosing owner owns all recovery.
+    /// The caller must disable command timeouts, bound setup, and close the target
+    /// or dispose its context on failure, including partially completed enables.
     /// Subscribe before calling. No independent task, guard, or recovery is
     /// created until both enables succeed. Lock order is always Page then Runtime.
-    pub(crate) async fn enable_page_runtime_in_context(&self) -> Result<[DomainGuard; 2]> {
+    pub(crate) async fn enable_page_runtime_for_created_target(&self) -> Result<[DomainGuard; 2]> {
         let mut page = self.domains.page.lock().await;
         let mut runtime = self.domains.runtime.lock().await;
         ensure_open(self)?;

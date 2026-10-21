@@ -141,6 +141,25 @@ impl Browser {
         self.process.as_ref()
     }
 
+    /// Create an about:blank tab in the default profile, independent of the
+    /// initial page's context. Known process proxy credentials arm this tab's
+    /// worker before return; external/raw proxy credentials are not inferred.
+    /// Dropping the returned Page leaves the tab open; use Page::close explicitly.
+    ///
+    /// The command deadline bounds the caller's wait. Owned setup continues after
+    /// cancellation and closes a known, unclaimed tab. Gate admission, creation,
+    /// attachment and domain setup each have independent 30-second bounds; auth
+    /// setup/recovery finishes separately. Failed known-tab cleanup is retained
+    /// for reconciliation at browser shutdown, without closing unrelated tabs.
+    ///
+    /// A lost/undecodable creation reply can leave an unidentified default tab.
+    /// This returns the error without guessing ownership or disconnecting a healthy
+    /// connection. Disconnecting an external browser cannot guarantee its removal;
+    /// an owned browser's eventual process shutdown removes all its tabs.
+    pub async fn new_page(&self) -> Result<Page> {
+        self.pages.new_page().await
+    }
+
     /// Create an isolated context inheriting the browser's proxy routing and bypass rules.
     /// Credentials retained by [`Self::launch_with_proxy`] arm authentication on
     /// each managed page, including [`BrowserContext::new_page`]. Credentials from

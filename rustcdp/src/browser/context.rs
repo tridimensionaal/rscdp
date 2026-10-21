@@ -77,7 +77,7 @@ impl BrowserContext {
                 )
                 .await?;
             let session = commands.session(attached.session_id, target)?;
-            Page::from_session_in_context(session, id).await
+            Page::from_session_for_created_target(session, Some(id)).await
         })
         .await
         .unwrap_or_else(|_| Err(Error::Timeout("creating browser context".into())));

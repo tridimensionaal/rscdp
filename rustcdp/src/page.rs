@@ -74,15 +74,15 @@ impl Page {
         })
     }
 
-    /// Only for setup under an enclosing ContextLease that disposes the context
-    /// on failure or cancellation. The session must have command timeouts
-    /// disabled; the enclosing acquisition owns the setup deadline and recovery.
-    pub(crate) async fn from_session_in_context(
+    /// Only for a newly created target whose enclosing owner closes the target
+    /// (or disposes its context) on setup failure. Command timeouts must be disabled;
+    /// the owner bounds setup and completes recovery before releasing its gate.
+    pub(crate) async fn from_session_for_created_target(
         session: Session,
-        context: BrowserContextId,
+        context: Option<BrowserContextId>,
     ) -> Result<Self> {
         let worlds = execution_context::Worlds::new(&session);
-        let events = session.enable_page_runtime_in_context().await?;
+        let events = session.enable_page_runtime_for_created_target().await?;
         Ok(Self {
             session,
             target_kind: TargetKind::Tab,
@@ -90,7 +90,7 @@ impl Page {
             auth: None,
             _events: std::sync::Arc::new(events),
             worlds,
-            context: Some(context),
+            context,
             context_lease: None,
         })
     }
