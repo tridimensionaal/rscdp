@@ -1,5 +1,20 @@
 use crate::{Error, Result};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+
+/// Validate raw arguments against a Browser-managed proxy before lowering it.
+pub(crate) fn validate_proxy_args(args: &[OsString]) -> Result<()> {
+    for arg in args {
+        if matches!(
+            validated_switch_name(arg)?.as_deref(),
+            Some("proxy-server" | "no-proxy-server" | "proxy-pac-url" | "proxy-auto-detect")
+        ) {
+            return Err(Error::InvalidArgument(
+                "raw proxy routing switch conflicts with the explicit proxy".into(),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Inspect Chrome's switch spelling without changing the original OS argument.
 /// Reject switches that override launcher ownership or stop switch parsing.

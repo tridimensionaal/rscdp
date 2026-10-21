@@ -2,7 +2,7 @@ use super::{Browser, BrowserContext};
 use crate::{
     Error, Page, Result,
     error::with_cleanup,
-    launcher::{LaunchOptions, args::validated_switch_name},
+    launcher::{LaunchOptions, args::validate_proxy_args},
     proxy::{Proxy, ProxyAuth, ProxyAuthStatus},
 };
 use serde_json::{Value, json};
@@ -15,7 +15,7 @@ impl Browser {
     /// inferred credentials. Setup does not navigate;
     /// navigate to your intended destination, then use [`Self::wait_for_proxy_ready`]
     /// to observe authentication. Without credentials, no worker is started.
-    /// The worker handles only the initial page's session; other tabs and separate
+    /// Managed pages receive their own workers; unmanaged tabs and separate
     /// child sessions do not automatically receive authentication workers.
     /// The supplied configuration is retained after successful setup so
     /// [`Self::new_context`] can authenticate its managed pages while inheriting
@@ -25,22 +25,27 @@ impl Browser {
     /// Raw `proxy-server`, `no-proxy-server`, `proxy-pac-url`, and
     /// `proxy-auto-detect` switches conflict with the explicit proxy and are
     /// rejected. `proxy-bypass-list` customization is allowed.
+    /// Equivalent to setting [`LaunchOptions::proxy`] and calling [`Self::launch`].
+    /// Supplying a second proxy through options is rejected. The builder also
+    /// exposes [`super::BrowserBuilder::proxy`] for fluent configuration.
     pub async fn launch_with_proxy(mut options: LaunchOptions, proxy: Proxy) -> Result<Self> {
-        for arg in &options.args {
-            if matches!(
-                validated_switch_name(arg)?.as_deref(),
-                Some("proxy-server" | "no-proxy-server" | "proxy-pac-url" | "proxy-auto-detect")
-            ) {
-                return Err(Error::InvalidArgument(
-                    "raw proxy routing switch conflicts with the explicit proxy".into(),
-                ));
-            }
+        if options.proxy.is_some() {
+            return Err(Error::InvalidArgument("proxy is configured twice".into()));
         }
+        options.proxy = Some(proxy);
+        Self::launch(options).await
+    }
+
+    pub(super) async fn launch_with_configured_proxy(
+        mut options: LaunchOptions,
+        proxy: Proxy,
+    ) -> Result<Self> {
+        validate_proxy_args(&options.args)?;
         options
             .args
             .push(format!("--proxy-server={}", proxy.server()).into());
         tokio::spawn(async move {
-            let mut browser = Self::launch(options).await?;
+            let mut browser = Self::launch_process_and_attach(options).await?;
             let auth = if browser.pages.initial_uses_process_proxy() {
                 start_auth(&browser.page, proxy.clone()).await
             } else {

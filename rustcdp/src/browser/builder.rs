@@ -3,8 +3,11 @@ use crate::{
     Error, Result,
     connection::ConnectionOptions,
     launcher::{
-        LaunchOptions, args::validated_switch_name, startup_deadline, validated_profile_prefix,
+        LaunchOptions,
+        args::{validate_proxy_args, validated_switch_name},
+        startup_deadline, validated_profile_prefix,
     },
+    proxy::Proxy,
 };
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
@@ -25,6 +28,7 @@ use std::{ffi::OsString, path::PathBuf, time::Duration};
 /// | [`startup_timeout`](Self::startup_timeout) | 15 seconds total process startup | — |
 /// | [`connection_options`](Self::connection_options) | [`ConnectionOptions::default`] | — |
 /// | [`command_timeout`](Self::command_timeout) | Some(30 seconds) | — |
+/// | [`proxy`](Self::proxy) | No configured proxy | `--proxy-server` |
 /// | [`base_temp_dir`](Self::base_temp_dir) | OS temporary directory | — |
 /// | [`dir_prefix`](Self::dir_prefix) | `tmp` | — |
 ///
@@ -41,6 +45,15 @@ pub struct BrowserBuilder {
 }
 
 impl BrowserBuilder {
+    /// Configure process routing and optional authentication for managed pages.
+    /// Replaces an earlier proxy. Build retains the configuration; launch arms
+    /// workers without navigating. Raw proxy routing flags conflict, but a raw
+    /// `--proxy-bypass-list` is allowed. See [`Browser::launch_with_proxy`].
+    pub fn proxy(mut self, proxy: Proxy) -> Self {
+        self.options.proxy = Some(proxy);
+        self
+    }
+
     /// Run without visible windows when true. Defaults to false.
     pub fn headless(mut self, enabled: bool) -> Self {
         self.headless = Some(enabled);
@@ -147,6 +160,9 @@ impl BrowserBuilder {
         startup_deadline(self.options.startup_timeout)?;
         self.options.connection_options.validate()?;
         validated_profile_prefix(&self.options)?;
+        if self.options.proxy.is_some() {
+            validate_proxy_args(&self.options.args)?;
+        }
         if matches!(self.window_size, Some((0, _)) | Some((_, 0))) {
             return Err(Error::InvalidArgument(
                 "window dimensions must be positive".into(),

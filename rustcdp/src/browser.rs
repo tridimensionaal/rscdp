@@ -40,8 +40,17 @@ impl Browser {
     /// Headless mode is opt-in through [`LaunchOptions::args`]. See
     /// [`Self::connect`] for initial-page selection and fallback ownership.
     /// Raw proxy flags configure routing but are not parsed as known credentials;
-    /// use [`Self::launch_with_proxy`] to retain credentials for managed contexts.
-    pub async fn launch(options: LaunchOptions) -> Result<Self> {
+    /// set [`LaunchOptions::proxy`] to retain credentials for managed pages and
+    /// contexts. Typed proxy setup continues in an owned task after cancellation;
+    /// an unclaimed browser is shut down without navigating.
+    pub async fn launch(mut options: LaunchOptions) -> Result<Self> {
+        match options.proxy.take() {
+            Some(proxy) => Self::launch_with_configured_proxy(options, proxy).await,
+            None => Self::launch_process_and_attach(options).await,
+        }
+    }
+
+    async fn launch_process_and_attach(options: LaunchOptions) -> Result<Self> {
         let (mut process, connection) = BrowserProcess::launch(options).await?;
         match Self::initial_page(&connection).await {
             Ok((page, context)) => Ok(Self {

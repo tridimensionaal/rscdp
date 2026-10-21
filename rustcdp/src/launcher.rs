@@ -132,6 +132,10 @@ pub struct LaunchOptions {
     /// timeout and the remaining startup budget. PID verification uses the startup
     /// deadline; the returned connection retains the configured command timeout.
     pub connection_options: ConnectionOptions,
+    /// Process routing and optional credentials for Browser-managed pages.
+    /// Use [`crate::Browser::launch`] or its builder. The process-only
+    /// [`BrowserProcess::launch`] rejects this field because it owns no workers.
+    pub proxy: Option<crate::proxy::Proxy>,
 }
 
 impl Default for LaunchOptions {
@@ -144,6 +148,7 @@ impl Default for LaunchOptions {
             dir_prefix: None,
             startup_timeout: Duration::from_secs(15),
             connection_options: ConnectionOptions::default(),
+            proxy: None,
         }
     }
 }
@@ -167,6 +172,11 @@ impl BrowserProcess {
     pub async fn launch(options: LaunchOptions) -> Result<(Self, Connection)> {
         let deadline = startup_deadline(options.startup_timeout)?;
         options.connection_options.validate()?;
+        if options.proxy.is_some() {
+            return Err(Error::InvalidArgument(
+                "typed proxy configuration requires Browser::launch; BrowserProcess owns no authentication workers".into(),
+            ));
+        }
         for arg in &options.args {
             args::validated_switch_name(arg)?;
         }
