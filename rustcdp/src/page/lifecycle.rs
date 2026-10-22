@@ -39,7 +39,8 @@ impl Page {
     /// before retrying. No close command is automatically retried.
     ///
     /// The handle deadline, capped at 30 seconds, bounds waiting including mutex
-    /// admission. The initiating handle's same budget independently bounds the
+    /// admission. Managed pages also serialize close with page acquisition in
+    /// their scope. The initiating handle's same budget independently bounds the
     /// owned attempt. A zero budget starts no attempt. Timing out does not prove
     /// the tab stayed open; losing the connection does not prove it closed.
     /// Session notifications and authentication-worker shutdown may follow target
@@ -69,10 +70,11 @@ impl Page {
                 let session = self.session.clone();
                 let lease = self.context_lease.clone();
                 let auth = self.auth.clone();
+                let registration = self.registration.clone();
                 let connection = session.connection().clone().with_command_timeout(None);
                 let id = self.id().clone();
                 state.task = Some(connection.runtime().spawn(async move {
-                    let result = tokio::time::timeout(limit, Self::close_target(&connection, &id))
+                    let result = tokio::time::timeout(limit, registration.close(&connection, &id))
                         .await
                         .unwrap_or_else(|_| Err(Error::Timeout(format!("closing page {id}"))));
                     drop(session);

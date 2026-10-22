@@ -16,7 +16,7 @@ pub use context::BrowserContext;
 
 mod proxy;
 mod resource;
-pub(crate) use resource::ContextLease;
+pub(crate) use resource::{ContextLease, PageRegistration};
 
 /// A browser connection, its initial page, and optionally an owned Chrome process.
 #[must_use = "retain the browser while using it; await close() to finish cleanup"]

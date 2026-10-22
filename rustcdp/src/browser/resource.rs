@@ -7,7 +7,7 @@ use crate::{
 use serde_json::json;
 use std::{
     sync::{
-        Arc, Weak,
+        Arc, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -17,6 +17,104 @@ use tokio::{sync::Mutex, task::JoinHandle};
 struct Entry {
     page: Page,
     delivered: bool,
+    closed: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Entry {
+    fn new(page: Page, delivered: bool) -> Self {
+        let mut entry = Self {
+            page,
+            delivered: false,
+            closed: None,
+        };
+        if delivered {
+            entry.deliver();
+        }
+        entry
+    }
+
+    fn deliver(&mut self) {
+        self.delivered = true;
+        if self.closed.is_some() {
+            return;
+        }
+        // No Page or context lease in this observer, and no strong scope until
+        // the session closes. Evicting the entry cancels its observer as well.
+        let owner = self
+            .page
+            .registration
+            .owner
+            .get()
+            .expect("registered page")
+            .clone();
+        let session = self.page.session().clone();
+        let auth = self.page.auth.clone();
+        self.closed = Some(session.connection().runtime().spawn(async move {
+            session.closed().await;
+            let Some(owner) = owner.upgrade() else { return };
+            let _gate = owner.gate.lock().await;
+            if let Some(auth) = auth {
+                let _ = auth.stop().await;
+            }
+            // Session detachment does not prove target closure: preserve any
+            // undelivered target obligation and never issue a close command.
+            let removed = {
+                let mut state = owner.state.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .entries
+                    .iter()
+                    .position(|entry| entry.delivered && entry.page.session().id() == session.id())
+                    .map(|index| state.entries.swap_remove(index))
+            };
+            drop(removed);
+        }));
+    }
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        if let Some(task) = &self.closed {
+            task.abort();
+        }
+    }
+}
+
+/// Shared by Page clones, without keeping the managed scope alive.
+#[derive(Default)]
+pub(crate) struct PageRegistration {
+    owner: OnceLock<Weak<ManagedPages>>,
+}
+
+impl PageRegistration {
+    fn bind(&self, owner: &Arc<ManagedPages>) {
+        let weak = Arc::downgrade(owner);
+        let registered = self.owner.get_or_init(|| weak.clone());
+        assert!(
+            registered.ptr_eq(&weak),
+            "page registered in different scopes"
+        );
+    }
+
+    pub(crate) async fn close(&self, connection: &Connection, id: &TargetId) -> Result<()> {
+        let Some(owner) = self.owner.get().and_then(Weak::upgrade) else {
+            return Page::close_target(connection, id).await;
+        };
+        // Serialize confirmation and eviction against replacement attachment.
+        // The caller owns and bounds this whole operation, including admission.
+        let _gate = owner.gate.lock().await;
+        Page::close_target(connection, id).await?;
+        let removed = {
+            let mut state = owner.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.unclaimed.retain(|pending| pending != id);
+            state
+                .entries
+                .iter()
+                .position(|entry| entry.page.id() == id)
+                .map(|index| state.entries.swap_remove(index))
+        };
+        drop(removed);
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -30,7 +128,7 @@ struct State {
 impl State {
     fn mark_delivered(&mut self, id: &TargetId) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.page.id() == id) {
-            entry.delivered = true;
+            entry.deliver();
         }
         self.unclaimed.retain(|pending| pending != id);
     }
@@ -120,7 +218,7 @@ impl ManagedPages {
             .target_infos)
     }
 
-    async fn list_owned(&self) -> Result<Vec<Page>> {
+    async fn list_owned(self: &Arc<Self>) -> Result<Vec<Page>> {
         let _gate = tokio::time::timeout(Duration::from_secs(30), self.gate.lock())
             .await
             .map_err(|_| Error::Timeout("waiting to list pages".into()))?;
@@ -175,7 +273,7 @@ impl ManagedPages {
 
     // Caller owns the scope gate. Reuse this for later browser lookup as well as
     // enumeration: this operation never owns permission to close an existing tab.
-    async fn adopt_owned(&self, id: &TargetId) -> Result<Option<Page>> {
+    async fn adopt_owned(self: &Arc<Self>, id: &TargetId) -> Result<Option<Page>> {
         let (cached, proxy) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -237,13 +335,11 @@ impl ManagedPages {
         // the current obligation under the same lock that replaces the entry.
         let mut cached = page.clone();
         cached.context_lease = None;
+        page.registration.bind(self);
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let delivered = !state.unclaimed.contains(id);
         state.entries.retain(|entry| entry.page.id() != id);
-        state.entries.push(Entry {
-            page: cached,
-            delivered,
-        });
+        state.entries.push(Entry::new(cached, delivered));
         Ok(Some(page))
     }
 
@@ -295,13 +391,14 @@ impl ManagedPages {
         state.proxy = None;
     }
 
-    fn register(&self, page: &Page, delivered: bool) {
+    fn register(self: &Arc<Self>, page: &Page, delivered: bool) {
         // Never introduce a cache -> Page -> ContextLease -> cache cycle.
         let mut page = page.clone();
         page.context_lease = None;
+        page.registration.bind(self);
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.entries.retain(|entry| entry.page.id() != page.id());
-        state.entries.push(Entry { page, delivered });
+        state.entries.push(Entry::new(page, delivered));
     }
 
     // The pending guard calls this synchronously on receipt. Future enumeration
