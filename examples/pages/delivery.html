@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Notebook delivery</title>
+  <style>
+    body { font: 18px system-ui; max-width: 40rem; margin: 4rem auto; padding: 1rem; color: #263b38; }
+    dl { padding: 1.5rem; background: #eef4ed; border-radius: 1rem; }
+    dt { font-weight: bold; margin-top: 1rem; }
+    dd { margin: .5rem 0 1rem; }
+    button { font: inherit; padding: .6rem 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Notebook delivery</h1>
+  <p>Check stock and delivery prices. The page also sends an optional analytics request.</p>
+  <button id="load">Check delivery options</button>
+  <dl>
+    <dt>Stock</dt><dd id="stock">Not loaded</dd>
+    <dt>Delivery quote</dt><dd id="quote">Not loaded</dd>
+    <dt>Analytics</dt><dd id="analytics">Not loaded</dd>
+  </dl>
+  <output id="status" aria-live="polite" data-state="idle">Ready.</output>
+  <script>
+    async function load(path, output, describe, fallback) {
+      try {
+        const response = await fetch(path, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        output.textContent = describe(await response.json());
+      } catch {
+        output.textContent = fallback;
+      }
+    }
+
+    document.querySelector('#load').onclick = async () => {
+      const button = document.querySelector('#load');
+      const status = document.querySelector('#status');
+      button.disabled = true;
+      status.dataset.state = 'loading';
+      status.textContent = 'Checking delivery options…';
+      await Promise.all([
+        load('api/stock.json', document.querySelector('#stock'),
+          stock => `${stock.quantity} notebooks available`, 'Stock unavailable'),
+        load('api/quote.json', document.querySelector('#quote'),
+          quote => `$${quote.price} — ${quote.arrival}`, 'Quote unavailable'),
+        load('api/analytics.json', document.querySelector('#analytics'),
+          () => 'Analytics received', 'Analytics unavailable')
+      ]);
+      status.textContent = 'Delivery check finished.';
+      status.dataset.state = 'done';
+      button.disabled = false;
+    };
+  </script>
+</body>
+</html>

@@ -971,6 +971,7 @@ name = "rustcdp-examples"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "base64",
  "rustcdp",
  "serde_json",
  "tokio",

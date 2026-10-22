@@ -70,8 +70,8 @@ profile, and process-cleanup contracts.
 ## Try the examples
 
 The examples open a Chrome window and load HTML from [examples/pages](examples/pages).
-Most navigate to a `file://` URL; the browser contexts example starts a localhost
-server on an available port for cookies and HTTP requests. The server
+Most navigate to a `file://` URL; browser contexts and request interception start
+a localhost server on an available port for cookies and HTTP requests. The server
 serves only the pages directory and stops when the example exits. No external site
 is required. Paths resolve relative to the examples package, not your working directory.
 Chrome flags can follow `--` in each run command. Headless mode is optional:
@@ -87,6 +87,7 @@ cargo run -p rustcdp-examples --example checkout -- --headless=new
 | [frame_walk](examples/frame_walk.rs) | Update inventory inside a nested dispatch-board iframe | `cargo run -p rustcdp-examples --example frame_walk` |
 | [event_watch](examples/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run -p rustcdp-examples --example event_watch` |
 | [browser_contexts](examples/browser_contexts.rs) | Isolate shoppers' cookies, share a cart across tabs, and close contexts independently | `cargo run -p rustcdp-examples --example browser_contexts` |
+| [request_interception](examples/request_interception.rs) | Continue stock requests, replace a delivery quote, and block analytics using typed Fetch commands | `cargo run -p rustcdp-examples --example request_interception` |
 
 The [examples package](examples/Cargo.toml) is separate, unpublished, and excluded
 from the library package. Its dependencies are not needed by library consumers.
