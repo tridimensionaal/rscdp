@@ -27,6 +27,15 @@ struct State {
     proxy: Option<Proxy>,
 }
 
+impl State {
+    fn mark_delivered(&mut self, id: &TargetId) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.page.id() == id) {
+            entry.delivered = true;
+        }
+        self.unclaimed.retain(|pending| pending != id);
+    }
+}
+
 #[derive(PartialEq, Eq)]
 enum Scope {
     Default,
@@ -159,14 +168,7 @@ impl ManagedPages {
             return Err(Error::InvalidArgument("page scope is closing".into()));
         }
         for page in &pages {
-            if let Some(entry) = state
-                .entries
-                .iter_mut()
-                .find(|entry| entry.page.id() == page.id())
-            {
-                entry.delivered = true;
-            }
-            state.unclaimed.retain(|id| id != page.id());
+            state.mark_delivered(page.id());
         }
         Ok(pages)
     }
@@ -314,9 +316,8 @@ impl ManagedPages {
             .iter_mut()
             .find(|entry| entry.page.id() == id)
             .ok_or_else(|| Error::InvalidArgument("pending page is no longer managed".into()))?;
-        entry.delivered = true;
         let page = entry.page.clone();
-        state.unclaimed.retain(|pending| pending != id);
+        state.mark_delivered(id);
         Ok(page)
     }
 
@@ -388,6 +389,174 @@ impl BrowserPages {
     pub(super) async fn new_page(&self) -> Result<Page> {
         self.ensure_open()?;
         self.default.new_page(None).await
+    }
+
+    pub(super) async fn lookup(self: &Arc<Self>, id: Option<TargetId>) -> Result<Vec<Page>> {
+        self.ensure_open()?;
+        let browser = self.clone();
+        let task = self
+            .default
+            .connection
+            .runtime()
+            .spawn(async move { browser.lookup_owned(id).await });
+        let selected = if let Some(timeout) = self.default.connection.command_timeout() {
+            tokio::time::timeout(timeout, task)
+                .await
+                .map_err(|_| Error::Timeout("looking up browser pages".into()))??
+        } else {
+            task.await?
+        }?;
+        // No await between checking closure and delivering the completed result.
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closing {
+            return Err(Error::InvalidArgument("browser is closing".into()));
+        }
+        for (scope, _) in &selected {
+            scope.ensure_open()?;
+        }
+        Ok(selected.into_iter().map(|(_, page)| page).collect())
+    }
+
+    async fn lookup_owned(&self, id: Option<TargetId>) -> Result<Vec<(Arc<ManagedPages>, Page)>> {
+        // Serialize browser lookup and context registration. No returned task
+        // result owns this gate or any scope gate.
+        let _acquisition =
+            tokio::time::timeout(Duration::from_secs(30), self.acquisition_gate.lock())
+                .await
+                .map_err(|_| Error::Timeout("waiting to look up browser pages".into()))?;
+        self.ensure_open()?;
+        let commands = self
+            .default
+            .connection
+            .clone()
+            .with_command_timeout(Some(Duration::from_secs(30)));
+        // Bracket target discovery: a changing isolated-context set must not
+        // accidentally route a foreign target through default proxy credentials.
+        // Only discovery is retried; no attachment/setup has started here.
+        let (mut targets, isolated) = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let mut before = commands
+                    .execute(&crate::cdp::target::commands::GetBrowserContexts::default())
+                    .await?
+                    .browser_context_ids;
+                let targets = self.default.target_snapshot().await?;
+                let mut after = commands
+                    .execute(&crate::cdp::target::commands::GetBrowserContexts::default())
+                    .await?
+                    .browser_context_ids;
+                before.sort_by(|a, b| a.0.cmp(&b.0));
+                after.sort_by(|a, b| a.0.cmp(&b.0));
+                if before == after {
+                    break Ok::<_, Error>((targets, after));
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout("resolving browser page scopes".into()))??;
+        targets.retain(|target| {
+            target.type_ == "page" && id.as_ref().is_none_or(|id| id == &target.target_id)
+        });
+        targets.sort_by(|a, b| a.target_id.0.cmp(&b.target_id.0));
+
+        // Each scope appears once so acquiring all selected gates cannot lock a
+        // mutex twice. Context operations acquire only their own scope gate.
+        let mut scopes: Vec<(Arc<ManagedPages>, Option<Arc<ContextLease>>)> = Vec::new();
+        let mut routed = Vec::with_capacity(targets.len());
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.closing {
+                return Err(Error::InvalidArgument("browser is closing".into()));
+            }
+            for target in targets {
+                let (scope, lease) = if let Some(context) = &target.browser_context_id {
+                    if let Some(known) = state.known.iter().find(|known| &known.id == context) {
+                        // Expired known scopes remain tombstones: never adopt a
+                        // context still being disposed as credentialless foreign.
+                        let scope = known.pages.upgrade().ok_or_else(|| {
+                            Error::InvalidArgument("browser context is closing".into())
+                        })?;
+                        let lease = known
+                            .fallback
+                            .as_ref()
+                            .map(|weak| {
+                                weak.upgrade().ok_or_else(|| {
+                                    Error::InvalidArgument("fallback context is closing".into())
+                                })
+                            })
+                            .transpose()?;
+                        (scope, lease)
+                    } else if let Some(scope) = state
+                        .owned
+                        .iter()
+                        .find(|scope| scope.scope == Scope::Context(context.clone()))
+                    {
+                        (scope.clone(), None)
+                    } else if isolated.contains(context) {
+                        let scope = Arc::new(ManagedPages::new(
+                            self.default.connection.clone(),
+                            Scope::Context(context.clone()),
+                        ));
+                        state.owned.push(scope.clone());
+                        (scope, None)
+                    } else {
+                        (self.default.clone(), None)
+                    }
+                } else {
+                    (self.default.clone(), None)
+                };
+                scope.ensure_open()?;
+                let index = if let Some(index) = scopes
+                    .iter()
+                    .position(|(item, _)| Arc::ptr_eq(item, &scope))
+                {
+                    index
+                } else {
+                    scopes.push((scope, lease));
+                    scopes.len() - 1
+                };
+                routed.push((index, target.target_id));
+            }
+        }
+        let mut gates = Vec::with_capacity(scopes.len());
+        for (scope, _) in &scopes {
+            gates.push(
+                tokio::time::timeout(Duration::from_secs(30), scope.gate.lock())
+                    .await
+                    .map_err(|_| Error::Timeout("waiting to adopt browser pages".into()))?,
+            );
+            scope.ensure_open()?;
+        }
+        let mut selected = Vec::with_capacity(routed.len());
+        for (index, id) in routed {
+            self.ensure_open()?;
+            let (scope, fallback) = &scopes[index];
+            scope.ensure_open()?;
+            if let Some(mut page) = scope.adopt_owned(&id).await? {
+                page.context_lease = fallback.clone();
+                selected.push((scope.clone(), page));
+            }
+        }
+        // Browser -> all selected scope states is the shutdown lock order.
+        // Check every scope before publishing any pending-created target.
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closing {
+            return Err(Error::InvalidArgument("browser is closing".into()));
+        }
+        let mut states: Vec<_> = scopes
+            .iter()
+            .map(|(scope, _)| scope.state.lock().unwrap_or_else(|e| e.into_inner()))
+            .collect();
+        if states.iter().any(|state| state.closing) {
+            return Err(Error::InvalidArgument("page scope is closing".into()));
+        }
+        for (scope, page) in &selected {
+            let index = scopes
+                .iter()
+                .position(|(item, _)| Arc::ptr_eq(item, scope))
+                .unwrap();
+            states[index].mark_delivered(page.id());
+        }
+        Ok(selected)
     }
 
     pub(super) fn ensure_open(&self) -> Result<()> {

@@ -181,6 +181,37 @@ impl Browser {
         self.pages.new_page().await
     }
 
+    /// Return page targets across contexts, sorted by target ID.
+    /// Reuses managed sessions and authentication. Unknown isolated contexts are
+    /// adopted without inferred credentials or context-disposal ownership.
+    /// Ordinary context handles keep their original owner lifetime; fallback
+    /// Pages retain the fallback lease. Closing scopes reject lookup.
+    ///
+    /// Like [`BrowserContext::pages`], enumeration is an owned operation: a caller
+    /// timeout/cancellation does not cancel setup or its bounded recovery. A
+    /// successful enumeration publishes pending-created tabs before its task
+    /// result is received. Failed lists return no partial result. Snapshots do not
+    /// guarantee that every returned tab remains open.
+    /// Gate admission and scope discovery have 30-second bounds; setup helpers
+    /// finish their own recovery. There is no total work deadline across targets.
+    /// Acquisition failure detaches its session; known-credential auth fatal
+    /// recovery can close its target/connection, and failed detach can disconnect.
+    pub async fn pages(&self) -> Result<Vec<Page>> {
+        self.pages.lookup(None).await
+    }
+
+    /// Find a page target by ID, reusing its managed handle when possible.
+    /// Missing targets and non-page targets return `None`. Other errors propagate.
+    /// Ownership, cancellation, and recovery follow [`Self::pages`].
+    pub async fn page_by_id(&self, id: &crate::cdp::target::TargetId) -> Result<Option<Page>> {
+        Ok(self
+            .pages
+            .lookup(Some(id.clone()))
+            .await?
+            .into_iter()
+            .next())
+    }
+
     /// Create an isolated context inheriting the browser's proxy routing and bypass rules.
     /// Credentials retained by [`Self::launch_with_proxy`] arm authentication on
     /// each managed page, including [`BrowserContext::new_page`]. Credentials from
