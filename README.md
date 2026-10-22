@@ -82,7 +82,7 @@ cargo run -p rustcdp-examples --example checkout -- --headless=new
 | [page_report](examples/page_report.rs) | Export a workshop report as a full-page PNG and PDF | `cargo run -p rustcdp-examples --example page_report` |
 | [frame_walk](examples/frame_walk.rs) | Update inventory inside a nested dispatch-board iframe | `cargo run -p rustcdp-examples --example frame_walk` |
 | [event_watch](examples/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run -p rustcdp-examples --example event_watch` |
-| [browser_contexts](examples/browser_contexts.rs) | Isolate and clear two shoppers' cookies; close contexts independently | `cargo run -p rustcdp-examples --example browser_contexts` |
+| [browser_contexts](examples/browser_contexts.rs) | Isolate shoppers' cookies, share a cart across tabs, and close contexts independently | `cargo run -p rustcdp-examples --example browser_contexts` |
 
 The [examples package](examples/Cargo.toml) is separate, unpublished, and excluded
 from the library package. Its dependencies are not needed by library consumers.
@@ -98,6 +98,9 @@ Each example awaits browser cleanup on success or failure. Report files go to
   [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
   `browser.new_page()` creates a tab in the default profile;
   `context.new_page()` creates one sharing that isolated context's storage.
+  Use `browser.pages()` or `context.pages()` to list managed page handles, or
+  `browser.page_by_id(&id)` to select one exact target. Lists are sorted by target
+  ID, not tab-strip order, and reuse existing sessions and authentication workers.
 - [Page](rustcdp/src/page.rs): navigation, JavaScript evaluation, HTML, and cookies.
   [Selectors](rustcdp/src/page/selectors.rs) provides optional lookup, required lookup,
   and element-returning presence waits;

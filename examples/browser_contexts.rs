@@ -69,6 +69,27 @@ async fn compare_carts(
             "cart cookies were not isolated".into(),
         ));
     }
+    let preview = mira.new_page().await?;
+    preview
+        .navigate(common::html_url(
+            "<title>Order preview</title><h1>Ready to reserve</h1>",
+        ))
+        .send()
+        .await?;
+    if cart_item(preview.cookies().await?).as_deref() != Some("notebook") {
+        return Err(Error::InvalidArgument(
+            "preview did not share Mira's cart".into(),
+        ));
+    }
+    let pages = mira.pages().await?;
+    if pages.len() != 2 || !pages.iter().any(|page| page.id() == preview.id()) {
+        return Err(Error::InvalidArgument("Mira's tabs were not listed".into()));
+    }
+    println!(
+        "Mira's cart and preview share cookies across {} tabs.",
+        pages.len()
+    );
+    preview.close().await?;
     leo.clear_cookies().await?;
     if !leo.cookies().await?.is_empty()
         || cart_item(mira.cookies().await?).as_deref() != Some("notebook")

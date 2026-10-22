@@ -58,7 +58,7 @@ pub(crate) fn validated_switch_name(arg: &OsStr) -> Result<Option<String>> {
     let name = name.to_owned();
     if name.starts_with("user-data-dir") || name.starts_with("remote-debugging-") {
         return Err(Error::InvalidArgument(
-            "use builder or LaunchOptions fields for profile/debugging settings".into(),
+            "profile and remote-debugging switches are managed by the launcher; use profile_dir to select a profile".into(),
         ));
     }
     #[cfg(windows)]
