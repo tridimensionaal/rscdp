@@ -37,3 +37,7 @@ path = "browser_contexts.rs"
 [[example]]
 name = "request_interception"
 path = "request_interception.rs"
+
+[[example]]
+name = "file_upload"
+path = "file_upload.rs"

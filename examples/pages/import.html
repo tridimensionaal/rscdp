@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stock CSV preview</title>
+  <style>
+    body { max-width: 640px; margin: 48px auto; padding: 0 24px; font: 18px system-ui; color: #243c35; background: #f6f4ee; }
+    input { display: block; margin: 12px 0 24px; }
+    table { width: 100%; border-collapse: collapse; background: white; }
+    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #cbd5cf; }
+    #summary { display: block; margin-top: 24px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Stock CSV preview</h1>
+  <p>Select stock.csv to preview its contents locally using the browser File API.
+    Nothing is submitted to a server.</p>
+  <p>This small example accepts an item,quantity header and unquoted values
+    separated by commas, with whole-number quantities.</p>
+  <label for="stock-file">Stock CSV</label>
+  <input id="stock-file" type="file" accept=".csv,text/csv">
+  <table>
+    <caption>Selected stock</caption>
+    <thead><tr><th scope="col">Item</th><th scope="col">Quantity</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <output id="summary" aria-live="polite" data-state="idle">Choose a CSV file.</output>
+  <script>
+    const input = document.querySelector('#stock-file');
+    const body = document.querySelector('tbody');
+    const summary = document.querySelector('#summary');
+
+    input.onchange = async () => {
+      body.replaceChildren();
+      summary.dataset.state = 'reading';
+      const file = input.files[0];
+      if (!file) {
+        summary.textContent = 'Choose a CSV file.';
+        summary.dataset.state = 'idle';
+        return;
+      }
+      summary.textContent = 'Reading ' + file.name + '…';
+      try {
+        const lines = (await file.text()).trim().split(/\r?\n/);
+        if (lines.shift() !== 'item,quantity' || lines.length === 0) {
+          throw new Error('Expected item,quantity header and at least one row.');
+        }
+        let total = 0;
+        const rows = document.createDocumentFragment();
+        for (const line of lines) {
+          const cells = line.split(',');
+          if (cells.length !== 2 || !cells[0].trim() || line.includes('"') ||
+              !/^\d+$/.test(cells[1]) || !Number.isSafeInteger(Number(cells[1]))) {
+            throw new Error('Expected an unquoted item and a whole-number quantity.');
+          }
+          total += Number(cells[1]);
+          if (!Number.isSafeInteger(total)) throw new Error('Stock total is too large.');
+          const row = document.createElement('tr');
+          for (const value of cells) {
+            const cell = document.createElement('td');
+            cell.textContent = value;
+            row.append(cell);
+          }
+          rows.append(row);
+        }
+        body.append(rows);
+        summary.textContent = `${file.name}: ${lines.length} rows, ${total} units total.`;
+        summary.dataset.state = 'done';
+      } catch (error) {
+        summary.textContent = 'Could not preview CSV: ' + error.message;
+        summary.dataset.state = 'error';
+      }
+    };
+  </script>
+</body>
+</html>

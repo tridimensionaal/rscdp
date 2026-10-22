@@ -88,6 +88,7 @@ cargo run -p rustcdp-examples --example checkout -- --headless=new
 | [event_watch](examples/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run -p rustcdp-examples --example event_watch` |
 | [browser_contexts](examples/browser_contexts.rs) | Isolate shoppers' cookies, share a cart across tabs, and close contexts independently | `cargo run -p rustcdp-examples --example browser_contexts` |
 | [request_interception](examples/request_interception.rs) | Continue stock requests, replace a delivery quote, and block analytics using typed Fetch commands | `cargo run -p rustcdp-examples --example request_interception` |
+| [file_upload](examples/file_upload.rs) | Select a local CSV with CDP and verify its File API preview (no server upload) | `cargo run -p rustcdp-examples --example file_upload` |
 
 The [examples package](examples/Cargo.toml) is separate, unpublished, and excluded
 from the library package. Its dependencies are not needed by library consumers.
