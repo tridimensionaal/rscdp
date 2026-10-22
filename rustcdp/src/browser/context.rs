@@ -58,24 +58,45 @@ impl BrowserContext {
             let response = commands
                 .execute_raw("Target.createBrowserContext", params)
                 .await?;
-            let id: BrowserContextId =
-                serde_json::from_value(response["browserContextId"].clone())?;
+            let created: crate::cdp::target::commands::CreateBrowserContextResponse =
+                crate::error::decode_ref("Target.createBrowserContext", &response)?;
+            let id = created.browser_context_id;
+            if id.0.is_empty() {
+                return Err(Error::UnexpectedResponse {
+                    method: "Target.createBrowserContext".into(),
+                    payload: response,
+                });
+            }
             lease = Some(ContextLease::new(connection.clone(), id.clone()));
             // The context guard owns every resource acquired here. Keep setup in
             // this task so disposal cannot be followed by a nested task's recovery.
-            let target = commands
-                .execute(
-                    &crate::cdp::target::commands::CreateTarget::new("about:blank")
-                        .with_browser_context_id(id.clone()),
-                )
-                .await?
-                .target_id;
-            let attached = commands
-                .execute(
-                    &crate::cdp::target::commands::AttachToTarget::new(target.clone())
-                        .with_flatten(true),
-                )
+            let create = crate::cdp::target::commands::CreateTarget::new("about:blank")
+                .with_browser_context_id(id.clone());
+            let response = commands
+                .execute_raw("Target.createTarget", serde_json::to_value(create)?)
                 .await?;
+            let created: crate::cdp::target::commands::CreateTargetResponse =
+                crate::error::decode_ref("Target.createTarget", &response)?;
+            let target = created.target_id;
+            if target.0.is_empty() {
+                return Err(Error::UnexpectedResponse {
+                    method: "Target.createTarget".into(),
+                    payload: response,
+                });
+            }
+            let attach = crate::cdp::target::commands::AttachToTarget::new(target.clone())
+                .with_flatten(true);
+            let response = commands
+                .execute_raw("Target.attachToTarget", serde_json::to_value(attach)?)
+                .await?;
+            let attached: crate::cdp::target::commands::AttachToTargetResponse =
+                crate::error::decode_ref("Target.attachToTarget", &response)?;
+            if attached.session_id.0.is_empty() {
+                return Err(Error::UnexpectedResponse {
+                    method: "Target.attachToTarget".into(),
+                    payload: response,
+                });
+            }
             let session = commands.session(attached.session_id, target)?;
             Page::from_session_for_created_target(session, Some(id)).await
         })
