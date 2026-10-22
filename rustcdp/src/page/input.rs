@@ -1,5 +1,12 @@
-use super::{ClickMethod, Element, Page, element::own_remote_object};
-use crate::{Error, Result, Session, cdp::input::commands::InsertText, error::with_cleanup};
+use super::{
+    ClickMethod, Element, Page,
+    element::{own_remote_object, validate_exception},
+};
+use crate::{
+    Error, Result, Session,
+    cdp::{input::commands::InsertText, runtime::commands::CallFunctionOnResponse},
+    error::{decode_ref, with_cleanup},
+};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
@@ -206,14 +213,34 @@ impl Element {
                     own_remote_object(&element.0.session, &element.0.context_lease, object, &mut objects);
                 }
                 drop(objects);
+                let decoded: CallFunctionOnResponse =
+                    decode_ref("Runtime.callFunctionOn", &response)?;
+                validate_exception("Runtime.callFunctionOn", &response)?;
                 if let Some(error) = response.get("exceptionDetails") {
                     return Err(Error::JavaScript(error.clone()));
                 }
-                let value = &response["result"]["value"];
-                if let Some(message) = value.as_str() {
-                    return Err(Error::InvalidArgument(message.to_owned()));
+                // Preparation returns only a by-value boolean or rejection string.
+                // Validate the envelope before treating a string as caller error.
+                let remote = &response["result"];
+                if remote.get("objectId").is_some()
+                    || remote.get("unserializableValue").is_some()
+                    || remote.get("subtype").is_some()
+                {
+                    return Err(Error::UnexpectedResponse {
+                        method: "Runtime.callFunctionOn".into(),
+                        payload: response,
+                    });
                 }
-                let empty = crate::error::decode::<bool>("Runtime.callFunctionOn", value.clone())?;
+                let empty = match (decoded.result.type_.as_str(), &remote["value"]) {
+                    ("boolean", Value::Bool(empty)) => *empty,
+                    ("string", Value::String(message)) => {
+                        return Err(Error::InvalidArgument(message.clone()));
+                    }
+                    _ => return Err(Error::UnexpectedResponse {
+                        method: "Runtime.callFunctionOn".into(),
+                        payload: response,
+                    }),
+                };
                 if !text.is_empty() {
                     insert_text(&session, &text).await
                 } else if !empty {
