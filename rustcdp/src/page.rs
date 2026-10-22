@@ -149,7 +149,9 @@ impl Page {
             .connection()
             .execute_raw("Storage.getCookies", params)
             .await?;
-        serde_json::from_value(response["cookies"].clone()).map_err(Into::into)
+        let decoded: crate::cdp::storage::commands::GetCookiesResponse =
+            crate::error::decode_ref("Storage.getCookies", &response)?;
+        Ok(decoded.cookies)
     }
 
     /// Set cookies in this page's browser context.
