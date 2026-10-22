@@ -1,6 +1,8 @@
 //! Keep two shoppers' cookie jars isolated within one browser process.
-//! Cookies are seeded through CDP for a fictitious site; no network is needed.
+//! Serve real pages on localhost and read each context's cookies in the page.
 mod common;
+#[path = "common/server.rs"]
+mod server;
 use rustcdp::{
     Browser, BrowserContext, Error, Result,
     cdp::network::{Cookie, CookieParam},
@@ -9,26 +11,31 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let server = server::Server::start().await?;
     let mut browser = common::launch().await?;
-    let result = shopping_sessions(&browser).await;
+    let result = shopping_sessions(&browser, &server).await;
     let cleanup = browser.close().await;
     result?;
     cleanup
 }
 
-async fn shopping_sessions(browser: &Browser) -> Result<()> {
+async fn shopping_sessions(browser: &Browser, server: &server::Server) -> Result<()> {
     // Retain this owner for as long as its page is needed.
     let mut mira = browser.new_context().await?;
-    let result = second_shopper(browser, &mira).await;
+    let result = second_shopper(browser, &mira, server).await;
     // Always await disposal, including when creating or using the second fails.
     let cleanup = mira.close().await;
     result?;
     cleanup
 }
 
-async fn second_shopper(browser: &Browser, mira: &BrowserContext) -> Result<()> {
+async fn second_shopper(
+    browser: &Browser,
+    mira: &BrowserContext,
+    server: &server::Server,
+) -> Result<()> {
     let mut leo = browser.new_context().await?;
-    let result = compare_carts(browser, mira, &leo).await;
+    let result = compare_carts(browser, mira, &leo, server).await;
     let cleanup = leo.close().await;
     result?;
     cleanup?;
@@ -52,9 +59,10 @@ async fn compare_carts(
     browser: &Browser,
     mira: &BrowserContext,
     leo: &BrowserContext,
+    server: &server::Server,
 ) -> Result<()> {
-    prepare_cart(mira, "Mira", "notebook").await?;
-    prepare_cart(leo, "Leo", "mug").await?;
+    prepare_cart(mira, server, "Mira", "notebook").await?;
+    prepare_cart(leo, server, "Leo", "mug").await?;
 
     // Same cookie name and domain, different values in independent contexts.
     let mira_cart = cart_item(mira.cookies().await?);
@@ -70,13 +78,14 @@ async fn compare_carts(
         ));
     }
     let preview = mira.new_page().await?;
-    preview
-        .navigate(common::html_url(
-            "<title>Order preview</title><h1>Ready to reserve</h1>",
-        ))
-        .send()
+    preview.navigate(server.url("preview.html")).send().await?;
+    let preview_cart = preview
+        .evaluate("document.querySelector('#cart').textContent")
+        .json::<String>()
         .await?;
-    if cart_item(preview.cookies().await?).as_deref() != Some("notebook") {
+    if preview_cart != "notebook"
+        || cart_item(preview.cookies().await?).as_deref() != Some("notebook")
+    {
         return Err(Error::InvalidArgument(
             "preview did not share Mira's cart".into(),
         ));
@@ -103,33 +112,39 @@ async fn compare_carts(
     Ok(())
 }
 
-async fn prepare_cart(context: &BrowserContext, shopper: &str, item: &str) -> Result<()> {
+async fn prepare_cart(
+    context: &BrowserContext,
+    server: &server::Server,
+    shopper: &str,
+    item: &str,
+) -> Result<()> {
     context
         .set_cookies(&[CookieParam::new("cart", item)
-            .with_domain("shop.example")
+            .with_url(server.url("cart.html"))
             .with_path("/")])
         .await?;
-    // data: pages cannot access shop.example cookies through document.cookie.
-    // Display the context's cookie through the CDP cookie API instead.
-    let cart = cart_item(context.cookies().await?);
-    let html = format!(
-        "<!doctype html><meta charset=utf-8><title>{shopper}'s cart</title>\
-         <h1>{shopper}'s cart</h1><p>Cart cookie for shop.example: {cart:?}</p>"
-    );
     context
         .page()
-        .navigate(common::html_url(&html))
+        .navigate(server.url(&format!("cart.html?shopper={shopper}")))
         .timeout(Duration::from_secs(10))
         .send()
         .await?;
+    let displayed = context
+        .page()
+        .evaluate("document.querySelector('#cart').textContent")
+        .json::<String>()
+        .await?;
+    if displayed != item {
+        return Err(Error::InvalidArgument(
+            "page did not read its context's cart cookie".into(),
+        ));
+    }
     Ok(())
 }
 
 fn cart_item(cookies: Vec<Cookie>) -> Option<String> {
     cookies
         .into_iter()
-        .find(|cookie| {
-            cookie.name == "cart" && cookie.domain.trim_start_matches('.') == "shop.example"
-        })
+        .find(|cookie| cookie.name == "cart" && cookie.domain == "127.0.0.1")
         .map(|cookie| cookie.value)
 }

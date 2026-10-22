@@ -69,8 +69,12 @@ profile, and process-cleanup contracts.
 
 ## Try the examples
 
-The examples open a Chrome window and use local sample pages. Chrome flags
-can follow `--` in each run command. Headless mode is optional:
+The examples open a Chrome window and load HTML from [examples/pages](examples/pages).
+Most navigate to a `file://` URL; the browser contexts example starts a localhost
+server on an available port for cookies and HTTP requests. The server
+serves only the pages directory and stops when the example exits. No external site
+is required. Paths resolve relative to the examples package, not your working directory.
+Chrome flags can follow `--` in each run command. Headless mode is optional:
 
 ```sh
 cargo run -p rustcdp-examples --example checkout -- --headless=new

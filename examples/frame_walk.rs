@@ -6,32 +6,17 @@ use rustcdp::{
 };
 use std::time::Duration;
 
-fn embed(name: &str, html: &str) -> String {
-    let html = html.replace('&', "&amp;").replace('"', "&quot;");
-    format!("<iframe name=\"{name}\" srcdoc=\"{html}\"></iframe>")
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    let shelf = "<title>Shelf A</title><h2>Notebooks</h2><output>3</output><button onclick=\"document.querySelector('output').textContent++\">Receive one</button>";
-    let warehouse = format!(
-        "<title>Warehouse</title><h1>Inventory</h1>{}",
-        embed("shelf", shelf)
-    );
-    let board = format!(
-        "<title>Dispatch board</title><h1>Today's dispatch</h1>{}{}",
-        embed("warehouse", &warehouse),
-        embed("courier", "<title>Courier</title><p>Pickup at 16:00</p>")
-    );
     let mut browser = common::launch().await?;
-    let result = update_inventory(browser.page(), &board).await;
+    let result = update_inventory(browser.page()).await;
     let cleanup = browser.close().await;
     result?;
     cleanup
 }
 
-async fn update_inventory(page: &Page, board: &str) -> Result<()> {
-    page.navigate(common::html_url(board))
+async fn update_inventory(page: &Page) -> Result<()> {
+    page.navigate(common::page_url("dispatch-board.html")?)
         .timeout(Duration::from_secs(10))
         .send()
         .await?;

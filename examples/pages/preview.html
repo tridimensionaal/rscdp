@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Order preview</title></head>
+<body>
+  <h1>Ready to reserve</h1>
+  <p>Another tab in the same browser context can read the same cart cookie.</p>
+  <output id="cart"></output>
+  <script>
+    const cart = document.cookie.split('; ').find(cookie => cookie.startsWith('cart='));
+    document.querySelector('#cart').textContent = cart ? decodeURIComponent(cart.slice(5)) : 'empty';
+  </script>
+</body>
+</html>

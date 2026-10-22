@@ -3,14 +3,6 @@ mod common;
 use rustcdp::{Error, Page, Result};
 use std::time::Duration;
 
-const CHECKOUT: &str = r#"<!doctype html><meta charset="utf-8"><title>Paper shop</title>
-<h1>Paper shop — checkout</h1><p>Field notebook · $12</p>
-<form onsubmit="event.preventDefault(); document.querySelector('output').textContent =
-  'Reserved for ' + this.customer.value + ': ' + this.note.value">
-<label>Name <input name="customer" value="Guest" required></label>
-<label>Gift note <input name="note"></label><button>Reserve notebook</button>
-</form><output aria-live="polite"></output>"#;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut browser = common::launch().await?;
@@ -21,7 +13,7 @@ async fn main() -> Result<()> {
 }
 
 async fn reserve_notebook(page: &Page) -> Result<()> {
-    page.navigate(common::html_url(CHECKOUT))
+    page.navigate(common::page_url("checkout.html")?)
         .timeout(Duration::from_secs(10))
         .send()
         .await?;

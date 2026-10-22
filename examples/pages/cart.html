@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shopping cart</title>
+  <style>
+    body { font: 18px system-ui; max-width: 40rem; margin: 4rem auto; padding: 1rem; }
+    output { display: block; padding: 1rem; background: #edf4eb; }
+  </style>
+</head>
+<body>
+  <h1>Shopping cart</h1>
+  <p>This tab reads the cart cookie from its own browser context.</p>
+  <output id="cart"></output>
+  <a href="preview.html">Open the order preview</a>
+  <script>
+    const shopper = new URLSearchParams(location.search).get('shopper') || 'Guest';
+    document.title = `${shopper}'s cart`;
+    document.querySelector('h1').textContent = document.title;
+    const cart = document.cookie.split('; ').find(cookie => cookie.startsWith('cart='));
+    document.querySelector('#cart').textContent = cart ? decodeURIComponent(cart.slice(5)) : 'empty';
+  </script>
+</body>
+</html>

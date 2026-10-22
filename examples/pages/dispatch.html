@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Dispatch console</title>
+  </head>
+  <body>
+    <h1>Order #1042</h1>
+    <ol id="timeline"></ol>
+    <script>
+      ['queued', 'packed', 'ready for collection'].forEach((state, index) => {
+        setTimeout(() => {
+          const item = document.createElement('li');
+          item.textContent = state;
+          document.querySelector('ol').append(item);
+          console.info('dispatch-demo', 1042, state);
+        }, index * 150);
+      });
+    </script>
+  </body>
+</html>

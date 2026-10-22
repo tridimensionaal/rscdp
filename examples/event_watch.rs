@@ -3,17 +3,6 @@ mod common;
 use rustcdp::{Error, Page, Result, cdp::runtime::events::ConsoleApiCalled};
 use std::time::Duration;
 
-const DISPATCH: &str = r#"<!doctype html><title>Dispatch console</title><h1>Order #1042</h1>
-<ol id="timeline"></ol><script>
-['queued', 'packed', 'ready for collection'].forEach((state, index) => {
-  setTimeout(() => {
-    const item = document.createElement('li'); item.textContent = state;
-    document.querySelector('ol').append(item);
-    console.info('dispatch-demo', 1042, state);
-  }, index * 150);
-});
-</script>"#;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut browser = common::launch().await?;
@@ -26,7 +15,9 @@ async fn main() -> Result<()> {
 async fn watch_dispatch(page: &Page) -> Result<()> {
     let mut events = page.session().listen::<ConsoleApiCalled>();
     let runtime = page.session().enable_runtime().await?;
-    page.navigate(common::html_url(DISPATCH)).send().await?;
+    page.navigate(common::page_url("dispatch.html")?)
+        .send()
+        .await?;
     tokio::time::timeout(
         Duration::from_secs(10),
         collect_dispatch_events(&mut events),
