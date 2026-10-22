@@ -51,13 +51,19 @@ If both fail, this example returns the operation error. Your application owns th
 Tokio runtime; keep it running until awaited cleanup finishes.
 
 The [browser builder](rustcdp/src/browser/builder.rs) lists supported settings and
-their defaults, including window size, DevTools, executable, profile, and startup
-timeout. Use `.arg()` or `.args()` for additional Chrome flags. Setting the same
+their defaults, including window size, DevTools, executable, profile, proxy, and
+timeouts. Use `.arg()` or `.args()` for additional Chrome flags. Setting the same
 option through both a typed setter and a raw flag returns an error; use one form.
 `Browser::launch(options)` remains available for existing `LaunchOptions` values.
+`build()` retains typed proxy and connection settings for that launch path.
+Use `.proxy(proxy)` with a parsed [Proxy](rustcdp/src/proxy.rs) to configure routing
+and optional authentication for managed pages. The process-only `BrowserProcess`
+accepts raw routing flags; typed proxies require the Browser owner.
 
 Use `Browser::connect` for an existing browser, or `Connection::connect` for direct
 CDP access. Both accept HTTP(S) discovery endpoints and WS(S) socket URLs.
+`Browser::connect_with_options(endpoint, connection_options)` applies custom
+transport limits and command deadlines when attaching to an existing browser.
 See [Browser](rustcdp/src/browser.rs) and [LaunchOptions](rustcdp/src/launcher.rs) for connection,
 profile, and process-cleanup contracts.
 
@@ -90,6 +96,8 @@ Each example awaits browser cleanup on success or failure. Report files go to
   and explicit cleanup. `new_context()` inherits the browser's proxy routing;
   `new_context_direct()` explicitly bypasses it.
   [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
+  `browser.new_page()` creates a tab in the default profile;
+  `context.new_page()` creates one sharing that isolated context's storage.
 - [Page](rustcdp/src/page.rs): navigation, JavaScript evaluation, HTML, and cookies.
   [Selectors](rustcdp/src/page/selectors.rs) provides optional lookup, required lookup,
   and element-returning presence waits;

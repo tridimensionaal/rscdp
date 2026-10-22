@@ -7,7 +7,7 @@ const CHECKOUT: &str = r#"<!doctype html><meta charset="utf-8"><title>Paper shop
 <h1>Paper shop — checkout</h1><p>Field notebook · $12</p>
 <form onsubmit="event.preventDefault(); document.querySelector('output').textContent =
   'Reserved for ' + this.customer.value + ': ' + this.note.value">
-<label>Name <input name="customer" required></label>
+<label>Name <input name="customer" value="Guest" required></label>
 <label>Gift note <input name="note"></label><button>Reserve notebook</button>
 </form><output aria-live="polite"></output>"#;
 
@@ -26,7 +26,7 @@ async fn reserve_notebook(page: &Page) -> Result<()> {
         .send()
         .await?;
     let customer = page.require_element("input[name=customer]").await?;
-    customer.insert_text("Ada Muñoz").await?;
+    customer.fill("Ada Muñoz").await?;
     page.press_key("Tab").await?;
     page.insert_text("For your next idea ✨").await?;
     page.press_key("Enter").await?;

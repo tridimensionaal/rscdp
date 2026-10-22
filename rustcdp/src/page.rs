@@ -95,6 +95,10 @@ impl Page {
         })
     }
 
+    /// Set the command deadline on this handle, leaving existing clones unchanged.
+    /// New clones inherit this setting. `None` disables caller command deadlines,
+    /// but owned acquisition and cleanup keep their independent bounds. Shared
+    /// sessions, domain guards, and authentication workers are not reconfigured.
     #[must_use]
     pub fn with_command_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.session = self.session.with_command_timeout(timeout);
