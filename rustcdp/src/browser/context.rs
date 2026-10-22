@@ -31,24 +31,6 @@ pub struct BrowserContext {
 }
 
 impl BrowserContext {
-    pub(crate) async fn create(connection: &Connection, params: Value) -> Result<Self> {
-        let timeout = connection.command_timeout();
-        let connection = connection.clone();
-        // Finish acquiring ownership even if the caller cancels. An unclaimed
-        // result is dropped by Tokio and disposes its context.
-        let task = connection
-            .runtime()
-            .spawn(async move { Self::create_owned(&connection, params).await });
-        let joined = if let Some(timeout) = timeout {
-            tokio::time::timeout(timeout, task)
-                .await
-                .map_err(|_| Error::Timeout("creating browser context".into()))?
-        } else {
-            task.await
-        };
-        joined?
-    }
-
     pub(super) async fn create_owned(connection: &Connection, mut params: Value) -> Result<Self> {
         // Disconnection must resolve ownership even if the creation reply is lost.
         params["disposeOnDetach"] = true.into();

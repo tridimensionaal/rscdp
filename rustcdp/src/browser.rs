@@ -71,9 +71,13 @@ impl Browser {
 
     /// Connect to an existing browser without owning its process.
     ///
-    /// Uses an existing page when available, without taking ownership of its
-    /// browser context. Otherwise creates a visible page in a fresh isolated
-    /// context, separate from the default profile's cookies and storage.
+    /// Tries existing page targets in target-ID order, without taking ownership
+    /// of their browser context. Only confirmed disappearance skips an attachment
+    /// failure; operational and domain-setup errors propagate. Selection tries
+    /// at most two snapshot batches, attempting each target ID once. Fallback
+    /// requires a fresh snapshot with no page targets; continuing churn returns
+    /// an attachment error. The fallback page uses a fresh isolated context,
+    /// separate from the default profile's cookies and storage.
     ///
     /// For an externally connected browser, dropping `Browser` leaves that fallback
     /// context alive while the connection stays open and dependent Page/Frame,
@@ -92,7 +96,11 @@ impl Browser {
     /// Uses the same page selection and ownership policy as [`Self::connect`].
     /// Options are validated before network activity. The connect timeout covers
     /// discovery and the WebSocket handshake; initial-page setup has its own
-    /// command and acquisition bounds.
+    /// command and acquisition bounds. Initial discovery commands use the configured
+    /// command timeout capped at 30 seconds. Attachment/domain setup and fallback
+    /// acquisition finish their own bounded recovery in an owned task, even if the
+    /// caller cancels. There is no aggregate deadline across candidate targets;
+    /// the returned Page retains the configured command timeout.
     pub async fn connect_with_options(
         endpoint: &str,
         options: crate::connection::ConnectionOptions,
@@ -116,7 +124,23 @@ impl Browser {
     }
 
     async fn initial_page(connection: &Connection) -> Result<(Page, Option<BrowserContextId>)> {
-        let targets = connection
+        let owned = connection.clone();
+        // Do not abandon a nested attachment/domain owner on a caller deadline.
+        // Cancellation drops this join handle, while selection and recovery finish.
+        connection
+            .runtime()
+            .spawn(async move {
+                let result = Self::select_initial_page(&owned).await;
+                if result.is_err() {
+                    owned.close().await;
+                }
+                result
+            })
+            .await?
+    }
+
+    async fn initial_targets(commands: &Connection) -> Result<Vec<crate::cdp::target::TargetInfo>> {
+        let mut targets = commands
             .execute(
                 &crate::cdp::target::commands::GetTargets::default().with_filter(
                     crate::cdp::target::TargetFilter(vec![
@@ -124,29 +148,95 @@ impl Browser {
                     ]),
                 ),
             )
-            .await?;
-        if let Some(target) = targets
-            .target_infos
-            .into_iter()
-            .find(|target| target.type_ == "page")
-        {
-            // Chrome also reports an ID for the default context, but Storage
-            // accepts explicit IDs only for contexts returned by this command.
-            let contexts = connection
+            .await?
+            .target_infos;
+        targets.sort_by(|a, b| a.target_id.0.cmp(&b.target_id.0));
+        Ok(targets)
+    }
+
+    async fn select_initial_page(
+        connection: &Connection,
+    ) -> Result<(Page, Option<BrowserContextId>)> {
+        let bound = std::time::Duration::from_secs(30);
+        let commands = connection.clone().with_command_timeout(Some(
+            connection
+                .command_timeout()
+                .map_or(bound, |timeout| timeout.min(bound)),
+        ));
+        let setup = connection.clone().with_command_timeout(None);
+        let mut targets = Self::initial_targets(&commands).await?;
+        let mut attempted = Vec::new();
+        let mut last_error = None;
+        // One original batch and at most one refreshed batch. Disappearance
+        // checks do not add candidates to the batch currently being attempted.
+        for _ in 0..2 {
+            if !targets.iter().any(|target| target.type_ == "page") {
+                break;
+            }
+            // Chrome reports a default-profile ID too; only isolated IDs belong
+            // in Page's context/Storage routing. Preserve this normalization.
+            let contexts = commands
                 .execute(&crate::cdp::target::commands::GetBrowserContexts::default())
-                .await?;
-            let context = target
-                .browser_context_id
-                .filter(|id| contexts.browser_context_ids.contains(id));
-            let session = connection.attach(target.target_id).await?;
-            let page =
-                Page::from_session(session, context.clone(), crate::page::TargetKind::Tab).await?;
-            Ok((page, context))
-        } else {
-            let context = BrowserContext::create(connection, json!({})).await?;
-            let id = context.id().cloned();
-            Ok((context.into_owned_page(), id))
+                .await?
+                .browser_context_ids;
+            for target in targets.iter().filter(|target| target.type_ == "page") {
+                if attempted.contains(&target.target_id) {
+                    continue;
+                }
+                attempted.push(target.target_id.clone());
+                let session = match setup.attach(target.target_id.clone()).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        // Check all target kinds, not just page candidates: a
+                        // changed kind is not proof that the target disappeared.
+                        match Self::initial_targets(&commands).await {
+                            Ok(fresh)
+                                if !fresh.iter().any(|item| item.target_id == target.target_id) =>
+                            {
+                                last_error = Some(error);
+                                continue;
+                            }
+                            Ok(_) => return Err(error),
+                            Err(reconcile) => return with_cleanup(Err(error), Err(reconcile)),
+                        }
+                    }
+                };
+                let context = target
+                    .browser_context_id
+                    .clone()
+                    .filter(|id| contexts.contains(id));
+                let page = match Page::from_session(
+                    session.clone(),
+                    context.clone(),
+                    crate::page::TargetKind::Tab,
+                )
+                .await
+                {
+                    Ok(page) => page.with_command_timeout(connection.command_timeout()),
+                    Err(error) => {
+                        // Domain failures are not stale-candidate retries. Finish
+                        // releasing this owned attachment before returning.
+                        let cleanup = session.detach().await;
+                        if cleanup.is_err() && !session.is_closed() {
+                            connection.close().await;
+                        }
+                        return with_cleanup(Err(error), cleanup);
+                    }
+                };
+                return Ok((page, context));
+            }
+            // Fallback is authorized only by a fresh page-free snapshot, never
+            // merely by exhausting a stale list or the finite retry budget.
+            targets = Self::initial_targets(&commands).await?;
         }
+        if targets.iter().any(|target| target.type_ == "page") {
+            return Err(last_error.expect("candidate batches exhausted after attachment failures"));
+        }
+        // This is already an owned task; await context acquisition and recovery
+        // directly, without a nested cancellation-prone caller timeout.
+        let context = BrowserContext::create_owned(connection, json!({})).await?;
+        let id = context.id().cloned();
+        Ok((context.into_owned_page(), id))
     }
 
     pub fn connection(&self) -> &Connection {
