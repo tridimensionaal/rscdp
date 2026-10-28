@@ -28,6 +28,13 @@ fn items<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value[key].as_array().map_or(&[], Vec::as_slice)
 }
 
+fn optional(owner: &str, field: &Value) -> bool {
+    // Chrome 151 omits this newer field from WebAudio events. Keep the pinned
+    // source untouched and make this one compatibility exception explicit.
+    field["optional"] == true
+        || (owner == "WebAudio.BaseAudioContext" && field["name"] == "renderQuantumSize")
+}
+
 fn prose(mut text: &str) -> String {
     fn escape(text: &str) -> String {
         text.replace('<', "&lt;")
@@ -193,7 +200,7 @@ impl Generator {
 
     fn structure(&self, domain: &str, owner: &str, name: &str, fields: &[Value], out: &mut String) {
         let mut extra = String::new();
-        let default = if fields.iter().all(|f| f["optional"] == true) {
+        let default = if fields.iter().all(|f| optional(owner, f)) {
             ", Default"
         } else {
             ""
@@ -209,8 +216,11 @@ impl Generator {
                 &mut extra,
             );
             documentation(field, out);
+            if optional(owner, field) && field["optional"] != true {
+                out.push_str("/// Absent on Chrome 151; optional for compatibility.\n");
+            }
             out.push_str(&format!("#[serde(rename = {wire:?})]\n"));
-            if field["optional"] == true {
+            if optional(owner, field) {
                 ty = format!("Option<{ty}>");
                 out.push_str("#[serde(default, skip_serializing_if = \"Option::is_none\")]\n");
                 if field["type"] == "any" {
@@ -249,7 +259,7 @@ impl Generator {
             .collect();
         let required: Vec<_> = types
             .iter()
-            .filter(|(field, _, _)| field["optional"] != true)
+            .filter(|(field, _, _)| !optional(owner, field))
             .collect();
         out.push_str(&format!("impl {name} {{\n"));
         out.push_str("/// Construct a value with its required fields. Optional fields are omitted.\n#[must_use]\n");
@@ -263,7 +273,7 @@ impl Generator {
             .join(", ");
         out.push_str(&format!("pub fn new({args}) -> Self {{ Self {{\n"));
         for (field, member, _) in &types {
-            let value = if field["optional"] == true {
+            let value = if optional(owner, field) {
                 "None".into()
             } else {
                 format!("{member}.into()")
@@ -272,7 +282,7 @@ impl Generator {
         }
         out.push_str("} }\n");
         for (field, member, ty) in &types {
-            if field["optional"] == true {
+            if optional(owner, field) {
                 documentation(field, out);
                 out.push_str(&format!("#[must_use]\npub fn with_{member}(mut self, value: impl Into<{ty}>) -> Self {{ self.{member} = Some(value.into()); self }}\n"));
             }
