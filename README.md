@@ -70,20 +70,6 @@ Report files go to `rustcdp-report/` in the system temporary directory;
 set `RUSTCDP_OUTPUT` to choose another location. Example dependencies are separate
 from the library's dependencies.
 
-## Browser lifetime
-
-A launched browser owns its Chrome process. Before explicit shutdown starts,
-leaving its scope—including an early return from `?`—synchronously terminates and
-reaps the process and removes its temporary profile. This can block the calling
-thread and cannot return cleanup errors. Fixed profiles are preserved.
-
-Use `close().await` to await shutdown and observe errors. Dropping or closing a
-connection to an external browser does not kill that process. Protocol resources
-such as contexts and sessions use best-effort asynchronous cleanup on drop;
-explicitly close them when you need completion before continuing.
-See [Browser](rustcdp/src/browser.rs) and [BrowserProcess](rustcdp/src/launcher.rs)
-for cancellation, runtime shutdown, and cleanup-failure details.
-
 ## API documentation
 
 - [Browser](rustcdp/src/browser.rs), [Page](rustcdp/src/page.rs), and

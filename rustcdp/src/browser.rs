@@ -19,12 +19,22 @@ mod resource;
 pub(crate) use resource::{ContextLease, PageRegistration};
 
 /// A browser connection, its initial page, and optionally an owned Chrome process.
-/// Before explicit shutdown starts, dropping a launched browser synchronously
-/// terminates and reaps its process and removes its temporary profile. This can
-/// block; use [`Self::close`] to
-/// await shutdown without blocking the runtime and to observe cleanup errors.
-/// Protocol cleanup on Drop is best effort. Connected external processes are
-/// never terminated by Drop.
+///
+/// # Lifetime
+///
+/// Before explicit shutdown starts, leaving the scope of a launched browser,
+/// including an early return from `?`, synchronously terminates and reaps its
+/// process and removes its temporary profile. Fixed profiles are preserved.
+/// This can block the calling thread, and Drop cannot return cleanup errors.
+/// See [`BrowserProcess::close`] for termination and profile-cleanup failure behavior.
+///
+/// Use [`Self::close`] to await shutdown without blocking on process cleanup and
+/// to observe errors. Dropping or closing an externally connected browser never
+/// terminates its process. See [`Self::connect`] for dependent-handle lifetimes.
+///
+/// Protocol cleanup on Drop is best effort and needs a running Tokio runtime.
+/// Explicitly close contexts and sessions when their cleanup must finish before
+/// continuing. See [`Self::close`] for cancellation and runtime-shutdown behavior.
 #[must_use = "retain the browser while using it; await close() to finish cleanup"]
 pub struct Browser {
     connection: Connection,
