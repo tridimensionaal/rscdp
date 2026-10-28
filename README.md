@@ -25,12 +25,9 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut browser = Browser::builder().launch().await?;
-
-    let result = read_page(browser.page()).await;
-    let cleanup = browser.close().await;
-    result?;
-    cleanup
+    let browser = Browser::builder().launch().await?;
+    read_page(browser.page()).await?;
+    Ok(())
 }
 
 async fn read_page(page: &Page) -> Result<()> {
@@ -46,9 +43,10 @@ async fn read_page(page: &Page) -> Result<()> {
 }
 ```
 
-The named operation lets `?` return an error while `main` still awaits cleanup.
-If both fail, this example returns the operation error. Your application owns the
-Tokio runtime; keep it running until awaited cleanup finishes.
+The browser owns its Chrome process. Leaving its scope, including an early return
+from `?`, synchronously terminates and reaps that process and removes its temporary
+profile. This can block the calling thread. Use `close().await` when you want to
+await shutdown without blocking on process cleanup and receive cleanup errors.
 
 The [browser builder](rustcdp/src/browser/builder.rs) lists supported settings and
 their defaults, including window size, DevTools, executable, profile, proxy, and
@@ -92,7 +90,8 @@ cargo run -p rustcdp-examples --example checkout -- --headless=new
 
 The [examples package](examples/Cargo.toml) is separate, unpublished, and excluded
 from the library package. Its dependencies are not needed by library consumers.
-Each example awaits browser cleanup on success or failure. Report files go to
+The examples rely on owned-browser cleanup at scope exit. Explicit context closure
+and interception shutdown remain where they demonstrate those operations. Report files go to
 `rustcdp-report/` in the system temporary directory; set `RUSTCDP_OUTPUT` to override it.
 
 ## Choose an API
@@ -173,8 +172,26 @@ across sessions. Overflow reports `Error::Lagged`. Keep the appropriate
 
 ## Ownership and cancellation
 
-Call `close().await` or `detach().await` to observe cleanup results. Drop schedules
-best-effort cleanup. Ordinary commands default to a 30-second deadline, including
+Before explicit shutdown starts, dropping a launched Browser synchronously
+terminates and reaps its owned process and removes its temporary profile. Process
+cleanup does not require a running Tokio runtime. Fixed profiles are preserved.
+Drop cannot return cleanup errors: if termination fails, the temporary profile is
+preserved rather than removed beneath a potentially live process. As with other
+Rust destructors, aborting the application or calling `std::process::exit` skips
+this cleanup.
+
+Automatic process cleanup can block the calling thread: on Unix it allows up to
+three seconds for termination before forcing a kill, plus process-wait and
+filesystem time. Use `close().await` for asynchronous shutdown and its errors.
+Once close starts, its owned task continues even if its waiter is canceled or the
+Browser is dropped. Keep Tokio running to await that task; if runtime shutdown
+cancels it, process destruction finishes the remaining process cleanup or joins
+its existing cleanup worker.
+
+Protocol cleanup on Drop remains best effort. Contexts, sessions, domain guards,
+and remote objects schedule their cleanup on Tokio; call `close().await`,
+`detach().await`, or `release().await` to observe completion and errors.
+Ordinary commands default to a 30-second deadline, including
 queue admission; `with_command_timeout(None)` disables that caller deadline.
 Resource-owning helpers retain their independent bounds and can continue after
 caller cancellation. A timeout cannot undo a command Chrome already received.

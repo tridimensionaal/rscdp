@@ -2,9 +2,11 @@
 //!
 //! Use [`Browser`] and [`Page`] for browser automation, or [`Connection`] and
 //! [`Session`] to send typed [`cdp`] commands and subscribe to events.
-//! Applications supply a Tokio runtime and keep it running until awaited cleanup
-//! finishes. Call `close` or `detach` to observe cleanup errors; Drop cleanup is
-//! best-effort.
+//! Before explicit shutdown starts, dropping an owned [`Browser`] synchronously
+//! terminates and reaps its Chrome process and removes its temporary profile.
+//! This can block; await `close` for asynchronous shutdown and cleanup errors.
+//! Protocol-resource cleanup on Drop is best effort and needs a running Tokio
+//! runtime. Call `close`, `detach`, or `release` to observe those cleanup results.
 //!
 //! # Example
 //!
@@ -19,12 +21,9 @@
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<()> {
-//!     let mut browser = Browser::builder().launch().await?;
-//!
-//!     let result = print_title(browser.page()).await;
-//!     let cleanup = browser.close().await;
-//!     result?;
-//!     cleanup
+//!     let browser = Browser::builder().launch().await?;
+//!     print_title(browser.page()).await?;
+//!     Ok(())
 //! }
 //!
 //! async fn print_title(page: &Page) -> Result<()> {
@@ -39,8 +38,8 @@
 //! }
 //! ```
 //!
-//! Cleanup is awaited even when the page operation fails. If both operations
-//! fail, this example returns the page operation's error.
+//! The browser leaves scope on success or an early return from `?`. Automatic
+//! process cleanup completes during Drop; cleanup errors cannot be returned.
 
 #[cfg(feature = "tracing")]
 mod diagnostics;
