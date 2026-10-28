@@ -1219,4 +1219,73 @@ mod tests {
         state.prune_disposed();
         assert!(state.known.is_empty());
     }
+
+    #[tokio::test]
+    #[ignore = "requires Chrome; verifies live context registry reclamation"]
+    async fn context_registry_reclaims_closed_scopes_without_retiring_live_foreign_contexts() {
+        use crate::{
+            Browser,
+            cdp::target::commands::{CreateBrowserContext, CreateTarget, DisposeBrowserContext},
+        };
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let browser = Browser::builder()
+                .headless(true)
+                .arg("--no-sandbox")
+                .launch()
+                .await
+                .unwrap();
+            for _ in 0..8 {
+                let mut context = browser.new_context().await.unwrap();
+                let (closed, discovered) = tokio::join!(context.close(), browser.pages());
+                closed.unwrap();
+                // Discovery overlapping disposal may conservatively reject closing scopes.
+                if let Err(error) = discovered {
+                    assert!(matches!(error, Error::InvalidArgument(_)));
+                }
+                browser.pages().await.unwrap();
+                assert!(browser.pages.state.lock().unwrap().known.is_empty());
+            }
+            let foreign = browser
+                .connection()
+                .execute(&CreateBrowserContext::new())
+                .await
+                .unwrap()
+                .browser_context_id;
+            let target = browser
+                .connection()
+                .execute(&CreateTarget::new("about:blank").with_browser_context_id(foreign.clone()))
+                .await
+                .unwrap()
+                .target_id;
+            let page = browser.page_by_id(&target).await.unwrap().unwrap();
+            assert_eq!(browser.pages.state.lock().unwrap().owned.len(), 2);
+            // A filtered lookup must not mistake unselected foreign targets for absence.
+            browser
+                .page_by_id(browser.page().id())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(browser.pages.state.lock().unwrap().owned.len(), 2);
+            page.close().await.unwrap();
+            browser.pages().await.unwrap();
+            assert_eq!(
+                browser.pages.state.lock().unwrap().owned.len(),
+                2,
+                "empty live context retained"
+            );
+            browser
+                .connection()
+                .execute(&DisposeBrowserContext::new(foreign))
+                .await
+                .unwrap();
+            browser.pages().await.unwrap();
+            assert_eq!(
+                browser.pages.state.lock().unwrap().owned.len(),
+                1,
+                "disposed foreign scope reclaimed"
+            );
+        })
+        .await
+        .expect("context churn must complete within one minute");
+    }
 }

@@ -105,3 +105,11 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p rustcdp
 ```
+
+Run browser checks explicitly (Linux, Python 3.11+; `CHROME_PATH` if needed):
+
+```sh
+cargo test -p rustcdp -- --ignored --test-threads=1
+cargo build -p rustcdp-examples --examples
+python3 scripts/browser_smoke.py
+```

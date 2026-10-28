@@ -945,8 +945,7 @@ mod tests {
                 let error = connection
                     .attach(crate::cdp::target::TargetId("tab".into()))
                     .await
-                    .err()
-                    .expect("malformed identity must fail");
+                    .expect_err("malformed identity must fail");
                 assert!(matches!(error,
                     Error::ConnectionFailed(cause) if matches!(cause.as_ref(),
                         Error::UnexpectedResponse { method, payload: actual }

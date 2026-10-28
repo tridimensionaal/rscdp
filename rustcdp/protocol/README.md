@@ -34,7 +34,10 @@ Upstream: https://github.com/ChromeDevTools/devtools-protocol (BSD-3-Clause).
 The schema pin describes the generated Rust API, not a minimum Chrome version
 or a guarantee that every browser implements every command. The high-level
 helpers and local examples are exercised with Chrome for Testing 151.0.7922.34
-on Linux. Newer and experimental commands depend on the running browser and its
+on Linux. CI runs the browser smoke checks against that pinned baseline and the
+current stable Chrome channel; build and unit checks also target Windows and
+macOS. These checks cover the exercised workflows, not every CDP command.
+Newer and experimental commands depend on the running browser and its
 feature configuration. Inspect `Browser.getVersion` and the browser's
 `/json/protocol` endpoint when diagnosing compatibility; the protocol version
 string alone does not identify a schema snapshot.
