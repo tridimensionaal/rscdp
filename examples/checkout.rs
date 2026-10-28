@@ -3,13 +3,6 @@ mod common;
 use rustcdp::{Error, Page, Result};
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let browser = common::launch().await?;
-    reserve_notebook(browser.page()).await?;
-    Ok(())
-}
-
 async fn reserve_notebook(page: &Page) -> Result<()> {
     page.navigate(common::page_url("checkout.html")?)
         .timeout(Duration::from_secs(10))
@@ -32,5 +25,12 @@ async fn reserve_notebook(page: &Page) -> Result<()> {
             "unexpected reservation receipt".into(),
         ));
     }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let browser = common::launch().await?;
+    reserve_notebook(browser.page()).await?;
     Ok(())
 }

@@ -6,13 +6,6 @@ use rustcdp::{
 };
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let browser = common::launch().await?;
-    update_inventory(browser.page()).await?;
-    Ok(())
-}
-
 async fn update_inventory(page: &Page) -> Result<()> {
     page.navigate(common::page_url("dispatch-board.html")?)
         .timeout(Duration::from_secs(10))
@@ -53,5 +46,12 @@ async fn update_inventory(page: &Page) -> Result<()> {
         "Parent document is still {}",
         root.evaluate("document.title").json::<String>().await?
     );
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let browser = common::launch().await?;
+    update_inventory(browser.page()).await?;
     Ok(())
 }

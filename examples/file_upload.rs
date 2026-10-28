@@ -4,13 +4,6 @@ use rustcdp::{Error, Page, Result, cdp::dom::commands::SetFileInputFiles};
 use serde_json::json;
 use std::{path::Path, time::Duration};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let browser = common::launch().await?;
-    preview_stock(browser.page()).await?;
-    Ok(())
-}
-
 async fn preview_stock(page: &Page) -> Result<()> {
     let csv = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("pages/stock.csv")
@@ -55,5 +48,12 @@ async fn preview_stock(page: &Page) -> Result<()> {
         )));
     }
     println!("Verified local CSV preview: 3 rows, 50 units total.");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let browser = common::launch().await?;
+    preview_stock(browser.page()).await?;
     Ok(())
 }

@@ -9,14 +9,6 @@ use rustcdp::{
 };
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let server = server::Server::start().await?;
-    let browser = common::launch().await?;
-    shopping_sessions(&browser, &server).await?;
-    Ok(())
-}
-
 async fn shopping_sessions(browser: &Browser, server: &server::Server) -> Result<()> {
     // Retain this owner for as long as its page is needed.
     let mira = browser.new_context().await?;
@@ -139,4 +131,12 @@ fn cart_item(cookies: Vec<Cookie>) -> Option<String> {
         .into_iter()
         .find(|cookie| cookie.name == "cart" && cookie.domain == "127.0.0.1")
         .map(|cookie| cookie.value)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let server = server::Server::start().await?;
+    let browser = common::launch().await?;
+    shopping_sessions(&browser, &server).await?;
+    Ok(())
 }

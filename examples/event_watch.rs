@@ -3,13 +3,6 @@ mod common;
 use rustcdp::{Error, Page, Result, cdp::runtime::events::ConsoleApiCalled};
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let browser = common::launch().await?;
-    watch_dispatch(browser.page()).await?;
-    Ok(())
-}
-
 async fn watch_dispatch(page: &Page) -> Result<()> {
     let mut events = page.session().listen::<ConsoleApiCalled>();
     let runtime = page.session().enable_runtime().await?;
@@ -48,5 +41,12 @@ async fn collect_dispatch_events(
         println!("{}", serde_json::to_string(&values)?);
         received += 1;
     }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let browser = common::launch().await?;
+    watch_dispatch(browser.page()).await?;
     Ok(())
 }

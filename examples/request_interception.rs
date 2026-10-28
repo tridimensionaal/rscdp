@@ -18,14 +18,6 @@ use rustcdp::{
 use serde_json::json;
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let server = server::Server::start().await?;
-    let browser = common::launch().await?;
-    delivery_options(browser.page(), &server).await?;
-    Ok(())
-}
-
 async fn delivery_options(page: &Page, server: &server::Server) -> Result<()> {
     page.navigate(server.url("delivery.html")).send().await?;
     // Listen before enabling Fetch. Only this page's local API calls are paused.
@@ -119,5 +111,13 @@ async fn load_dashboard(page: &Page) -> Result<()> {
         )));
     }
     println!("Dashboard verified: {}", displayed.join("; "));
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let server = server::Server::start().await?;
+    let browser = common::launch().await?;
+    delivery_options(browser.page(), &server).await?;
     Ok(())
 }
