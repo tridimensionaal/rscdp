@@ -338,12 +338,24 @@ impl Connection {
                                 Message::Text(text) => {
                                     let value: Value = serde_json::from_str(&text)?;
                                     if let Some(id) = value["id"].as_u64() {
-                                        if pending.contains_key(&id) {
+                                        if let Some(request) = pending.get(&id) {
                                             let result = if value.get("error").is_some() {
                                                 Err(serde_json::from_value::<ProtocolError>(value["error"].clone())?.into())
                                             } else {
                                                 Ok(value.get("result").cloned().ok_or_else(|| Error::ConnectionClosed("response missing result".into()))?)
                                             };
+                                            // A successful attachment without an identity cannot
+                                            // be owned or detached safely. Fail before removing
+                                            // the pending sender so every waiter retains the cause.
+                                            if matches!(request.method.as_str(), "Target.attachToTarget" | "Target.attachToBrowserTarget")
+                                                && let Ok(payload) = &result
+                                                && payload["sessionId"].as_str().is_none_or(str::is_empty)
+                                            {
+                                                return Err(Error::UnexpectedResponse {
+                                                    method: request.method.clone(),
+                                                    payload: payload.clone(),
+                                                });
+                                            }
                                             // Keep the reply sender alive until decoding succeeds;
                                             // terminal failures must publish their cause first.
                                             let request = pending.remove(&id).expect("pending response");
@@ -369,6 +381,14 @@ impl Connection {
                                         }
                                     } else {
                                         let event: RawEvent = serde_json::from_value(value)?;
+                                        if event.method == "Target.attachedToTarget"
+                                            && event.params["sessionId"].as_str().is_none_or(str::is_empty)
+                                        {
+                                            return Err(Error::UnexpectedResponse {
+                                                method: event.method,
+                                                payload: event.params,
+                                            });
+                                        }
                                         if let Some(id) = event.params["sessionId"].as_str() {
                                             if event.method == "Target.attachedToTarget" {
                                                 register_session(&active_sessions, id, event.session_id.clone(), event.params["targetInfo"]["targetId"].as_str());
@@ -887,6 +907,58 @@ impl EventStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_attachment_identity_fails_with_the_received_payload() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for payload in [
+                json!({"sessionId": ""}),
+                json!({}),
+                json!({"sessionId": 42}),
+            ] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+                let reply = payload.clone();
+                let peer = tokio::spawn(async move {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    let request = socket.next().await.unwrap().unwrap();
+                    let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+                    assert_eq!(request["method"], "Target.attachToTarget");
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "id": request["id"], "result": reply,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .unwrap();
+                    while let Some(Ok(message)) = socket.next().await {
+                        if message.is_close() {
+                            break;
+                        }
+                    }
+                });
+                let connection = Connection::connect(&endpoint).await.unwrap();
+                let error = connection
+                    .attach(crate::cdp::target::TargetId("tab".into()))
+                    .await
+                    .err()
+                    .expect("malformed identity must fail");
+                assert!(matches!(error,
+                    Error::ConnectionFailed(cause) if matches!(cause.as_ref(),
+                        Error::UnexpectedResponse { method, payload: actual }
+                        if method == "Target.attachToTarget" && actual == &payload)));
+                assert!(connection.is_closed());
+                assert!(connection.0.sessions.lock().unwrap().is_empty());
+                peer.await.unwrap();
+            }
+        })
+        .await
+        .expect("malformed attachment must terminate promptly");
+    }
 
     #[tokio::test]
     async fn actor_observer_waits_for_teardown_and_survives_cancellation() {
