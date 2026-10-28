@@ -431,6 +431,7 @@ impl ManagedPages {
 struct KnownContext {
     id: BrowserContextId,
     pages: Weak<ManagedPages>,
+    disposed: Arc<AtomicBool>,
     // Only fallback Pages regain a lease when returned by future lookup APIs.
     fallback: Option<Weak<ContextLease>>,
 }
@@ -450,6 +451,13 @@ pub(super) struct BrowserPages {
     initial: Weak<ManagedPages>,
 }
 
+impl BrowserState {
+    fn prune_disposed(&mut self) {
+        self.known
+            .retain(|entry| !entry.disposed.load(Ordering::Acquire));
+    }
+}
+
 impl BrowserPages {
     pub(super) fn new(
         connection: &Connection,
@@ -464,6 +472,7 @@ impl BrowserPages {
             state.known.push(KnownContext {
                 id: lease.id.clone(),
                 pages: Arc::downgrade(&pages),
+                disposed: lease.cleanup.closed.clone(),
                 fallback: Some(Arc::downgrade(lease)),
             });
             pages
@@ -522,6 +531,12 @@ impl BrowserPages {
                 .await
                 .map_err(|_| Error::Timeout("waiting to look up browser pages".into()))?;
         self.ensure_open()?;
+        // The acquisition gate excludes discovery while confirmed tombstones
+        // are removed. The following snapshot cannot predate their disposal.
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .prune_disposed();
         let commands = self
             .default
             .connection
@@ -550,6 +565,34 @@ impl BrowserPages {
         })
         .await
         .map_err(|_| Error::Timeout("resolving browser page scopes".into()))??;
+        // Reconcile foreign scopes using the complete snapshot, before applying
+        // the caller's page filter. An empty context is still a live scope.
+        let retired = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut retired = Vec::new();
+            state.owned.retain(|scope| {
+                let absent = match &scope.scope {
+                    Scope::Default => false,
+                    Scope::Context(id) => {
+                        !isolated.contains(id)
+                            && !targets
+                                .iter()
+                                .any(|target| target.browser_context_id.as_ref() == Some(id))
+                    }
+                };
+                if absent {
+                    scope.mark_closing();
+                    retired.push(scope.clone());
+                }
+                !absent
+            });
+            retired
+        };
+        for scope in retired {
+            let stopped = scope.stop_auth().await;
+            scope.clear();
+            stopped?;
+        }
         targets.retain(|target| {
             target.type_ == "page" && id.as_ref().is_none_or(|id| id == &target.target_id)
         });
@@ -668,10 +711,14 @@ impl BrowserPages {
         if state.closing {
             return Err(Error::InvalidArgument("browser is closing".into()));
         }
+        // Registration also holds acquisition_gate, so subsequent discovery
+        // starts after every confirmed disposal reclaimed here.
+        state.prune_disposed();
         state.known.retain(|entry| entry.id != lease.id);
         state.known.push(KnownContext {
             id: lease.id.clone(),
             pages: Arc::downgrade(&lease.cleanup.pages),
+            disposed: lease.cleanup.closed.clone(),
             fallback: None,
         });
         Ok(())
@@ -756,7 +803,7 @@ impl BrowserPages {
 // Only ContextLease and the tasks it starts carry this disposal authority.
 struct Cleanup {
     pages: Arc<ManagedPages>,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     pending_auth: std::sync::Mutex<Option<Arc<ProxyAuth>>>,
 }
 
@@ -770,7 +817,7 @@ impl ContextLease {
         Self {
             cleanup: Arc::new(Cleanup {
                 pages: Arc::new(ManagedPages::new(connection, Scope::Context(id.clone()))),
-                closed: AtomicBool::new(false),
+                closed: Arc::new(AtomicBool::new(false)),
                 pending_auth: Default::default(),
             }),
             id,
@@ -1133,4 +1180,43 @@ async fn dispose_context(
     // Keep the cloned Pages (and sessions/workers) alive through disposal.
     drop(pages);
     with_cleanup(auth_result, result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_churn_reclaims_confirmed_disposals_but_keeps_uncertain_tombstones() {
+        let uncertain = Arc::new(AtomicBool::new(false));
+        let mut state = BrowserState::default();
+        state.known.push(KnownContext {
+            id: BrowserContextId("uncertain".into()),
+            pages: Weak::new(),
+            disposed: uncertain.clone(),
+            fallback: None,
+        });
+        for index in 0..1000 {
+            let disposed = Arc::new(AtomicBool::new(false));
+            state.known.push(KnownContext {
+                id: BrowserContextId(index.to_string()),
+                pages: Weak::new(),
+                disposed: disposed.clone(),
+                fallback: None,
+            });
+            state.prune_disposed();
+            assert_eq!(
+                state.known.len(),
+                2,
+                "expired scopes alone are not disposable"
+            );
+            disposed.store(true, Ordering::Release);
+            state.prune_disposed();
+            assert_eq!(state.known.len(), 1);
+            assert_eq!(state.known[0].id.0, "uncertain");
+        }
+        uncertain.store(true, Ordering::Release);
+        state.prune_disposed();
+        assert!(state.known.is_empty());
+    }
 }
