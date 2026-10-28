@@ -19,6 +19,12 @@ mod resource;
 pub(crate) use resource::{ContextLease, PageRegistration};
 
 /// A browser connection, its initial page, and optionally an owned Chrome process.
+/// Before explicit shutdown starts, dropping a launched browser synchronously
+/// terminates and reaps its process and removes its temporary profile. This can
+/// block; use [`Self::close`] to
+/// await shutdown without blocking the runtime and to observe cleanup errors.
+/// Protocol cleanup on Drop is best effort. Connected external processes are
+/// never terminated by Drop.
 #[must_use = "retain the browser while using it; await close() to finish cleanup"]
 pub struct Browser {
     connection: Connection,
@@ -337,8 +343,8 @@ impl Browser {
     /// another `close()` awaits the same completion. Cleanup errors are returned
     /// once when completion is observed; later calls return `Ok(())`.
     /// Keep the owning Tokio runtime running until shutdown completes. Runtime
-    /// shutdown can abandon async cleanup; process Drop still provides its
-    /// independent best-effort kill/reap fallback.
+    /// shutdown can abandon protocol cleanup; process Drop synchronously finishes
+    /// process termination, reaping, and temporary-profile cleanup instead.
     pub async fn close(&mut self) -> Result<()> {
         if self.shutdown_complete {
             return Ok(());
@@ -384,8 +390,11 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        if self.process.is_some() {
+        if let Some(process) = self.process.take() {
+            // Keep process ownership out of the async task: ordinary scope exit
+            // must finish process cleanup even if Tokio is about to shut down.
             self.start_shutdown();
+            drop(process);
         } else if self.shutdown.is_none() && !self.shutdown_complete {
             // External Drop must not stop independent contexts or their workers.
             // Their weak registrations never transfer ownership to this Browser.

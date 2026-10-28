@@ -154,7 +154,8 @@ impl Default for LaunchOptions {
 }
 
 /// Owns exactly one child and, when applicable, its temporary profile.
-/// Call `close` to await cleanup. Drop schedules a kill/reap/cleanup fallback.
+/// Call `close` for nonblocking cleanup and its errors. Drop synchronously
+/// terminates and reaps the child and removes its temporary profile; it can block.
 /// Endpoint ownership is checked using SystemInfo.getProcessInfo. The executable
 /// must remain the browser process (wrappers must exec, not spawn another PID).
 /// The profile lock coordinates rustcdp only; it does not replace Chrome's lock.
@@ -164,6 +165,7 @@ pub struct BrowserProcess {
     temporary: Option<TempDir>,
     profile_lock: Option<File>,
     cleanup: Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>,
+    cleanup_worker: Option<std::thread::JoinHandle<()>>,
     profile: PathBuf,
     endpoint: String,
 }
@@ -188,6 +190,7 @@ impl BrowserProcess {
             temporary: None,
             profile_lock: None,
             cleanup: None,
+            cleanup_worker: None,
             profile: PathBuf::new(),
             endpoint: String::new(),
         };
@@ -363,17 +366,22 @@ impl BrowserProcess {
                 profile_lock: self.profile_lock.take(),
             };
             let (reply, done) = tokio::sync::oneshot::channel();
-            std::thread::Builder::new()
-                .name("rustcdp-cleanup".into())
-                .spawn(move || {
-                    let _ = reply.send(cleanup.run());
-                })?;
+            self.cleanup_worker = Some(
+                std::thread::Builder::new()
+                    .name("rustcdp-cleanup".into())
+                    .spawn(move || {
+                        let _ = reply.send(cleanup.run());
+                    })?,
+            );
             self.cleanup = Some(done);
         }
         if let Some(done) = &mut self.cleanup {
             // Keep completion owned here if the caller cancels this await.
             let result = done.await;
             self.cleanup = None;
+            if let Some(worker) = self.cleanup_worker.take() {
+                let _ = worker.join();
+            }
             result.map_err(|_| Error::Launch("cleanup worker stopped".into()))??;
         }
         Ok(())
@@ -479,18 +487,18 @@ fn terminate(child: &mut Child) -> std::io::Result<()> {
 
 impl Drop for BrowserProcess {
     fn drop(&mut self) {
+        // A canceled close may already have handed ownership to a worker. Join
+        // it so cleanup cannot outlive the application at runtime shutdown.
+        if let Some(worker) = self.cleanup_worker.take() {
+            let _ = worker.join();
+        }
         if self.child.is_some() || self.temporary.is_some() || self.profile_lock.is_some() {
-            let cleanup = Cleanup {
+            let _ = Cleanup {
                 child: self.child.take(),
                 temporary: self.temporary.take(),
                 profile_lock: self.profile_lock.take(),
-            };
-            // The owning guard also cleans up if spawning the thread fails.
-            let _ = std::thread::Builder::new()
-                .name("rustcdp-cleanup".into())
-                .spawn(move || {
-                    let _ = cleanup.run();
-                });
+            }
+            .run();
         }
     }
 }
