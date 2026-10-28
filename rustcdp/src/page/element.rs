@@ -169,6 +169,9 @@ impl Element {
     }
 
     /// Scroll into view and click the element's center using CDP mouse input.
+    /// If a click should navigate, prepare [`Page::expect_navigation`] before
+    /// clicking, then await the prepared observer. Click completion alone does
+    /// not mean that navigation or application loading has finished.
     /// See [`Self::click_with_options`] for behavior and limitations.
     pub async fn click(&self) -> Result<()> {
         self.click_with_options(ClickOptions::default()).await

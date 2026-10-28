@@ -74,6 +74,9 @@ impl Page {
     /// [`Error::Timeout`]; a shorter command timeout can fail an acquisition earlier.
     ///
     /// This checks presence only, not visibility, stability, or actionability.
+    /// For application readiness, wait for a selector the page publishes when
+    /// ready, such as `#results[data-ready=true]`. A matching element can still
+    /// be hidden, moving, or covered; this is not an automatic click-readiness check.
     /// The element can become stale after acquisition. Cancellation or expiration
     /// stops polling but leaves an in-flight owned acquisition running under its
     /// independent 30-second limit and recovery/cleanup bounds; see

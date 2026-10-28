@@ -58,6 +58,7 @@ Replace `checkout` with any example below:
 
 | Example | Demonstrates |
 | --- | --- |
+| [navigation](examples/navigation.rs) | Observe a click-triggered navigation and wait for application readiness |
 | [checkout](examples/checkout.rs) | Fill and submit a form with Unicode text and keyboard input |
 | [page_report](examples/page_report.rs) | Export a report to PNG and PDF |
 | [frame_walk](examples/frame_walk.rs) | Traverse nested frames and update inventory |

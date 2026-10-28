@@ -41,3 +41,7 @@ path = "request_interception.rs"
 [[example]]
 name = "file_upload"
 path = "file_upload.rs"
+
+[[example]]
+name = "navigation"
+path = "navigation.rs"

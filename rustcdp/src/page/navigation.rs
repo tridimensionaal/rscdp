@@ -415,6 +415,10 @@ impl NavigationBuilder<'_> {
 impl Page {
     /// Prepare to observe navigation before performing a click, Enter, or history action.
     /// Observe the first qualifying root navigation, not proven action causality.
+    /// Navigation milestones do not establish application readiness. After the
+    /// observer completes, use an application-specific condition such as
+    /// [`Page::wait_for_element`] with a readiness marker. Do not retry clicks
+    /// automatically: an earlier action may already have changed the page.
     ///
     /// ```no_run
     /// # async fn example(page: &rustcdp::Page) -> rustcdp::Result<()> {

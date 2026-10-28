@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Glass gallery</title>
+  </head>
+  <body>
+    <h1>Glass gallery</h1>
+    <p id="exhibit" aria-live="polite" aria-busy="true">Preparing the exhibit…</p>
+    <script>
+      // Simulate content arriving after the document has loaded.
+      setTimeout(() => {
+        const exhibit = document.querySelector('#exhibit');
+        exhibit.textContent = 'Light through glass — Gallery 3';
+        exhibit.dataset.ready = 'true';
+        exhibit.setAttribute('aria-busy', 'false');
+      }, 250);
+    </script>
+  </body>
+</html>
