@@ -45,3 +45,7 @@ path = "file_upload.rs"
 [[example]]
 name = "navigation"
 path = "navigation.rs"
+
+[[example]]
+name = "response_body"
+path = "response_body.rs"

@@ -1,0 +1,4 @@
+{
+  "special": { "name": "Orange blossom latte", "price": 4.5 },
+  "bakery": ["Almond croissant", "Lemon cake"]
+}

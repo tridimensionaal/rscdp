@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Corner cafe</title>
+  </head>
+  <body>
+    <h1>Corner cafe</h1>
+    <button id="load-menu">Today's special</button>
+    <p id="special" aria-live="polite">Choose today's special to load the menu.</p>
+    <script>
+      document.querySelector('#load-menu').addEventListener('click', async event => {
+        event.currentTarget.disabled = true;
+        const special = document.querySelector('#special');
+        try {
+          const response = await fetch('api/menu.json', { cache: 'no-store' });
+          if (!response.ok) throw new Error(`Menu unavailable (${response.status})`);
+          const menu = await response.json();
+          special.textContent = `${menu.special.name} — $${menu.special.price.toFixed(2)}`;
+        } catch (error) {
+          special.textContent = error.message;
+        }
+      });
+    </script>
+  </body>
+</html>

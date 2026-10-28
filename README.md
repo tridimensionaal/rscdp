@@ -64,6 +64,7 @@ Replace `checkout` with any example below:
 | [frame_walk](examples/frame_walk.rs) | Traverse nested frames and update inventory |
 | [event_watch](examples/event_watch.rs) | Subscribe to console events before navigation |
 | [browser_contexts](examples/browser_contexts.rs) | Isolate cookies and share them between tabs in one context |
+| [response_body](examples/response_body.rs) | Correlate network events and read a completed response body |
 | [request_interception](examples/request_interception.rs) | Continue requests, replace responses, and block analytics |
 | [file_upload](examples/file_upload.rs) | Select a CSV and read its local preview; no server upload |
 
