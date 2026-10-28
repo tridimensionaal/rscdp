@@ -8,11 +8,9 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut browser = common::launch().await?;
-    let result = update_inventory(browser.page()).await;
-    let cleanup = browser.close().await;
-    result?;
-    cleanup
+    let browser = common::launch().await?;
+    update_inventory(browser.page()).await?;
+    Ok(())
 }
 
 async fn update_inventory(page: &Page) -> Result<()> {

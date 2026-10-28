@@ -12,21 +12,15 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<()> {
     let server = server::Server::start().await?;
-    let mut browser = common::launch().await?;
-    let result = shopping_sessions(&browser, &server).await;
-    let cleanup = browser.close().await;
-    result?;
-    cleanup
+    let browser = common::launch().await?;
+    shopping_sessions(&browser, &server).await?;
+    Ok(())
 }
 
 async fn shopping_sessions(browser: &Browser, server: &server::Server) -> Result<()> {
     // Retain this owner for as long as its page is needed.
-    let mut mira = browser.new_context().await?;
-    let result = second_shopper(browser, &mira, server).await;
-    // Always await disposal, including when creating or using the second fails.
-    let cleanup = mira.close().await;
-    result?;
-    cleanup
+    let mira = browser.new_context().await?;
+    second_shopper(browser, &mira, server).await
 }
 
 async fn second_shopper(
@@ -35,10 +29,8 @@ async fn second_shopper(
     server: &server::Server,
 ) -> Result<()> {
     let mut leo = browser.new_context().await?;
-    let result = compare_carts(browser, mira, &leo, server).await;
-    let cleanup = leo.close().await;
-    result?;
-    cleanup?;
+    compare_carts(browser, mira, &leo, server).await?;
+    leo.close().await?;
 
     // Disposing Leo's context leaves Mira's page and cookies intact.
     let title = mira

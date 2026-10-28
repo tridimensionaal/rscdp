@@ -9,11 +9,9 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("rustcdp-report"));
     tokio::fs::create_dir_all(&output).await?;
-    let mut browser = common::launch().await?;
-    let result = export_report(browser.page(), &output).await;
-    let cleanup = browser.close().await;
-    result?;
-    cleanup
+    let browser = common::launch().await?;
+    export_report(browser.page(), &output).await?;
+    Ok(())
 }
 
 async fn export_report(page: &Page, output: &std::path::Path) -> Result<()> {

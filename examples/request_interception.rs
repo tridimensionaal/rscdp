@@ -21,11 +21,9 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<()> {
     let server = server::Server::start().await?;
-    let mut browser = common::launch().await?;
-    let result = delivery_options(browser.page(), &server).await;
-    let cleanup = browser.close().await;
-    result?;
-    cleanup
+    let browser = common::launch().await?;
+    delivery_options(browser.page(), &server).await?;
+    Ok(())
 }
 
 async fn delivery_options(page: &Page, server: &server::Server) -> Result<()> {
@@ -40,16 +38,16 @@ async fn delivery_options(page: &Page, server: &server::Server) -> Result<()> {
                 .with_request_stage(RequestStage::Request),
         ]))
         .await?;
-    let result = tokio::time::timeout(
+    let interception_result = tokio::time::timeout(
         Duration::from_secs(10),
         intercept_and_load(page, &mut requests),
     )
     .await
     .map_err(|_| Error::Timeout("intercepting delivery requests".into()));
     // Disable even on a timeout/error so requests cannot remain paused.
-    let cleanup = page.session().execute(&Disable::new()).await;
-    result??;
-    cleanup?;
+    let fetch_disable_result = page.session().execute(&Disable::new()).await;
+    interception_result??;
+    fetch_disable_result?;
     Ok(())
 }
 

@@ -6,11 +6,9 @@ use std::{path::Path, time::Duration};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut browser = common::launch().await?;
-    let result = preview_stock(browser.page()).await;
-    let cleanup = browser.close().await;
-    result?;
-    cleanup
+    let browser = common::launch().await?;
+    preview_stock(browser.page()).await?;
+    Ok(())
 }
 
 async fn preview_stock(page: &Page) -> Result<()> {

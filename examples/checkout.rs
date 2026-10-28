@@ -5,11 +5,9 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut browser = common::launch().await?;
-    let result = reserve_notebook(browser.page()).await;
-    let cleanup = browser.close().await;
-    result?;
-    cleanup
+    let browser = common::launch().await?;
+    reserve_notebook(browser.page()).await?;
+    Ok(())
 }
 
 async fn reserve_notebook(page: &Page) -> Result<()> {

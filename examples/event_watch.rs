@@ -5,11 +5,9 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut browser = common::launch().await?;
-    let result = watch_dispatch(browser.page()).await;
-    let cleanup = browser.close().await;
-    result?;
-    cleanup
+    let browser = common::launch().await?;
+    watch_dispatch(browser.page()).await?;
+    Ok(())
 }
 
 async fn watch_dispatch(page: &Page) -> Result<()> {
