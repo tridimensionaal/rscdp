@@ -49,3 +49,7 @@ path = "navigation.rs"
 [[example]]
 name = "response_body"
 path = "response_body.rs"
+
+[[example]]
+name = "connect"
+path = "connect.rs"

@@ -46,7 +46,7 @@ to attach to an existing browser.
 
 ## Examples
 
-The examples use local [HTML pages](examples/pages), with a localhost server where
+The launch examples use local [HTML pages](examples/pages), with a localhost server where
 cookies or HTTP requests are needed. No external site is required. They open a
 Chrome window by default; append `-- --headless=new` for headless mode.
 
@@ -54,11 +54,12 @@ Chrome window by default; append `-- --headless=new` for headless mode.
 cargo run -p rustcdp-examples --example checkout
 ```
 
-Replace `checkout` with any example below:
+Replace `checkout` with a launch example below:
 
 | Example | Demonstrates |
 | --- | --- |
 | [navigation](examples/navigation.rs) | Observe a click-triggered navigation and wait for application readiness |
+| [connect](examples/connect.rs) | Inspect an existing browser and dispose a temporary tab without stopping Chrome |
 | [checkout](examples/checkout.rs) | Fill and submit a form with Unicode text and keyboard input |
 | [page_report](examples/page_report.rs) | Export a report to PNG and PDF |
 | [frame_walk](examples/frame_walk.rs) | Traverse nested frames and update inventory |
@@ -67,6 +68,13 @@ Replace `checkout` with any example below:
 | [response_body](examples/response_body.rs) | Correlate network events and read a completed response body |
 | [request_interception](examples/request_interception.rs) | Continue requests, replace responses, and block analytics |
 | [file_upload](examples/file_upload.rs) | Select a CSV and read its local preview; no server upload |
+
+`connect` takes an existing browser endpoint and optional target ID instead of
+Chrome launch flags:
+
+```sh
+cargo run -p rustcdp-examples --example connect -- http://127.0.0.1:9222
+```
 
 Report files go to `rustcdp-report/` in the system temporary directory;
 set `RUSTCDP_OUTPUT` to choose another location. Example dependencies are separate
