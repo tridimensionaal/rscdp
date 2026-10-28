@@ -1,27 +1,36 @@
 # rustcdp
 
 An asynchronous Rust library for Chrome DevTools Protocol (CDP): typed commands
-and events, browser and context management, and page automation.
+and events, browser contexts, and page automation. Uses Tokio.
 
 ## Quickstart
 
-Requires Rust 1.99.1 or newer; this repository pins 1.99.1 through rustup.
-Install Chrome/Chromium or set `CHROME_PATH` to its executable.
+Requires Rust 1.99.1 or newer and Chrome/Chromium. Set `CHROME_PATH` if Chrome
+is not discoverable on your system.
 
-Add these dependencies to your application's `Cargo.toml`, adjusting the path to the library directory inside this checkout:
+Add these dependencies, adjusting the path to the library in your checkout:
 
 ```toml
 [dependencies]
 rustcdp = { path = "../rustcdp/rustcdp" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 ```
 
-This program opens a Chrome window and reads a local page. It needs no website
-or account. To run headless, add `.headless(true)` before `.launch()`.
+This program opens Chrome, visits example.com, and prints the page title.
+Add `.headless(true)` before `.launch()` to run without a window.
 
 ```rust
 use rustcdp::{Browser, Page, Result};
 use std::time::Duration;
+
+async fn read_page(page: &Page) -> Result<()> {
+    page.navigate("https://example.com")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await?;
+    println!("{}", page.evaluate("document.title").json::<String>().await?);
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,221 +38,74 @@ async fn main() -> Result<()> {
     read_page(browser.page()).await?;
     Ok(())
 }
-
-async fn read_page(page: &Page) -> Result<()> {
-    page.navigate(
-        "data:text/html,<title>Workshop</title><h1>Hello%20from%20Rust</h1>",
-    )
-    .timeout(Duration::from_secs(15))
-    .send()
-    .await?;
-    println!("{}", page.evaluate("document.title").json::<String>().await?);
-    println!("{}", page.html().await?);
-    Ok(())
-}
 ```
 
-The browser owns its Chrome process. Leaving its scope, including an early return
-from `?`, synchronously terminates and reaps that process and removes its temporary
-profile. This can block the calling thread. Use `close().await` when you want to
-await shutdown without blocking on process cleanup and receive cleanup errors.
+Use the [browser builder](rustcdp/src/browser/builder.rs) for launch settings,
+including profiles, proxies, and Chrome arguments. Use `Browser::connect(endpoint)`
+to attach to an existing browser.
 
-The [browser builder](rustcdp/src/browser/builder.rs) lists supported settings and
-their defaults, including window size, DevTools, executable, profile, proxy, and
-timeouts. Use `.arg()` or `.args()` for additional Chrome flags. Setting the same
-option through both a typed setter and a raw flag returns an error; use one form.
-`Browser::launch(options)` remains available for existing `LaunchOptions` values.
-`build()` retains typed proxy and connection settings for that launch path.
-Use `.proxy(proxy)` with a parsed [Proxy](rustcdp/src/proxy.rs) to configure routing
-and optional authentication for managed pages. The process-only `BrowserProcess`
-accepts raw routing flags; typed proxies require the Browser owner.
+## Examples
 
-Use `Browser::connect` for an existing browser, or `Connection::connect` for direct
-CDP access. Both accept HTTP(S) discovery endpoints and WS(S) socket URLs.
-`Browser::connect_with_options(endpoint, connection_options)` applies custom
-transport limits and command deadlines when attaching to an existing browser.
-See [Browser](rustcdp/src/browser.rs) and [LaunchOptions](rustcdp/src/launcher.rs) for connection,
-profile, and process-cleanup contracts.
-
-## Try the examples
-
-The examples open a Chrome window and load HTML from [examples/pages](examples/pages).
-Most navigate to a `file://` URL; browser contexts and request interception start
-a localhost server on an available port for cookies and HTTP requests. The server
-serves only the pages directory and stops when the example exits. No external site
-is required. Paths resolve relative to the examples package, not your working directory.
-Chrome flags can follow `--` in each run command. Headless mode is optional:
+The examples use local [HTML pages](examples/pages), with a localhost server where
+cookies or HTTP requests are needed. No external site is required. They open a
+Chrome window by default; append `-- --headless=new` for headless mode.
 
 ```sh
-cargo run -p rustcdp-examples --example checkout -- --headless=new
+cargo run -p rustcdp-examples --example checkout
 ```
 
-| Example | Demonstrates | Run |
-| --- | --- | --- |
-| [checkout](examples/checkout.rs) | Fill a checkout form with Unicode input, Tab, and Enter | `cargo run -p rustcdp-examples --example checkout` |
-| [page_report](examples/page_report.rs) | Export a workshop report as a full-page PNG and PDF | `cargo run -p rustcdp-examples --example page_report` |
-| [frame_walk](examples/frame_walk.rs) | Update inventory inside a nested dispatch-board iframe | `cargo run -p rustcdp-examples --example frame_walk` |
-| [event_watch](examples/event_watch.rs) | Subscribe before navigation and collect console events | `cargo run -p rustcdp-examples --example event_watch` |
-| [browser_contexts](examples/browser_contexts.rs) | Isolate shoppers' cookies, share a cart across tabs, and close contexts independently | `cargo run -p rustcdp-examples --example browser_contexts` |
-| [request_interception](examples/request_interception.rs) | Continue stock requests, replace a delivery quote, and block analytics using typed Fetch commands | `cargo run -p rustcdp-examples --example request_interception` |
-| [file_upload](examples/file_upload.rs) | Select a local CSV with CDP and verify its File API preview (no server upload) | `cargo run -p rustcdp-examples --example file_upload` |
+Replace `checkout` with any example below:
 
-The [examples package](examples/Cargo.toml) is separate, unpublished, and excluded
-from the library package. Its dependencies are not needed by library consumers.
-The examples rely on owned-browser cleanup at scope exit. Explicit context closure
-and interception shutdown remain where they demonstrate those operations. Report files go to
-`rustcdp-report/` in the system temporary directory; set `RUSTCDP_OUTPUT` to override it.
+| Example | Demonstrates |
+| --- | --- |
+| [checkout](examples/checkout.rs) | Fill and submit a form with Unicode text and keyboard input |
+| [page_report](examples/page_report.rs) | Export a report to PNG and PDF |
+| [frame_walk](examples/frame_walk.rs) | Traverse nested frames and update inventory |
+| [event_watch](examples/event_watch.rs) | Subscribe to console events before navigation |
+| [browser_contexts](examples/browser_contexts.rs) | Isolate cookies and share them between tabs in one context |
+| [request_interception](examples/request_interception.rs) | Continue requests, replace responses, and block analytics |
+| [file_upload](examples/file_upload.rs) | Select a CSV and read its local preview; no server upload |
 
-## Choose an API
+Report files go to `rustcdp-report/` in the system temporary directory;
+set `RUSTCDP_OUTPUT` to choose another location. Example dependencies are separate
+from the library's dependencies.
 
-- [Browser](rustcdp/src/browser.rs) and [BrowserContext](rustcdp/src/browser/context.rs):
-  launch/connect, isolated contexts, context-wide cookie reads/updates/clearing,
-  and explicit cleanup. `new_context()` inherits the browser's proxy routing;
-  `new_context_direct()` explicitly bypasses it.
-  [proxy methods](rustcdp/src/browser/proxy.rs) configure a process or context proxy.
-  `browser.new_page()` creates a tab in the default profile;
-  `context.new_page()` creates one sharing that isolated context's storage.
-  Use `browser.pages()` or `context.pages()` to list managed page handles, or
-  `browser.page_by_id(&id)` to select one exact target. Lists are sorted by target
-  ID, not tab-strip order, and reuse existing sessions and authentication workers.
-- [Page](rustcdp/src/page.rs): navigation, JavaScript evaluation, HTML, and cookies.
-  [Selectors](rustcdp/src/page/selectors.rs) provides optional lookup, required lookup,
-  and element-returning presence waits;
-  [DOM](rustcdp/src/page/dom.rs) handles HTML reads and search transactions.
-  [Element](rustcdp/src/page/element.rs) owns remote nodes;
-  [input](rustcdp/src/page/input.rs) provides keyboard and Unicode input.
-- [Frame](rustcdp/src/page/frame.rs): same-process frame traversal and scoped evaluation.
-  `Page::attach_frame_target(&target_id)` validates and attaches a specific
-  out-of-process frame belonging to that page.
-- [Capture](rustcdp/src/page/capture.rs): `page.screenshot().full_page(true).capture().await`
-  returns image bytes; `screenshot_with_options` exposes all CDP screenshot options.
-  [PDF export](rustcdp/src/page/pdf.rs) uses
-  `page.pdf().print_background(true).generate().await` to return PDF bytes;
-  `print_to_pdf` accepts all CDP PDF options.
-- [Connection](rustcdp/src/connection.rs) and [Session](rustcdp/src/session.rs): typed `execute`,
-  JSON `execute_raw`, and event subscriptions for lower-level protocol access.
+## Browser lifetime
 
-For ordinary interactions, wait for a matching element and use direct actions:
+A launched browser owns its Chrome process. Before explicit shutdown starts,
+leaving its scope—including an early return from `?`—synchronously terminates and
+reaps the process and removes its temporary profile. This can block the calling
+thread and cannot return cleanup errors. Fixed profiles are preserved.
 
-```rust
-let input = page.wait_for_element("input[name=email]", std::time::Duration::from_secs(5)).await?;
-input.fill("reader@example.com").await?;
-page.require_element("button[type=submit]").await?.click().await?;
+Use `close().await` to await shutdown and observe errors. Dropping or closing a
+connection to an external browser does not kill that process. Protocol resources
+such as contexts and sessions use best-effort asynchronous cleanup on drop;
+explicitly close them when you need completion before continuing.
+See [Browser](rustcdp/src/browser.rs) and [BrowserProcess](rustcdp/src/launcher.rs)
+for cancellation, runtime shutdown, and cleanup-failure details.
+
+## API documentation
+
+- [Browser](rustcdp/src/browser.rs), [Page](rustcdp/src/page.rs), and
+  [Element](rustcdp/src/page/element.rs) provide browser automation helpers.
+- [Connection](rustcdp/src/connection.rs), [Session](rustcdp/src/session.rs), and
+  [typed CDP bindings](rustcdp/src/lib.rs) expose commands and events directly.
+- Enable the optional `tracing` feature for diagnostics; install your own subscriber.
+
+Build the API reference locally:
+
+```sh
+cargo doc -p rustcdp --no-deps --open
 ```
-
-`wait_for_element` checks presence, not visibility or readiness. `require_element`
-looks up once and reports `Error::ElementNotFound` if absent; `element_by_selector`
-returns `Option<Element>` for optional matches. `click()` scrolls and sends CDP
-mouse input; `click_with_options` accepts named settings through `page::ClickOptions`.
-Actions are not automatically retried. `wait_for_selector_count_stable` and
-`wait_for_xpath_count_stable` use `CountWaitOptions` to wait for a sampled nonzero
-match count to stay unchanged. They return a timeout error if it never stabilizes
-and add no delay after success. This does not check node identity or readiness.
-
-`fill` replaces the value of a supported text input or textarea. `insert_text`
-inserts at the current selection; `page.insert_text` uses the focused element.
-Neither operation implicitly submits the form.
-
-When an action causes navigation, prepare observation before performing it:
-
-```rust
-let submit = page.require_element("button[type=submit]").await?;
-let navigation = page.expect_navigation().prepare().await?;
-submit.click().await?;
-let destination = navigation.wait().await?;
-println!("Arrived at {}", destination.url);
-```
-
-The observer's timeout includes the action and the wait. It observes the next
-qualifying navigation, so avoid unrelated navigation during that interval.
-For navigation to a known URL, use `page.navigate(url).send().await?` directly.
-
-The [generated `cdp` API](rustcdp/src/lib.rs) groups types, commands, and events by domain.
-Commands implement `protocol::Command` with an associated response type. Commands
-and named objects with schema-defined fields have `new(required_fields)` and
-optional `with_*` setters, such as `CookieParam::new("name", "value").with_secure(true)`.
-Optional fields use `Option`; all-optional types also implement `Default`.
-
-Register `session.listen::<Event>()` before the action that emits the event, then
-await `recv()` or handle events in a Tokio task. Typed subscriptions filter by
-session and method before buffering; `connection.subscribe()` receives raw events
-across sessions. Overflow reports `Error::Lagged`. Keep the appropriate
-[domain guard](rustcdp/src/session/domain.rs) while listening for domain events.
-
-## Ownership and cancellation
-
-Before explicit shutdown starts, dropping a launched Browser synchronously
-terminates and reaps its owned process and removes its temporary profile. Process
-cleanup does not require a running Tokio runtime. Fixed profiles are preserved.
-Drop cannot return cleanup errors: if termination fails, the temporary profile is
-preserved rather than removed beneath a potentially live process. As with other
-Rust destructors, aborting the application or calling `std::process::exit` skips
-this cleanup.
-
-Automatic process cleanup can block the calling thread: on Unix it allows up to
-three seconds for termination before forcing a kill, plus process-wait and
-filesystem time. Use `close().await` for asynchronous shutdown and its errors.
-Once close starts, its owned task continues even if its waiter is canceled or the
-Browser is dropped. Keep Tokio running to await that task; if runtime shutdown
-cancels it, process destruction finishes the remaining process cleanup or joins
-its existing cleanup worker.
-
-Protocol cleanup on Drop remains best effort. Contexts, sessions, domain guards,
-and remote objects schedule their cleanup on Tokio; call `close().await`,
-`detach().await`, or `release().await` to observe completion and errors.
-Ordinary commands default to a 30-second deadline, including
-queue admission; `with_command_timeout(None)` disables that caller deadline.
-Resource-owning helpers retain their independent bounds and can continue after
-caller cancellation. A timeout cannot undo a command Chrome already received.
-Detailed contracts live on the owning methods linked above.
-
-Closing an externally connected Browser disconnects without killing its process.
-When no page exists, Browser creates a visible fallback in a fresh isolated context;
-for externally connected browsers, dependent handles can retain it after Browser
-Drop until explicit close or last Drop. Dropping a launched Browser terminates its
-owned process. An ordinary BrowserContext disposes its context even if Page clones remain.
-Keep a context owner alongside standalone Sessions or listeners.
-
-Evaluation defaults to the page's main world, where its JavaScript globals are visible.
-Choose `.world(EvaluationWorld::Isolated)` to share the DOM without sharing those globals.
-Use `page.evaluate(source).json::<T>().await` for a Rust value, `.run().await` for
-side effects, or `.remote().await` for an owned JavaScript reference. A remote value
-schedules best-effort release on drop; `.release().await` observes cleanup errors.
-Evaluation uses unique context identities and never retries user expressions.
-See [evaluation](rustcdp/src/page/evaluation.rs) for cancellation and lifetime details.
-
-Recorded transport failures share their typed cause through
-`Error::ConnectionFailed(Arc<Error>)`; inspect the Arc or the standard error source
-chain. See [Connection](rustcdp/src/connection.rs) and [Error](rustcdp/src/error.rs) for delivery rules.
-Proxy setup arms authentication without navigating. Navigate to your own destination,
-then await `wait_for_proxy_ready` to distinguish authenticated from unchallenged traffic.
-Readiness is not proof of proxy traversal or credential use; see
-[authentication](rustcdp/src/proxy/auth.rs).
-
-## Diagnostics
-
-Enable the optional `tracing` feature and install a subscriber in your application.
-Debug events report method names, elapsed time, outcomes, shutdown, and process cleanup.
-`CDP request finished` reports the exchange **before typed response decoding**:
-`ok` does not imply the requested Rust response type decoded successfully.
-Each exchange produces one completion event. Payloads, endpoint URLs, and remote
-error text are not logged. The library does not install a subscriber.
 
 ## Development
 
-The root is a Cargo workspace. The library lives in `rustcdp/`, and `examples/`
-is an unpublished workspace member. Both share the root lockfile and `target/`
-directory. Plain `cargo build` selects the library; `--workspace` selects both.
-
-`rustcdp/build.rs` calls the generator in `rustcdp/codegen/` to produce bindings
-from the pinned schemas in `rustcdp/protocol/`, without network access. Build the
-local API reference with `cargo doc -p rustcdp`; the source links above identify
-the owners of the detailed contracts.
+The workspace contains the library in `rustcdp/` and the examples in `examples/`.
+CDP bindings are generated at build time from the pinned schemas in
+[rustcdp/protocol](rustcdp/protocol), without network access.
 
 ```sh
-cargo fmt --all --check
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test -p rustcdp --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc -p rustcdp --no-deps --all-features
-cargo package -p rustcdp
+cargo test -p rustcdp
 ```
