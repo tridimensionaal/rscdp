@@ -30,5 +30,8 @@ pub(super) fn render(inputs: &[(&str, &[u8])]) -> std::io::Result<String> {
         domains.extend(schema::parse(bytes, source)?.domains);
     }
     schema::validate(&domains)?;
-    Ok(emit::generate(&domains))
+    Ok(format!(
+        "// Generated from protocol/*.json. Do not edit.\n{}",
+        emit::generate(&domains)
+    ))
 }

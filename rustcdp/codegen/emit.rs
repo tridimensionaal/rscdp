@@ -243,145 +243,169 @@ impl Generator<'_> {
         }
     }
 
-    fn constructor(
-        &self,
-        domain: &str,
-        owner: &str,
-        name: &str,
-        fields: &[Field],
-        out: &mut String,
-    ) {
+    fn constructor(&self, domain: &str, owner: &str, name: &str, fields: &[Field]) -> TokenStream {
         let types: Vec<_> = fields
             .iter()
             .map(|field| {
-                let wire = field.name.as_str();
                 let ty = self.rust_type(
                     domain,
                     owner,
-                    &format!("{name}{}", type_name(wire)),
+                    &format!("{name}{}", type_name(&field.name)),
                     &field.definition,
                     &mut TokenStream::new(),
                 );
-                (field, ident(wire), ty)
+                (field, symbol(&ident(&field.name)), ty)
             })
             .collect();
-        let required: Vec<_> = types
+        let args: Vec<_> = types
             .iter()
             .filter(|(field, _, _)| !optional(owner, field))
+            .map(|(_, member, ty)| quote!(#member: impl Into<#ty>))
             .collect();
-        out.push_str(&format!("impl {name} {{\n"));
-        out.push_str("/// Construct a value with its required fields. Optional fields are omitted.\n#[must_use]\n");
-        if required.len() > 7 {
-            out.push_str("#[allow(clippy::too_many_arguments)]\n");
-        }
-        let args = required
-            .iter()
-            .map(|(_, field, ty)| format!("{field}: impl Into<{ty}>"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        out.push_str(&format!("pub fn new({args}) -> Self {{ Self {{\n"));
-        for (field, member, _) in &types {
+        let allowance = (args.len() > 7).then(|| quote!(#[allow(clippy::too_many_arguments)]));
+        let members = types.iter().map(|(field, member, _)| {
             let value = if optional(owner, field) {
-                "None".into()
+                quote!(None)
             } else {
-                format!("{member}.into()")
+                quote!(#member.into())
             };
-            out.push_str(&format!("{member}: {value},\n"));
-        }
-        out.push_str("} }\n");
-        for (field, member, ty) in &types {
-            if optional(owner, field) {
-                out.push_str(&documentation(&field.definition.metadata).to_string());
-                out.push_str(&format!("#[must_use]\npub fn with_{member}(mut self, value: impl Into<{ty}>) -> Self {{ self.{member} = Some(value.into()); self }}\n"));
+            quote!(#member: #value,)
+        });
+        let setters = types
+            .iter()
+            .filter(|(field, _, _)| optional(owner, field))
+            .map(|(field, member, ty)| {
+                let docs = documentation(&field.definition.metadata);
+                let method = symbol(&format!("with_{member}"));
+                quote! {
+                    #docs
+                    #[must_use]
+                    pub fn #method(mut self, value: impl Into<#ty>) -> Self {
+                        self.#member = Some(value.into());
+                        self
+                    }
+                }
+            });
+        let name = symbol(name);
+        quote! {
+            impl #name {
+                /// Construct a value with its required fields. Optional fields are omitted.
+                #[must_use]
+                #allowance
+                pub fn new(#(#args),*) -> Self { Self { #(#members)* } }
+                #(#setters)*
             }
         }
-        out.push_str("}\n");
     }
 
-    fn domain(&self, domain: &Domain, out: &mut String) {
-        let domain_name = domain.domain.as_str();
-        out.push_str(&documentation(&domain.metadata).to_string());
-        out.push_str(&format!("pub mod {} {{\n", ident(domain_name)));
-        for named in &domain.types {
-            let id = named.id.as_str();
-            let value = &named.definition;
-            let name = type_name(id);
-            let owner = format!("{domain_name}.{id}");
-            let mut extra = TokenStream::new();
-            let ty = self
-                .rust_type(domain_name, &owner, &name, value, &mut extra)
-                .to_string();
-            out.push_str(&extra.to_string());
-            if let Kind::Object(Some(fields)) = &value.kind {
-                self.constructor(domain_name, &owner, &name, fields, out);
-            }
-            if ty != name {
-                out.push_str(&documentation(&value.metadata).to_string());
-                // Transparent newtypes keep protocol identifiers distinct.
-                let eq = if matches!(value.kind, Kind::String(_) | Kind::Integer) {
-                    ", PartialEq, Eq, Hash"
-                } else {
-                    ""
-                };
-                out.push_str(&format!("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize{eq})]\n#[serde(transparent)]\npub struct {name}(pub {ty});\n"));
-                // Only scalar wrappers get these conversions. Enums and named
-                // objects were emitted above; arrays and maps keep their APIs.
-                if matches!(ty.as_str(), "String" | "i64" | "f64" | "bool") {
-                    out.push_str(&format!("impl From<{ty}> for {name} {{ fn from(value: {ty}) -> Self {{ Self(value) }} }}\n"));
-                    out.push_str(&format!("impl std::fmt::Display for {name} {{ fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ std::fmt::Display::fmt(&self.0, f) }} }}\n"));
-                    if ty == "String" {
-                        out.push_str(&format!("impl From<&str> for {name} {{ fn from(value: &str) -> Self {{ Self(value.to_owned()) }} }}\n"));
-                        out.push_str(&format!("impl AsRef<str> for {name} {{ fn as_ref(&self) -> &str {{ &self.0 }} }}\n"));
+    fn newtype(&self, name: &str, value: &Definition, ty: &TokenStream) -> TokenStream {
+        let name = symbol(name);
+        let docs = documentation(&value.metadata);
+        let eq = matches!(value.kind, Kind::String(None) | Kind::Integer)
+            .then(|| quote!(, PartialEq, Eq, Hash));
+        let scalar = matches!(
+            value.kind,
+            Kind::String(None) | Kind::Integer | Kind::Number | Kind::Boolean
+        )
+        .then(|| {
+            quote! {
+                impl From<#ty> for #name {
+                    fn from(value: #ty) -> Self { Self(value) }
+                }
+                impl std::fmt::Display for #name {
+                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        std::fmt::Display::fmt(&self.0, f)
                     }
                 }
             }
+        });
+        let string = matches!(value.kind, Kind::String(None)).then(|| {
+            quote! {
+                impl From<&str> for #name {
+                    fn from(value: &str) -> Self { Self(value.to_owned()) }
+                }
+                impl AsRef<str> for #name {
+                    fn as_ref(&self) -> &str { &self.0 }
+                }
+            }
+        });
+        quote! {
+            #docs
+            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize #eq)]
+            #[serde(transparent)]
+            pub struct #name(pub #ty);
+            #scalar
+            #string
         }
-        out.push_str("pub mod commands {\n");
-        for command in &domain.commands {
-            let wire = command.name.as_str();
-            let name = type_name(wire);
-            out.push_str(&documentation(&command.metadata).to_string());
-            out.push_str(
-                &self
-                    .structure(domain_name, "", &name, &command.parameters)
-                    .to_string(),
-            );
-            self.constructor(domain_name, "", &name, &command.parameters, out);
-            out.push_str(
-                &self
-                    .structure(
-                        domain_name,
-                        "",
-                        &format!("{name}Response"),
-                        &command.returns,
-                    )
-                    .to_string(),
-            );
-            out.push_str(&format!("impl crate::protocol::Command for {name} {{ type Response = {name}Response; const METHOD: &'static str = \"{domain_name}.{wire}\"; }}\n"));
+    }
+
+    fn domain(&self, domain: &Domain) -> TokenStream {
+        let domain_name = domain.domain.as_str();
+        let docs = documentation(&domain.metadata);
+        let module = symbol(&ident(domain_name));
+        let types = domain.types.iter().map(|named| {
+            let value = &named.definition;
+            let name = type_name(&named.id);
+            let owner = schema::reference(domain_name, &named.id);
+            let mut output = TokenStream::new();
+            let ty = self.rust_type(domain_name, &owner, &name, value, &mut output);
+            match &value.kind {
+                Kind::Object(Some(fields)) => {
+                    output.extend(self.constructor(domain_name, &owner, &name, fields))
+                }
+                Kind::String(Some(_)) => {}
+                _ => output.extend(self.newtype(&name, value, &ty)),
+            }
+            output
+        });
+        let commands = domain.commands.iter().map(|command| {
+            let name = type_name(&command.name);
+            let response_name = format!("{name}Response");
+            let docs = documentation(&command.metadata);
+            let request = self.structure(domain_name, "", &name, &command.parameters);
+            let constructor = self.constructor(domain_name, "", &name, &command.parameters);
+            let response = self.structure(domain_name, "", &response_name, &command.returns);
+            let name = symbol(&name);
+            let response_name = symbol(&response_name);
+            let method = format!("{domain_name}.{}", command.name);
+            quote! {
+                #docs #request #constructor #response
+                impl crate::protocol::Command for #name {
+                    type Response = #response_name;
+                    const METHOD: &'static str = #method;
+                }
+            }
+        });
+        let events = domain.events.iter().map(|event| {
+            let name = type_name(&event.name);
+            let docs = documentation(&event.metadata);
+            let payload = self.structure(domain_name, "", &name, &event.parameters);
+            let name = symbol(&name);
+            let method = format!("{domain_name}.{}", event.name);
+            quote! {
+                #docs #payload
+                impl crate::protocol::Event for #name {
+                    const METHOD: &'static str = #method;
+                }
+            }
+        });
+        quote! {
+            #docs
+            pub mod #module {
+                #(#types)*
+                pub mod commands { #(#commands)* }
+                pub mod events { #(#events)* }
+            }
         }
-        out.push_str("}\npub mod events {\n");
-        for event in &domain.events {
-            let wire = event.name.as_str();
-            let name = type_name(wire);
-            out.push_str(&documentation(&event.metadata).to_string());
-            out.push_str(
-                &self
-                    .structure(domain_name, "", &name, &event.parameters)
-                    .to_string(),
-            );
-            out.push_str(&format!("impl crate::protocol::Event for {name} {{ const METHOD: &'static str = \"{domain_name}.{wire}\"; }}\n"));
-        }
-        out.push_str("}\n}\n");
     }
 }
 
-pub(super) fn generate(domains: &[Domain]) -> String {
+pub(super) fn generate(domains: &[Domain]) -> TokenStream {
     let generator = Generator {
         types: Types::new(domains),
     };
-    let mut output = String::from("// Generated from protocol/*.json. Do not edit.\n");
-    for domain in domains {
-        generator.domain(domain, &mut output);
-    }
-    output
+    domains
+        .iter()
+        .map(|domain| generator.domain(domain))
+        .collect()
 }
