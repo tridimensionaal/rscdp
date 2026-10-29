@@ -85,7 +85,7 @@ pub enum Error {
     JavaScript(Value),
     /// Evaluation succeeded but its result has no JSON representation.
     /// Remote IDs in this metadata are diagnostic, not owned live references.
-    #[error("JavaScript result has no JSON value; use remote() to inspect its metadata")]
+    #[error("JavaScript result has no JSON value")]
     NonJsonValue(Box<crate::cdp::runtime::RemoteObject>),
     #[error("navigation failed: {0}")]
     Navigation(String),

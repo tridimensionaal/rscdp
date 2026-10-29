@@ -1,4 +1,4 @@
-use super::{Element, EvaluationBuilder, Page};
+use super::{Element, EvaluationBuilder, FunctionCallBuilder, Page};
 use crate::{
     Error, Result,
     cdp::{
@@ -223,6 +223,14 @@ impl Frame {
     /// See [`Page::evaluate`] for ownership and cancellation guarantees.
     pub fn evaluate(&self, expression: impl Into<String>) -> EvaluationBuilder<'_> {
         EvaluationBuilder::for_frame(&self.page, self.id.clone(), expression)
+    }
+
+    /// Configure a function call with JSON arguments in this frame's main world.
+    /// Each call resolves the frame's current unique execution context, without
+    /// retrying user source. See [`FunctionCallBuilder`] for result, ownership,
+    /// and cancellation guarantees.
+    pub fn call(&self, function: impl Into<String>) -> FunctionCallBuilder<'_> {
+        FunctionCallBuilder::for_frame(&self.page, self.id.clone(), function)
     }
 
     /// Serialize this frame's document, including its doctype when present.

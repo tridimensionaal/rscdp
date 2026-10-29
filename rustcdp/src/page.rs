@@ -15,6 +15,7 @@ mod element;
 mod evaluation;
 mod execution_context;
 mod frame;
+mod function;
 mod input;
 mod lifecycle;
 pub(crate) use lifecycle::TargetKind;
@@ -30,6 +31,7 @@ pub use dom::DomSearchOptions;
 pub use element::{ClickMethod, ClickOptions, Element, ElementPosition};
 pub use evaluation::{EvaluationBuilder, EvaluationWorld, RemoteValue};
 pub use frame::Frame;
+pub use function::FunctionCallBuilder;
 pub use input::KeyModifiers;
 pub use navigation::{
     NavigationBuilder, NavigationObserverBuilder, ObservedNavigation, PreparedNavigation, WaitUntil,

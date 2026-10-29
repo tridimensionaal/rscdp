@@ -3,12 +3,15 @@ use crate::{
     Error, Result,
     cdp::{
         page::FrameId,
-        runtime::{RemoteObject, RemoteObjectId, commands::EvaluateResponse},
+        runtime::{
+            RemoteObject, RemoteObjectId,
+            commands::{CallFunctionOnResponse, EvaluateResponse},
+        },
     },
     error::{decode, decode_ref, with_cleanup},
 };
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::time::Duration;
 
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -57,6 +60,15 @@ pub struct RemoteValue {
 }
 
 impl RemoteValue {
+    pub(super) fn into_json<T: DeserializeOwned>(mut self, method: &str) -> Result<T> {
+        let value = self
+            .metadata
+            .value
+            .take()
+            .ok_or_else(|| Error::NonJsonValue(Box::new(self.metadata)))?;
+        decode(method, value)
+    }
+
     /// Inspect metadata. Copying an ID does not transfer or duplicate ownership.
     pub fn metadata(&self) -> &RemoteObject {
         &self.metadata
@@ -80,7 +92,7 @@ impl RemoteValue {
 }
 
 #[derive(Clone, Copy)]
-enum ResultMode {
+pub(super) enum ResultMode {
     Json,
     Discard,
     Remote,
@@ -112,13 +124,9 @@ impl<'a> EvaluationBuilder<'a> {
     /// or decoding can fail after source has performed side effects; do not retry
     /// blindly. Use `json::<serde_json::Value>()` for an untyped JSON result.
     pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
-        let mut result = self.execute(ResultMode::Json).await?;
-        let value = result
-            .metadata
-            .value
-            .take()
-            .ok_or_else(|| Error::NonJsonValue(Box::new(result.metadata)))?;
-        decode("Runtime.evaluate JSON value", value)
+        self.execute(ResultMode::Json)
+            .await?
+            .into_json("Runtime.evaluate JSON value")
     }
 
     /// Await evaluation and discard its result, including `undefined`.
@@ -140,12 +148,70 @@ impl<'a> EvaluationBuilder<'a> {
     }
 
     async fn execute(self, mode: ResultMode) -> Result<RemoteValue> {
-        let timeout = self.page.session.connection().command_timeout();
-        let page = self.page.clone();
-        let expression = self.expression;
-        let frame = self.frame;
-        let world = self.world;
-        let task = self.page.session.connection().runtime().spawn(async move {
+        ExecutionRequest::Expression(self.expression)
+            .execute(self.page, self.frame, self.world, mode)
+            .await
+    }
+}
+
+// Both requests acquire results through the same owned task. Keep dispatch and
+// typed decoding specific to each protocol command, and ownership shared.
+pub(super) enum ExecutionRequest {
+    Expression(String),
+    Function { source: String, args: Vec<Value> },
+}
+
+impl ExecutionRequest {
+    fn method(&self) -> &'static str {
+        match self {
+            Self::Expression(_) => "Runtime.evaluate",
+            Self::Function { .. } => "Runtime.callFunctionOn",
+        }
+    }
+
+    fn params(&self, unique_context: &str, by_value: bool) -> Value {
+        let mut params = json!({
+            "uniqueContextId": unique_context,
+            "silent": true,
+            "returnByValue": by_value,
+            "awaitPromise": true,
+        });
+        match self {
+            Self::Expression(expression) => params["expression"] = json!(expression),
+            Self::Function { source, args } => {
+                params["functionDeclaration"] = json!(source);
+                // Each value is a separate CDP CallArgument, including explicit
+                // JSON null. Never interpolate arguments into user source.
+                params["arguments"] = args.iter().map(|value| json!({"value": value})).collect();
+            }
+        }
+        params
+    }
+
+    fn decode_result(&self, response: &Value) -> Result<RemoteObject> {
+        match self {
+            Self::Expression(_) => {
+                let decoded: EvaluateResponse = decode_ref(self.method(), response)?;
+                Ok(decoded.result)
+            }
+            Self::Function { .. } => {
+                let decoded: CallFunctionOnResponse = decode_ref(self.method(), response)?;
+                Ok(decoded.result)
+            }
+        }
+    }
+
+    pub(super) async fn execute(
+        self,
+        page: &Page,
+        frame: Option<FrameId>,
+        world: EvaluationWorld,
+        mode: ResultMode,
+    ) -> Result<RemoteValue> {
+        let timeout = page.session.connection().command_timeout();
+        let page = page.clone();
+        let method = self.method();
+        let task = page.session.connection().runtime().spawn(async move {
             let commands = page.clone().with_command_timeout(None);
             // Keep provisional owners outside the timed future so cancellation
             // of that future still permits awaited cleanup of received handles.
@@ -169,16 +235,7 @@ impl<'a> EvaluationBuilder<'a> {
                 unknown_resource = true;
                 let response = match commands
                     .session
-                    .execute_raw(
-                        "Runtime.evaluate",
-                        json!({
-                            "expression": expression,
-                            "uniqueContextId": context.unique,
-                            "silent": true,
-                            "returnByValue": by_value,
-                            "awaitPromise": true,
-                        }),
-                    )
+                    .execute_raw(method, self.params(&context.unique, by_value))
                     .await
                 {
                     Ok(response) => response,
@@ -190,15 +247,14 @@ impl<'a> EvaluationBuilder<'a> {
                 };
                 unknown_resource =
                     !page.own_response_objects(&response, "result", by_value, &mut objects);
-                let decoded: EvaluateResponse = decode_ref("Runtime.evaluate", &response)?;
-                validate_exception("Runtime.evaluate", &response)?;
+                let metadata = self.decode_result(&response)?;
+                validate_exception(method, &response)?;
                 if let Some(details) = response.get("exceptionDetails") {
                     return Err(Error::JavaScript(details.clone()));
                 }
-                let metadata = decoded.result;
                 if unknown_resource {
                     return Err(Error::UnexpectedResponse {
-                        method: "Runtime.evaluate".into(),
+                        method: method.into(),
                         payload: response,
                     });
                 }
@@ -209,7 +265,7 @@ impl<'a> EvaluationBuilder<'a> {
                                 .iter()
                                 .position(|object| object.object_id() == id)
                                 .ok_or_else(|| Error::UnexpectedResponse {
-                                    method: "Runtime.evaluate".into(),
+                                    method: method.into(),
                                     payload: response.clone(),
                                 })?;
                             Some(objects.swap_remove(index))
