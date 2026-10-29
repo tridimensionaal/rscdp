@@ -12,9 +12,10 @@ pub trait Event: DeserializeOwned {
 }
 
 // Missing `any` fields use serde's default; present null must remain a JSON value.
-pub(crate) fn present_json<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+pub(crate) fn present_json<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
 {
     serde::Deserialize::deserialize(deserializer).map(Some)
 }

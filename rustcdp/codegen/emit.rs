@@ -1,6 +1,5 @@
-use super::schema::{self, Definition, Domain, Field, Kind, Metadata};
+use super::schema::{self, Definition, Domain, Field, Kind, Metadata, Types};
 use heck::{ToSnakeCase, ToUpperCamelCase};
-use std::collections::HashMap;
 
 fn ident(name: &str) -> String {
     let name = name.to_snake_case();
@@ -83,25 +82,11 @@ fn documentation(value: &Metadata, out: &mut String) {
     }
 }
 
-pub(super) struct Generator {
-    // Only edges stored inline can cause infinitely sized Rust types.
-    edges: HashMap<String, Vec<String>>,
+pub(super) struct Generator<'a> {
+    types: Types<'a>,
 }
 
-impl Generator {
-    fn reaches(&self, from: &str, to: &str, seen: &mut Vec<String>) -> bool {
-        if from == to {
-            return true;
-        }
-        if seen.iter().any(|key| key == from) {
-            return false;
-        }
-        seen.push(from.into());
-        self.edges
-            .get(from)
-            .is_some_and(|edges| edges.iter().any(|next| self.reaches(next, to, seen)))
-    }
-
+impl Generator<'_> {
     fn rust_type(
         &self,
         domain: &str,
@@ -118,7 +103,7 @@ impl Generator {
                 ident(target_domain),
                 type_name(target_name)
             );
-            return if self.reaches(&key, owner, &mut Vec::new()) {
+            return if self.types.needs_box(&key, owner) {
                 format!("Box<{path}>")
             } else {
                 path
@@ -207,7 +192,7 @@ impl Generator {
             if optional(owner, field) {
                 ty = format!("Option<{ty}>");
                 out.push_str("#[serde(default, skip_serializing_if = \"Option::is_none\")]\n");
-                if matches!(field.definition.kind, Kind::Any) {
+                if self.types.is_any(domain, &field.definition) {
                     out.push_str(
                         "#[serde(deserialize_with = \"crate::protocol::present_json\")]\n",
                     );
@@ -337,27 +322,9 @@ impl Generator {
 }
 
 pub(super) fn generate(domains: &[Domain]) -> String {
-    let mut generator = Generator {
-        edges: HashMap::new(),
+    let generator = Generator {
+        types: Types::new(domains),
     };
-    for domain in domains {
-        for named in &domain.types {
-            let owner = schema::reference(&domain.domain, &named.id);
-            let refs = match &named.definition.kind {
-                Kind::Object(Some(fields)) => fields
-                    .iter()
-                    .filter_map(|field| match &field.definition.kind {
-                        Kind::Reference(reference) => {
-                            Some(schema::reference(&domain.domain, reference))
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            generator.edges.insert(owner, refs);
-        }
-    }
     let mut output = String::from("// Generated from protocol/*.json. Do not edit.\n");
     for domain in domains {
         generator.domain(domain, &mut output);

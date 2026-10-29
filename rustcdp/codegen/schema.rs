@@ -289,3 +289,75 @@ fn validate_definition(
         _ => Ok(()),
     }
 }
+
+// References below Vec do not contribute to an infinitely sized Rust type.
+// Inline objects and transparent newtypes do, even several levels deep.
+pub struct Types<'a> {
+    definitions: HashMap<String, &'a Definition>,
+    inline_edges: HashMap<String, Vec<String>>,
+}
+
+impl<'a> Types<'a> {
+    pub fn new(domains: &'a [Domain]) -> Self {
+        fn collect(definition: &Definition, domain: &str, edges: &mut Vec<String>) {
+            match &definition.kind {
+                Kind::Reference(name) => edges.push(reference(domain, name)),
+                Kind::Object(Some(fields)) => {
+                    for field in fields {
+                        collect(&field.definition, domain, edges);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut definitions = HashMap::new();
+        let mut inline_edges = HashMap::new();
+        for domain in domains {
+            for named in &domain.types {
+                let key = reference(&domain.domain, &named.id);
+                let mut edges = Vec::new();
+                collect(&named.definition, &domain.domain, &mut edges);
+                definitions.insert(key.clone(), &named.definition);
+                inline_edges.insert(key, edges);
+            }
+        }
+        Self {
+            definitions,
+            inline_edges,
+        }
+    }
+
+    pub fn needs_box(&self, from: &str, owner: &str) -> bool {
+        let mut pending = vec![from];
+        let mut seen = HashSet::new();
+        while let Some(key) = pending.pop() {
+            if key == owner {
+                return true;
+            }
+            if seen.insert(key)
+                && let Some(edges) = self.inline_edges.get(key)
+            {
+                pending.extend(edges.iter().map(String::as_str));
+            }
+        }
+        false
+    }
+
+    pub fn is_any(&self, domain: &str, definition: &Definition) -> bool {
+        let mut definition = definition;
+        let mut domain = domain;
+        let mut seen = HashSet::new();
+        while let Kind::Reference(name) = &definition.kind {
+            let key = reference(domain, name);
+            if !seen.insert(key.clone()) {
+                return false;
+            }
+            let Some((key, target)) = self.definitions.get_key_value(&key) else {
+                return false;
+            };
+            domain = key.split_once('.').expect("qualified reference").0;
+            definition = target;
+        }
+        matches!(definition.kind, Kind::Any)
+    }
+}

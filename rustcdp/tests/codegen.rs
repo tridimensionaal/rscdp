@@ -106,3 +106,31 @@ fn nested_schema_errors_retain_property_and_item_locations() {
         "{error}"
     );
 }
+
+#[test]
+fn aliases_to_any_preserve_present_null_across_domains() {
+    let generated = render(serde_json::json!({"domains": [
+        {"domain": "Origin", "types": [{"id": "Json", "type": "any"}, {"id": "Alias", "$ref": "Json"}]},
+        {"domain": "Consumer", "commands": [{"name": "send", "parameters": [
+            {"name": "payload", "$ref": "Origin.Alias", "optional": true}
+        ]}]}
+    ]})).unwrap();
+    assert!(generated.contains("deserialize_with = \"crate::protocol::present_json\""));
+}
+
+#[test]
+fn recursive_aliases_and_nested_objects_are_boxed_but_vectors_are_not() {
+    let generated = render(serde_json::json!({"domains": [{"domain": "Test", "types": [
+        {"id": "Alias", "$ref": "Node"},
+        {"id": "Node", "type": "object", "properties": [
+            {"name": "nested", "type": "object", "properties": [
+                {"name": "parent", "$ref": "Alias", "optional": true}
+            ]},
+            {"name": "children", "type": "array", "items": {"$ref": "Node"}}
+        ]}
+    ]}]}))
+    .unwrap();
+    assert!(generated.contains("pub struct Alias(pub Box<crate::cdp::test::Node>)"));
+    assert!(generated.contains("pub parent: Option<Box<crate::cdp::test::Alias>>"));
+    assert!(generated.contains("pub children: Vec<crate::cdp::test::Node>"));
+}
