@@ -31,7 +31,7 @@ pub use dom::DomSearchOptions;
 pub use element::{ClickMethod, ClickOptions, Element, ElementPosition};
 pub use evaluation::{EvaluationBuilder, EvaluationWorld, RemoteValue};
 pub use frame::Frame;
-pub use function::FunctionCallBuilder;
+pub use function::{ElementCallBuilder, FunctionCallBuilder};
 pub use input::KeyModifiers;
 pub use navigation::{
     NavigationBuilder, NavigationObserverBuilder, ObservedNavigation, PreparedNavigation, WaitUntil,
@@ -134,15 +134,7 @@ impl Page {
     // Resolve uncertain resource ownership. DOM transactions retain their gate
     // until this completes; other acquisitions retain their Page owner.
     async fn recover_session(&self) {
-        if self.session.is_closed() {
-            return;
-        }
-        let session = self.session.clone().with_command_timeout(None);
-        let _ = tokio::time::timeout(Duration::from_secs(1), session.detach()).await;
-        // A detach event is conclusive even if the response was lost.
-        if !session.is_closed() {
-            session.connection().close().await;
-        }
+        recover_session(&self.session).await;
     }
 
     /// Read cookies from this page's browser context.
@@ -172,5 +164,19 @@ impl Page {
             .execute_raw("Storage.setCookies", params)
             .await?;
         Ok(())
+    }
+}
+
+// Shared uncertain-acquisition recovery also serves element calls, which retain
+// a Session and context lease without needing a Page or resolving a new world.
+async fn recover_session(session: &Session) {
+    if session.is_closed() {
+        return;
+    }
+    let session = session.clone().with_command_timeout(None);
+    let _ = tokio::time::timeout(Duration::from_secs(1), session.detach()).await;
+    // A detach event is conclusive even if the response was lost.
+    if !session.is_closed() {
+        session.connection().close().await;
     }
 }

@@ -1,6 +1,9 @@
-use super::{Element, Page, element::validate_exception};
+use super::{
+    Element, Page,
+    element::{own_response_objects, validate_exception},
+};
 use crate::{
-    Error, Result,
+    Error, Result, Session,
     cdp::{
         page::FrameId,
         runtime::{
@@ -154,11 +157,58 @@ impl<'a> EvaluationBuilder<'a> {
     }
 }
 
-// Both requests acquire results through the same owned task. Keep dispatch and
+// All requests acquire results through the same owned task. Keep dispatch and
 // typed decoding specific to each protocol command, and ownership shared.
 pub(super) enum ExecutionRequest {
     Expression(String),
     Function { source: String, args: Vec<Value> },
+}
+
+// An element keeps its original remote ID and context. Only page/frame targets
+// resolve a current world; there is deliberately no element world override.
+enum ExecutionTarget {
+    Page {
+        page: Box<Page>,
+        frame: Option<FrameId>,
+        world: EvaluationWorld,
+    },
+    Element(Element),
+}
+
+impl ExecutionTarget {
+    fn session(&self) -> &Session {
+        match self {
+            Self::Page { page, .. } => &page.session,
+            Self::Element(element) => &element.0.session,
+        }
+    }
+
+    fn context_lease(&self) -> &Option<std::sync::Arc<crate::browser::ContextLease>> {
+        match self {
+            Self::Page { page, .. } => &page.context_lease,
+            Self::Element(element) => &element.0.context_lease,
+        }
+    }
+
+    async fn binding(&self) -> Result<Value> {
+        match self {
+            Self::Element(element) => Ok(json!({"objectId": element.object_id()})),
+            Self::Page { page, frame, world } => {
+                let commands = page.as_ref().clone().with_command_timeout(None);
+                let context = match (world, frame.as_ref()) {
+                    (EvaluationWorld::Main, None) => commands.main_context().await?,
+                    (EvaluationWorld::Main, Some(frame)) => {
+                        commands.main_context_for(frame).await?
+                    }
+                    (EvaluationWorld::Isolated, None) => commands.isolated_context().await?,
+                    (EvaluationWorld::Isolated, Some(frame)) => {
+                        commands.isolated_context_for(frame).await?
+                    }
+                };
+                Ok(json!({"uniqueContextId": context.unique}))
+            }
+        }
+    }
 }
 
 impl ExecutionRequest {
@@ -169,13 +219,11 @@ impl ExecutionRequest {
         }
     }
 
-    fn params(&self, unique_context: &str, by_value: bool) -> Value {
-        let mut params = json!({
-            "uniqueContextId": unique_context,
-            "silent": true,
-            "returnByValue": by_value,
-            "awaitPromise": true,
-        });
+    fn params(&self, binding: &Value, by_value: bool) -> Value {
+        let mut params = binding.clone();
+        params["silent"] = json!(true);
+        params["returnByValue"] = json!(by_value);
+        params["awaitPromise"] = json!(true);
         match self {
             Self::Expression(expression) => params["expression"] = json!(expression),
             Self::Function { source, args } => {
@@ -208,87 +256,146 @@ impl ExecutionRequest {
         world: EvaluationWorld,
         mode: ResultMode,
     ) -> Result<RemoteValue> {
-        let timeout = page.session.connection().command_timeout();
-        let page = page.clone();
+        self.execute_on(
+            ExecutionTarget::Page {
+                page: Box::new(page.clone()),
+                frame,
+                world,
+            },
+            mode,
+        )
+        .await
+    }
+
+    pub(super) async fn execute_element(
+        self,
+        element: &Element,
+        mode: ResultMode,
+    ) -> Result<RemoteValue> {
+        self.execute_on(ExecutionTarget::Element(element.clone()), mode)
+            .await
+    }
+
+    // Own every received ID before decoding, including aliases of a seeded
+    // element. The command receiver remains alive through caller cancellation.
+    async fn dispatch(
+        &self,
+        target: &ExecutionTarget,
+        binding: &Value,
+        mode: ResultMode,
+        objects: &mut Vec<Element>,
+        unknown_resource: &mut bool,
+    ) -> Result<RemoteValue> {
         let method = self.method();
-        let task = page.session.connection().runtime().spawn(async move {
-            let commands = page.clone().with_command_timeout(None);
-            // Keep provisional owners outside the timed future so cancellation
-            // of that future still permits awaited cleanup of received handles.
-            let mut objects = Vec::new();
+        let by_value = matches!(mode, ResultMode::Json);
+        let commands = target.session().clone().with_command_timeout(None);
+        *unknown_resource = true;
+        let response = match commands
+            .execute_raw(method, self.params(binding, by_value))
+            .await
+        {
+            Ok(response) => response,
+            Err(error @ Error::Protocol(_)) => {
+                *unknown_resource = false;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        *unknown_resource = !own_response_objects(
+            target.session(),
+            target.context_lease(),
+            &response,
+            "result",
+            by_value,
+            objects,
+        );
+        let metadata = self.decode_result(&response)?;
+        validate_exception(method, &response)?;
+        if let Some(details) = response.get("exceptionDetails") {
+            return Err(Error::JavaScript(details.clone()));
+        }
+        if *unknown_resource {
+            return Err(Error::UnexpectedResponse {
+                method: method.into(),
+                payload: response,
+            });
+        }
+        let resource = if matches!(mode, ResultMode::Remote) {
+            match metadata.object_id.as_ref() {
+                Some(id) => {
+                    let index = objects
+                        .iter()
+                        .position(|object| object.object_id() == id)
+                        .ok_or_else(|| Error::UnexpectedResponse {
+                            method: method.into(),
+                            payload: response.clone(),
+                        })?;
+                    Some(objects.swap_remove(index))
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        Ok(RemoteValue { metadata, resource })
+    }
+
+    async fn execute_on(self, target: ExecutionTarget, mode: ResultMode) -> Result<RemoteValue> {
+        let timeout = target.session().connection().command_timeout();
+        let runtime = target.session().connection().runtime();
+        let task = runtime.spawn(async move {
+            // Seed ownership before *any* response, including attachment checks.
+            // Keep owners outside the timed future for awaited cleanup on expiry.
+            let mut objects = match &target {
+                ExecutionTarget::Element(element) => vec![element.clone()],
+                ExecutionTarget::Page { .. } => Vec::new(),
+            };
             let mut unknown_resource = false;
             let result = tokio::time::timeout(EXECUTION_TIMEOUT, async {
-                let context = match (world, frame.as_ref()) {
-                    (EvaluationWorld::Main, None) => commands.main_context().await?,
-                    (EvaluationWorld::Main, Some(frame)) => {
-                        commands.main_context_for(frame).await?
+                let binding = target.binding().await?;
+                if matches!(&target, ExecutionTarget::Element(_)) {
+                    let check = Self::Function {
+                        source: "function() { return this.isConnected; }".into(),
+                        args: Vec::new(),
+                    };
+                    let attached: bool = check
+                        .dispatch(
+                            &target,
+                            &binding,
+                            ResultMode::Json,
+                            &mut objects,
+                            &mut unknown_resource,
+                        )
+                        .await?
+                        .into_json("Runtime.callFunctionOn element attachment")?;
+                    if !attached {
+                        return Err(Error::InvalidArgument(
+                            "cannot call a detached element".into(),
+                        ));
                     }
-                    (EvaluationWorld::Isolated, None) => commands.isolated_context().await?,
-                    (EvaluationWorld::Isolated, Some(frame)) => {
-                        commands.isolated_context_for(frame).await?
-                    }
-                };
-                let by_value = matches!(mode, ResultMode::Json);
-                // Conservatively uncertain once dispatch can begin. A caller's
-                // deadline never drops this command's receiver; the owner has
-                // its own bound and recovers if that bound expires here.
-                unknown_resource = true;
-                let response = match commands
-                    .session
-                    .execute_raw(method, self.params(&context.unique, by_value))
+                }
+                self.dispatch(&target, &binding, mode, &mut objects, &mut unknown_resource)
                     .await
-                {
-                    Ok(response) => response,
-                    Err(error @ Error::Protocol(_)) => {
-                        unknown_resource = false;
-                        return Err(error);
-                    }
-                    Err(error) => return Err(error),
-                };
-                unknown_resource =
-                    !page.own_response_objects(&response, "result", by_value, &mut objects);
-                let metadata = self.decode_result(&response)?;
-                validate_exception(method, &response)?;
-                if let Some(details) = response.get("exceptionDetails") {
-                    return Err(Error::JavaScript(details.clone()));
-                }
-                if unknown_resource {
-                    return Err(Error::UnexpectedResponse {
-                        method: method.into(),
-                        payload: response,
-                    });
-                }
-                let resource = if matches!(mode, ResultMode::Remote) {
-                    match metadata.object_id.as_ref() {
-                        Some(id) => {
-                            let index = objects
-                                .iter()
-                                .position(|object| object.object_id() == id)
-                                .ok_or_else(|| Error::UnexpectedResponse {
-                                    method: method.into(),
-                                    payload: response.clone(),
-                                })?;
-                            Some(objects.swap_remove(index))
-                        }
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                Ok(RemoteValue { metadata, resource })
             })
             .await
             .unwrap_or_else(|_| Err(Error::Timeout("evaluating JavaScript".into())));
             if unknown_resource {
-                page.recover_session().await;
+                super::recover_session(target.session()).await;
             }
             let mut cleanup = Ok(());
             for object in objects {
                 cleanup = with_cleanup(cleanup, object.release().await);
             }
             let result = with_cleanup(result, cleanup);
-            drop(page);
-            result
+            // The target keeps an element alive through other-reference cleanup.
+            // Await its own release too if cancellation dropped all public owners.
+            match target {
+                ExecutionTarget::Element(element) => with_cleanup(result, element.release().await),
+                ExecutionTarget::Page { page, .. } => {
+                    drop(page);
+                    result
+                }
+            }
         });
         if let Some(timeout) = timeout {
             tokio::time::timeout(timeout, task)

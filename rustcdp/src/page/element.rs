@@ -1,4 +1,4 @@
-use super::{Page, input::click_cdp};
+use super::{ElementCallBuilder, Page, input::click_cdp};
 use crate::error::decode_ref;
 use crate::{
     Error, Result, Session,
@@ -117,6 +117,25 @@ impl Element {
             Some(mut lease) => lease.release_task().await?,
             None => Ok(()),
         }
+    }
+
+    /// Configure a function call with `this` bound to this existing element.
+    ///
+    /// Use a normal JavaScript function to access `this`; arrow functions keep
+    /// their lexical `this`. No world selection or fresh element lookup occurs.
+    /// See [`ElementCallBuilder`] for attachment and cancellation guarantees.
+    ///
+    /// ```no_run
+    /// # async fn example(element: &rustcdp::page::Element) -> rustcdp::Result<()> {
+    /// let value: Option<String> = element
+    ///     .call("function(name) { return this.getAttribute(name); }")
+    ///     .arg(serde_json::json!("data-value"))
+    ///     .json().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn call(&self, function: impl Into<String>) -> ElementCallBuilder<'_> {
+        ElementCallBuilder::new(self, function)
     }
 
     pub fn object_id(&self) -> &RemoteObjectId {
@@ -352,21 +371,40 @@ impl Page {
         result_by_value: bool,
         objects: &mut Vec<Element>,
     ) -> bool {
-        let result = &response[result_key];
-        let mut known = if result_by_value && result.get("objectId").is_none() {
-            true
-        } else {
-            own_remote_object(&self.session, &self.context_lease, result, objects)
-        };
-        if let Some(details) = response.get("exceptionDetails") {
-            if let Some(exception) = details.get("exception") {
-                known &= own_remote_object(&self.session, &self.context_lease, exception, objects);
-            } else if !details.is_object() {
-                known = false;
-            }
-        }
-        known
+        own_response_objects(
+            &self.session,
+            &self.context_lease,
+            response,
+            result_key,
+            result_by_value,
+            objects,
+        )
     }
+}
+
+// Shared by page acquisitions and calls bound to an already-owned element.
+pub(super) fn own_response_objects(
+    session: &Session,
+    context_lease: &Option<Arc<crate::browser::ContextLease>>,
+    response: &Value,
+    result_key: &str,
+    result_by_value: bool,
+    objects: &mut Vec<Element>,
+) -> bool {
+    let result = &response[result_key];
+    let mut known = if result_by_value && result.get("objectId").is_none() {
+        true
+    } else {
+        own_remote_object(session, context_lease, result, objects)
+    };
+    if let Some(details) = response.get("exceptionDetails") {
+        if let Some(exception) = details.get("exception") {
+            known &= own_remote_object(session, context_lease, exception, objects);
+        } else if !details.is_object() {
+            known = false;
+        }
+    }
+    known
 }
 
 pub(super) fn own_remote_object(

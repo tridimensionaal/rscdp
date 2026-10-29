@@ -1,5 +1,5 @@
 use super::{
-    EvaluationWorld, Page,
+    Element, EvaluationWorld, Page,
     evaluation::{ExecutionRequest, ResultMode},
 };
 use crate::{Result, cdp::page::FrameId};
@@ -122,5 +122,86 @@ impl Page {
     /// ```
     pub fn call(&self, function: impl Into<String>) -> FunctionCallBuilder<'_> {
         FunctionCallBuilder::new(self, function)
+    }
+}
+
+/// Configure a call bound to an element's existing remote object and world.
+///
+/// Arguments are sent separately as JSON values and returned promises are awaited.
+/// Use a normal function for `this`; arrow functions retain lexical `this`.
+/// Construction sends no commands. There is no world setter or element lookup.
+/// A detached node is rejected before user source is dispatched. Attachment is
+/// checked in a separate command, so DOM mutation can still race the user call.
+/// A destroyed context or stale object ID produces a protocol error.
+/// User source is never retried, including after a failed attachment check.
+///
+/// An owned task retains the element through execution and cleanup, even if the
+/// caller cancels or drops its last public handle. Returning or throwing `this`
+/// cannot release a still-owned element. Execution is capped at 30 seconds; the
+/// handle's command timeout separately bounds the caller's wait. Cancellation
+/// does not undo side effects. Cleanup and uncertain-acquisition recovery can
+/// outlast that cap. As with [`FunctionCallBuilder`], uncertain acquisition
+/// detaches the session, falling back to connection closure; known references
+/// receive bounded release attempts. Cleanup needs a running Tokio runtime.
+#[must_use = "call json().await or run().await to invoke the function"]
+pub struct ElementCallBuilder<'a> {
+    element: &'a Element,
+    function: String,
+    args: Vec<Value>,
+}
+
+impl<'a> ElementCallBuilder<'a> {
+    pub(super) fn new(element: &'a Element, function: impl Into<String>) -> Self {
+        Self {
+            element,
+            function: function.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Append one JSON argument, preserving its position and explicit null values.
+    /// Use `serde_json::json!` or `serde_json::to_value(value)?` for Rust values.
+    /// Arguments use JavaScript's JSON-compatible values and number precision;
+    /// remote references and non-JSON values are not supported.
+    pub fn arg(mut self, value: Value) -> Self {
+        self.args.push(value);
+        self
+    }
+
+    /// Append JSON arguments in iteration order, preserving earlier arguments.
+    pub fn args(mut self, values: impl IntoIterator<Item = Value>) -> Self {
+        self.args.extend(values);
+        self
+    }
+
+    /// Await the function and deserialize its by-value JSON result.
+    ///
+    /// Results without JSON values, including `undefined` and BigInt, produce
+    /// [`crate::Error::NonJsonValue`]. Exceptions and promise rejections remain
+    /// errors. Received diagnostic IDs do not transfer ownership to the caller.
+    /// Serialization or decoding can fail after side effects; do not retry blindly.
+    pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
+        ExecutionRequest::Function {
+            source: self.function,
+            args: self.args,
+        }
+        .execute_element(self.element, ResultMode::Json)
+        .await?
+        .into_json("Runtime.callFunctionOn JSON value")
+    }
+
+    /// Await the function and discard its result, including `undefined`.
+    ///
+    /// Results are requested by reference. Newly received result/exception IDs
+    /// are released before successful completion; aliases of the original element
+    /// share its ownership. Exceptions and promise rejections are propagated.
+    pub async fn run(self) -> Result<()> {
+        ExecutionRequest::Function {
+            source: self.function,
+            args: self.args,
+        }
+        .execute_element(self.element, ResultMode::Discard)
+        .await
+        .map(|_| ())
     }
 }
