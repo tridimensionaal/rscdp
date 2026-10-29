@@ -30,8 +30,15 @@ pub(super) fn render(inputs: &[(&str, &[u8])]) -> std::io::Result<String> {
         domains.extend(schema::parse(bytes, source)?.domains);
     }
     schema::validate(&domains)?;
+    emit::validate(&domains)?;
+    let syntax = syn::parse2(emit::generate(&domains)).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("generated Rust: {error}"),
+        )
+    })?;
     Ok(format!(
         "// Generated from protocol/*.json. Do not edit.\n{}",
-        emit::generate(&domains)
+        prettyplease::unparse(&syntax)
     ))
 }

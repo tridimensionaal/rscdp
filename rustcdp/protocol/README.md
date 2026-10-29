@@ -7,6 +7,12 @@ The generator in `codegen/`, invoked by `build.rs`, produces Rust bindings witho
 network access. Update the snapshots deliberately when updating protocol support,
 not on every build.
 
+`codegen/schema.rs` parses and validates the schemas and resolves type references.
+`codegen/emit.rs` emits Rust tokens with `quote`. The build hook parses those tokens
+with `syn`, formats them with `prettyplease`, and writes only to Cargo's `OUT_DIR`.
+Generation is deterministic and does not require an installed `rustfmt` binary.
+The generator's dependencies are build dependencies, not runtime dependencies.
+
 Immutable source files and SHA-256 hashes:
 
 - [browser_protocol.json](https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/ebca9061ecc4c77b7d6b5b8f7b8afe19dc3ab9ed/json/browser_protocol.json):
@@ -16,7 +22,8 @@ Immutable source files and SHA-256 hashes:
 
 Each domain exposes named types, `commands` and `events`. Commands implement
 `protocol::Command`, linking a serializable request to its response type. Events
-implement `protocol::Event`. Optional properties are omitted when `None`.
+implement `protocol::Event`. Optional properties are omitted when `None`. Optional `any` values, including
+references to `any`, distinguish an absent property from a present JSON `null`.
 Identifiers use transparent newtypes. Cyclic inline object references are boxed;
 arrays use `Vec` as their indirection. Unstructured objects and `any` retain JSON.
 

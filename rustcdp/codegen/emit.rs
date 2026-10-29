@@ -2,6 +2,7 @@ use super::schema::{self, Definition, Domain, Field, Kind, Metadata, Types};
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
+use std::{collections::HashSet, io};
 
 fn ident(name: &str) -> String {
     let name = name.to_snake_case();
@@ -23,6 +24,123 @@ fn type_name(name: &str) -> String {
     } else {
         name
     }
+}
+
+fn variant_name(wire: &str) -> String {
+    let mut name = type_name(wire);
+    if name.is_empty() {
+        name = "Empty".into();
+    }
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        name.insert_str(0, "Value");
+    }
+    name
+}
+
+// Check the names in each emitted Rust namespace before creating identifiers.
+// Wire names that differ can normalize to the same Rust name.
+fn register(name: String, names: &mut HashSet<String>, location: &str) -> io::Result<()> {
+    if syn::parse_str::<Ident>(&name).is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{location}: invalid Rust identifier {name:?}"),
+        ));
+    }
+    if !names.insert(name.clone()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{location}: duplicate generated identifier {name:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_structure(
+    name: &str,
+    fields: &[Field],
+    names: &mut HashSet<String>,
+    location: &str,
+) -> io::Result<()> {
+    register(name.to_owned(), names, location)?;
+    let mut members = HashSet::new();
+    for field in fields {
+        let location = format!("{location}.{}", field.name);
+        register(ident(&field.name), &mut members, &location)?;
+        validate_definition(
+            &format!("{name}{}", type_name(&field.name)),
+            &field.definition,
+            names,
+            &location,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_definition(
+    name: &str,
+    value: &Definition,
+    names: &mut HashSet<String>,
+    location: &str,
+) -> io::Result<()> {
+    match &value.kind {
+        Kind::Object(Some(fields)) => validate_structure(name, fields, names, location)?,
+        Kind::String(Some(values)) => {
+            register(name.to_owned(), names, location)?;
+            let mut variants = HashSet::from(["Unrecognized".to_owned()]);
+            for wire in values {
+                register(
+                    variant_name(wire),
+                    &mut variants,
+                    &format!("{location}.{wire}"),
+                )?;
+            }
+        }
+        Kind::Array(items) => validate_definition(&format!("{name}Item"), items, names, location)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(super) fn validate(domains: &[Domain]) -> io::Result<()> {
+    let mut modules = HashSet::new();
+    for domain in domains {
+        let location = domain.domain.as_str();
+        register(ident(location), &mut modules, location)?;
+        let mut types = HashSet::new();
+        for named in &domain.types {
+            let name = type_name(&named.id);
+            let location = schema::reference(location, &named.id);
+            if !matches!(
+                named.definition.kind,
+                Kind::Object(Some(_)) | Kind::String(Some(_))
+            ) {
+                register(name.clone(), &mut types, &location)?;
+            }
+            validate_definition(&name, &named.definition, &mut types, &location)?;
+        }
+        let mut commands = HashSet::new();
+        for command in &domain.commands {
+            let name = type_name(&command.name);
+            let location = format!("{location}.commands.{}", command.name);
+            validate_structure(&name, &command.parameters, &mut commands, &location)?;
+            validate_structure(
+                &format!("{name}Response"),
+                &command.returns,
+                &mut commands,
+                &location,
+            )?;
+        }
+        let mut events = HashSet::new();
+        for event in &domain.events {
+            validate_structure(
+                &type_name(&event.name),
+                &event.parameters,
+                &mut events,
+                &format!("{location}.events.{}", event.name),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn optional(owner: &str, field: &Field) -> bool {
@@ -78,10 +196,10 @@ fn documentation(value: &Metadata) -> TokenStream {
         out.extend(quote!(#[doc = #text]));
     }
     if value.experimental {
-        out.extend(quote!(#[doc = "\nExperimental in the pinned CDP schema."]));
+        out.extend(quote!(#[doc = ""] #[doc = "Experimental in the pinned CDP schema."]));
     }
     if value.deprecated {
-        out.extend(quote!(#[doc = "\nDeprecated in the pinned CDP schema."]));
+        out.extend(quote!(#[doc = ""] #[doc = "Deprecated in the pinned CDP schema."]));
     }
     out
 }
@@ -143,23 +261,9 @@ impl Generator<'_> {
 
     fn enumeration(&self, name: &str, metadata: &Metadata, values: &[String]) -> TokenStream {
         let docs = documentation(metadata);
-        let mut used = std::collections::HashSet::from(["Unrecognized".to_owned()]);
         let variants: Vec<_> = values
             .iter()
-            .map(|wire| {
-                let mut variant = type_name(wire);
-                if variant.is_empty() {
-                    variant = "Empty".into();
-                }
-                if variant.starts_with(|c: char| c.is_ascii_digit()) {
-                    variant.insert_str(0, "Value");
-                }
-                assert!(
-                    used.insert(variant.clone()),
-                    "enum name collision: {name}.{wire}"
-                );
-                symbol(&variant)
-            })
+            .map(|wire| symbol(&variant_name(wire)))
             .collect();
         let name = symbol(name);
         quote! {

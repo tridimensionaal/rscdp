@@ -199,8 +199,20 @@ pub fn validate(domains: &[Domain]) -> io::Result<()> {
     unique_names(domains.iter().map(|d| d.domain.as_str()), "domains")?;
     let mut types = HashMap::new();
     for domain in domains {
+        if domain.domain.contains('.') {
+            return Err(invalid(format!(
+                "{}: dots are reserved for qualified references",
+                domain.domain
+            )));
+        }
         unique_names(domain.types.iter().map(|t| t.id.as_str()), &domain.domain)?;
         for ty in &domain.types {
+            if ty.id.contains('.') {
+                return Err(invalid(format!(
+                    "{}.{}: dots are reserved for qualified references",
+                    domain.domain, ty.id
+                )));
+            }
             types.insert(reference(&domain.domain, &ty.id), &ty.definition);
         }
     }

@@ -135,3 +135,60 @@ fn recursive_aliases_and_nested_objects_are_boxed_but_vectors_are_not() {
     assert!(generated.contains("pubparent:Option<Box<crate::cdp::test::Alias>>"));
     assert!(generated.contains("pubchildren:Vec<crate::cdp::test::Node>"));
 }
+
+#[test]
+fn generated_rust_name_collisions_fail_before_emission() {
+    for domain in [
+        serde_json::json!({"domain": "Test", "types": [
+            {"id": "Status", "type": "string", "enum": ["some-value", "someValue"]}
+        ]}),
+        serde_json::json!({"domain": "Test", "types": [
+            {"id": "Status", "type": "string", "enum": ["unrecognized"]}
+        ]}),
+        serde_json::json!({"domain": "Test", "commands": [
+            {"name": "run"}, {"name": "runResponse"}
+        ]}),
+        serde_json::json!({"domain": "Test", "commands": [
+            {"name": "run", "parameters": [
+                {"name": "some-value", "type": "string"},
+                {"name": "someValue", "type": "string"}
+            ]}
+        ]}),
+        serde_json::json!({"domain": "Test", "types": [
+            {"id": "Outer", "type": "object", "properties": [
+                {"name": "nested", "type": "object", "properties": []}
+            ]},
+            {"id": "OuterNested", "type": "string"}
+        ]}),
+    ] {
+        let error = render(serde_json::json!({"domains": [domain]}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate generated identifier"), "{error}");
+        assert!(error.contains("Test."), "{error}");
+    }
+    let error = render(serde_json::json!({"domains": [{"domain": "123"}]}))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("invalid Rust identifier"), "{error}");
+}
+
+#[test]
+fn dotted_declarations_cannot_be_misread_as_qualified_references() {
+    for domain in [
+        serde_json::json!({"domain": "Test", "types": [
+            {"id": "A.123", "type": "string"}, {"id": "Alias", "$ref": "A.123"}
+        ]}),
+        serde_json::json!({"domain": "Test.Nested", "types": [
+            {"id": "Value", "type": "string"}
+        ]}),
+    ] {
+        let error = render(serde_json::json!({"domains": [domain]}))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("dots are reserved for qualified references"),
+            "{error}"
+        );
+    }
+}
