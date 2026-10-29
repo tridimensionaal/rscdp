@@ -954,6 +954,8 @@ dependencies = [
  "futures-util",
  "heck",
  "percent-encoding",
+ "proc-macro2",
+ "quote",
  "reqwest",
  "rustix",
  "serde",

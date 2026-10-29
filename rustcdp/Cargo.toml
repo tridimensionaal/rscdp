@@ -28,6 +28,8 @@ url = "2.5.8"
 percent-encoding = "2.3.2"
 
 [build-dependencies]
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_path_to_error = "0.1.20"
 heck = "0.5.0"
@@ -37,5 +39,7 @@ serde_json = "1.0.154"
 rustix = { version = "1.1.5", features = ["process"] }
 
 [dev-dependencies]
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
 heck = "0.5.0"
 serde_path_to_error = "0.1.20"

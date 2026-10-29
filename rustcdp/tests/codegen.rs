@@ -130,7 +130,8 @@ fn recursive_aliases_and_nested_objects_are_boxed_but_vectors_are_not() {
         ]}
     ]}]}))
     .unwrap();
-    assert!(generated.contains("pub struct Alias(pub Box<crate::cdp::test::Node>)"));
-    assert!(generated.contains("pub parent: Option<Box<crate::cdp::test::Alias>>"));
-    assert!(generated.contains("pub children: Vec<crate::cdp::test::Node>"));
+    let generated = generated.split_whitespace().collect::<String>();
+    assert!(generated.contains("pubstructAlias(pubBox<crate::cdp::test::Node>)"));
+    assert!(generated.contains("pubparent:Option<Box<crate::cdp::test::Alias>>"));
+    assert!(generated.contains("pubchildren:Vec<crate::cdp::test::Node>"));
 }

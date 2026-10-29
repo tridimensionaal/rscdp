@@ -1,5 +1,7 @@
 use super::schema::{self, Definition, Domain, Field, Kind, Metadata, Types};
 use heck::{ToSnakeCase, ToUpperCamelCase};
+use proc_macro2::{Ident, Span, TokenStream};
+use quote::quote;
 
 fn ident(name: &str) -> String {
     let name = name.to_snake_case();
@@ -58,7 +60,8 @@ fn prose(mut text: &str) -> String {
 
 // Protocol prose is not Rust: preserve code spans while escaping HTML and
 // bracket ranges outside them so rustdoc does not interpret them as links/tags.
-fn documentation(value: &Metadata, out: &mut String) {
+fn documentation(value: &Metadata) -> TokenStream {
+    let mut out = TokenStream::new();
     if let Some(description) = value.description.as_deref() {
         let text = description
             .split('`')
@@ -72,14 +75,19 @@ fn documentation(value: &Metadata, out: &mut String) {
             })
             .collect::<Vec<_>>()
             .join("`");
-        out.push_str(&format!("#[doc = {text:?}]\n"));
+        out.extend(quote!(#[doc = #text]));
     }
     if value.experimental {
-        out.push_str("#[doc = \"\nExperimental in the pinned CDP schema.\"]\n");
+        out.extend(quote!(#[doc = "\nExperimental in the pinned CDP schema."]));
     }
     if value.deprecated {
-        out.push_str("#[doc = \"\nDeprecated in the pinned CDP schema.\"]\n");
+        out.extend(quote!(#[doc = "\nDeprecated in the pinned CDP schema."]));
     }
+    out
+}
+
+fn symbol(name: &str) -> Ident {
+    Ident::new(name, Span::call_site())
 }
 
 pub(super) struct Generator<'a> {
@@ -93,115 +101,146 @@ impl Generator<'_> {
         owner: &str,
         name: &str,
         value: &Definition,
-        extra: &mut String,
-    ) -> String {
-        if let Kind::Reference(reference) = &value.kind {
-            let key = schema::reference(domain, reference);
-            let (target_domain, target_name) = key.split_once('.').expect("qualified reference");
-            let path = format!(
-                "crate::cdp::{}::{}",
-                ident(target_domain),
-                type_name(target_name)
-            );
-            return if self.types.needs_box(&key, owner) {
-                format!("Box<{path}>")
-            } else {
-                path
-            };
-        }
-        if let Kind::String(Some(values)) = &value.kind {
-            documentation(&value.metadata, extra);
-            extra.push_str(&format!("#[derive(Debug, Clone, PartialEq, Eq, Hash)]\n#[non_exhaustive]\npub enum {name} {{\n"));
-            let mut used = std::collections::HashSet::new();
-            // Some schemas already define a known `Unknown` variant. Reserve
-            // one uniform fallback name without renaming any known variants.
-            used.insert("Unrecognized".to_owned());
-            let mut variants = Vec::new();
-            for variant in values {
-                let wire = variant.as_str();
-                let mut variant_name = type_name(wire);
-                if variant_name.is_empty() {
-                    variant_name = "Empty".into();
-                }
-                if variant_name.starts_with(|c: char| c.is_ascii_digit()) {
-                    variant_name.insert_str(0, "Value");
-                }
-                assert!(
-                    used.insert(variant_name.clone()),
-                    "enum name collision: {name}.{wire}"
-                );
-                extra.push_str(&format!("{variant_name},\n"));
-                variants.push((variant_name, wire));
-            }
-            extra.push_str("/// A wire string absent from the pinned schema, preserved verbatim.\nUnrecognized(String),\n}\n");
-            extra.push_str(&format!("impl {name} {{\n/// Return the exact protocol wire string, including unrecognized values.\npub fn as_str(&self) -> &str {{ match self {{\n"));
-            for (variant, wire) in &variants {
-                extra.push_str(&format!("Self::{variant} => {wire:?},\n"));
-            }
-            extra.push_str("Self::Unrecognized(value) => value.as_str(),\n} }\n}\n");
-            extra.push_str(&format!("impl serde::Serialize for {name} {{\nfn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {{ serializer.serialize_str(self.as_str()) }}\n}}\n"));
-            extra.push_str(&format!("impl<'de> serde::Deserialize<'de> for {name} {{\nfn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {{\nlet value = <String as serde::Deserialize<'de>>::deserialize(deserializer)?;\nOk(match value.as_str() {{\n"));
-            for (variant, wire) in &variants {
-                extra.push_str(&format!("{wire:?} => Self::{variant},\n"));
-            }
-            extra.push_str("_ => Self::Unrecognized(value),\n})\n}\n}\n");
-            return name.into();
-        }
+        extra: &mut TokenStream,
+    ) -> TokenStream {
         match &value.kind {
-            Kind::String(_) => "String".into(),
-            Kind::Integer => "i64".into(),
-            Kind::Number => "f64".into(),
-            Kind::Boolean => "bool".into(),
-            Kind::Any => "serde_json::Value".into(),
-            Kind::Object(Some(fields)) => {
-                documentation(&value.metadata, extra);
-                self.structure(domain, owner, name, fields, extra);
-                name.into()
+            Kind::Reference(reference) => {
+                let key = schema::reference(domain, reference);
+                let (target_domain, target_name) =
+                    key.split_once('.').expect("qualified reference");
+                let module = symbol(&ident(target_domain));
+                let target = symbol(&type_name(target_name));
+                let path = quote!(crate::cdp::#module::#target);
+                if self.types.needs_box(&key, owner) {
+                    quote!(Box<#path>)
+                } else {
+                    path
+                }
             }
-            Kind::Object(None) => "serde_json::Map<String, serde_json::Value>".into(),
+            Kind::String(Some(values)) => {
+                extra.extend(self.enumeration(name, &value.metadata, values));
+                let name = symbol(name);
+                quote!(#name)
+            }
+            Kind::String(None) => quote!(String),
+            Kind::Integer => quote!(i64),
+            Kind::Number => quote!(f64),
+            Kind::Boolean => quote!(bool),
+            Kind::Any => quote!(serde_json::Value),
+            Kind::Object(Some(fields)) => {
+                extra.extend(documentation(&value.metadata));
+                extra.extend(self.structure(domain, owner, name, fields));
+                let name = symbol(name);
+                quote!(#name)
+            }
+            Kind::Object(None) => quote!(serde_json::Map<String, serde_json::Value>),
             Kind::Array(items) => {
                 let inner = self.rust_type(domain, "", &format!("{name}Item"), items, extra);
-                format!("Vec<{inner}>")
+                quote!(Vec<#inner>)
             }
-            Kind::Reference(_) => unreachable!("references handled above"),
         }
     }
 
-    fn structure(&self, domain: &str, owner: &str, name: &str, fields: &[Field], out: &mut String) {
-        let mut extra = String::new();
-        let default = if fields.iter().all(|f| optional(owner, f)) {
-            ", Default"
-        } else {
-            ""
-        };
-        out.push_str(&format!("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize{default})]\npub struct {name} {{\n"));
-        for field in fields {
-            let wire = field.name.as_str();
-            let mut ty = self.rust_type(
-                domain,
-                owner,
-                &format!("{name}{}", type_name(wire)),
-                &field.definition,
-                &mut extra,
-            );
-            documentation(&field.definition.metadata, out);
-            if optional(owner, field) && !field.optional {
-                out.push_str("/// Absent on Chrome 151; optional for compatibility.\n");
+    fn enumeration(&self, name: &str, metadata: &Metadata, values: &[String]) -> TokenStream {
+        let docs = documentation(metadata);
+        let mut used = std::collections::HashSet::from(["Unrecognized".to_owned()]);
+        let variants: Vec<_> = values
+            .iter()
+            .map(|wire| {
+                let mut variant = type_name(wire);
+                if variant.is_empty() {
+                    variant = "Empty".into();
+                }
+                if variant.starts_with(|c: char| c.is_ascii_digit()) {
+                    variant.insert_str(0, "Value");
+                }
+                assert!(
+                    used.insert(variant.clone()),
+                    "enum name collision: {name}.{wire}"
+                );
+                symbol(&variant)
+            })
+            .collect();
+        let name = symbol(name);
+        quote! {
+            #docs
+            #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+            #[non_exhaustive]
+            pub enum #name {
+                #(#variants,)*
+                /// A wire string absent from the pinned schema, preserved verbatim.
+                Unrecognized(String),
             }
-            out.push_str(&format!("#[serde(rename = {wire:?})]\n"));
-            if optional(owner, field) {
-                ty = format!("Option<{ty}>");
-                out.push_str("#[serde(default, skip_serializing_if = \"Option::is_none\")]\n");
-                if self.types.is_any(domain, &field.definition) {
-                    out.push_str(
-                        "#[serde(deserialize_with = \"crate::protocol::present_json\")]\n",
-                    );
+            impl #name {
+                /// Return the exact protocol wire string, including unrecognized values.
+                pub fn as_str(&self) -> &str {
+                    match self {
+                        #(Self::#variants => #values,)*
+                        Self::Unrecognized(value) => value.as_str(),
+                    }
                 }
             }
-            out.push_str(&format!("pub {}: {ty},\n", ident(wire)));
+            impl serde::Serialize for #name {
+                fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+                    serializer.serialize_str(self.as_str())
+                }
+            }
+            impl<'de> serde::Deserialize<'de> for #name {
+                fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+                    let value = <String as serde::Deserialize<'de>>::deserialize(deserializer)?;
+                    Ok(match value.as_str() {
+                        #(#values => Self::#variants,)*
+                        _ => Self::Unrecognized(value),
+                    })
+                }
+            }
         }
-        out.push_str("}\n");
-        out.push_str(&extra);
+    }
+
+    fn structure(&self, domain: &str, owner: &str, name: &str, fields: &[Field]) -> TokenStream {
+        let mut extra = TokenStream::new();
+        let default = fields
+            .iter()
+            .all(|f| optional(owner, f))
+            .then(|| quote!(, Default));
+        let members: Vec<_> = fields
+            .iter()
+            .map(|field| {
+                let wire = field.name.as_str();
+                let member = symbol(&ident(wire));
+                let mut ty = self.rust_type(
+                    domain,
+                    owner,
+                    &format!("{name}{}", type_name(wire)),
+                    &field.definition,
+                    &mut extra,
+                );
+                let docs = documentation(&field.definition.metadata);
+                let compatibility = (optional(owner, field) && !field.optional).then(|| {
+                    quote! {
+                        /// Absent on Chrome 151; optional for compatibility.
+                    }
+                });
+                let mut attributes = quote!(#[serde(rename = #wire)]);
+                if optional(owner, field) {
+                    ty = quote!(Option<#ty>);
+                    attributes
+                        .extend(quote!(#[serde(default, skip_serializing_if = "Option::is_none")]));
+                    if self.types.is_any(domain, &field.definition) {
+                        attributes.extend(
+                            quote!(#[serde(deserialize_with = "crate::protocol::present_json")]),
+                        );
+                    }
+                }
+                quote!(#docs #compatibility #attributes pub #member: #ty,)
+            })
+            .collect();
+        let name = symbol(name);
+        quote! {
+            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize #default)]
+            pub struct #name { #(#members)* }
+            #extra
+        }
     }
 
     fn constructor(
@@ -221,7 +260,7 @@ impl Generator<'_> {
                     owner,
                     &format!("{name}{}", type_name(wire)),
                     &field.definition,
-                    &mut String::new(),
+                    &mut TokenStream::new(),
                 );
                 (field, ident(wire), ty)
             })
@@ -252,7 +291,7 @@ impl Generator<'_> {
         out.push_str("} }\n");
         for (field, member, ty) in &types {
             if optional(owner, field) {
-                documentation(&field.definition.metadata, out);
+                out.push_str(&documentation(&field.definition.metadata).to_string());
                 out.push_str(&format!("#[must_use]\npub fn with_{member}(mut self, value: impl Into<{ty}>) -> Self {{ self.{member} = Some(value.into()); self }}\n"));
             }
         }
@@ -261,19 +300,23 @@ impl Generator<'_> {
 
     fn domain(&self, domain: &Domain, out: &mut String) {
         let domain_name = domain.domain.as_str();
-        documentation(&domain.metadata, out);
+        out.push_str(&documentation(&domain.metadata).to_string());
         out.push_str(&format!("pub mod {} {{\n", ident(domain_name)));
         for named in &domain.types {
             let id = named.id.as_str();
             let value = &named.definition;
             let name = type_name(id);
             let owner = format!("{domain_name}.{id}");
-            let ty = self.rust_type(domain_name, &owner, &name, value, out);
+            let mut extra = TokenStream::new();
+            let ty = self
+                .rust_type(domain_name, &owner, &name, value, &mut extra)
+                .to_string();
+            out.push_str(&extra.to_string());
             if let Kind::Object(Some(fields)) = &value.kind {
                 self.constructor(domain_name, &owner, &name, fields, out);
             }
             if ty != name {
-                documentation(&value.metadata, out);
+                out.push_str(&documentation(&value.metadata).to_string());
                 // Transparent newtypes keep protocol identifiers distinct.
                 let eq = if matches!(value.kind, Kind::String(_) | Kind::Integer) {
                     ", PartialEq, Eq, Hash"
@@ -297,15 +340,22 @@ impl Generator<'_> {
         for command in &domain.commands {
             let wire = command.name.as_str();
             let name = type_name(wire);
-            documentation(&command.metadata, out);
-            self.structure(domain_name, "", &name, &command.parameters, out);
+            out.push_str(&documentation(&command.metadata).to_string());
+            out.push_str(
+                &self
+                    .structure(domain_name, "", &name, &command.parameters)
+                    .to_string(),
+            );
             self.constructor(domain_name, "", &name, &command.parameters, out);
-            self.structure(
-                domain_name,
-                "",
-                &format!("{name}Response"),
-                &command.returns,
-                out,
+            out.push_str(
+                &self
+                    .structure(
+                        domain_name,
+                        "",
+                        &format!("{name}Response"),
+                        &command.returns,
+                    )
+                    .to_string(),
             );
             out.push_str(&format!("impl crate::protocol::Command for {name} {{ type Response = {name}Response; const METHOD: &'static str = \"{domain_name}.{wire}\"; }}\n"));
         }
@@ -313,8 +363,12 @@ impl Generator<'_> {
         for event in &domain.events {
             let wire = event.name.as_str();
             let name = type_name(wire);
-            documentation(&event.metadata, out);
-            self.structure(domain_name, "", &name, &event.parameters, out);
+            out.push_str(&documentation(&event.metadata).to_string());
+            out.push_str(
+                &self
+                    .structure(domain_name, "", &name, &event.parameters)
+                    .to_string(),
+            );
             out.push_str(&format!("impl crate::protocol::Event for {name} {{ const METHOD: &'static str = \"{domain_name}.{wire}\"; }}\n"));
         }
         out.push_str("}\n}\n");
