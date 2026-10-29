@@ -21,7 +21,9 @@ pub(crate) use lifecycle::TargetKind;
 mod navigation;
 mod pdf;
 mod proxy;
+mod response;
 mod selectors;
+pub use response::{PreparedResponse, Response, ResponseObserverBuilder};
 
 pub use capture::{ScreenshotBuilder, ScreenshotFormat};
 pub use dom::DomSearchOptions;
