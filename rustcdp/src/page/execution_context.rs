@@ -353,11 +353,10 @@ impl State {
                     return Err(invalid_context());
                 };
                 if correlated_frame != frame {
-                    self.lose_correlation();
-                    return Err(Error::UnexpectedResponse {
-                        method: event.method,
-                        payload: event.params,
-                    });
+                    // Accessing another same-origin frame from an isolated world
+                    // can create that world's context in the other frame too.
+                    // It is valid traffic, but not the requested frame's identity.
+                    return Ok(());
                 }
                 let frame = frame.to_owned();
                 let identity = ContextIdentity {
@@ -552,6 +551,53 @@ mod tests {
     fn created(frame: &str, numeric: i64, unique: &str) -> serde_json::Value {
         json!({"id": numeric, "uniqueId": unique,
             "auxData": {"frameId": frame, "isDefault": true}})
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Chrome; verifies cross-frame isolated-world correlation"]
+    async fn isolated_world_parent_access_preserves_frame_correlation() -> Result<()> {
+        let browser = crate::Browser::builder()
+            .headless(true)
+            .arg("--no-sandbox")
+            .launch()
+            .await?;
+        let page = browser.page();
+        page.evaluate(
+            r#"new Promise(resolve => {
+            const child = document.createElement('iframe');
+            child.onload = resolve;
+            child.srcdoc = '<title>Child</title>';
+            document.body.append(child);
+        })"#,
+        )
+        .run()
+        .await?;
+        let child = page.main_frame().await?.children().await?.remove(0);
+        child
+            .evaluate("parent.document.title = 'Parent'")
+            .world(super::super::EvaluationWorld::Isolated)
+            .run()
+            .await?;
+        assert_eq!(
+            page.evaluate("document.title").json::<String>().await?,
+            "Parent"
+        );
+        assert_eq!(
+            page.evaluate("document.title")
+                .world(super::super::EvaluationWorld::Isolated)
+                .json::<String>()
+                .await?,
+            "Parent"
+        );
+        assert_eq!(
+            child
+                .evaluate("document.title")
+                .world(super::super::EvaluationWorld::Isolated)
+                .json::<String>()
+                .await?,
+            "Child"
+        );
+        Ok(())
     }
 
     #[test]
