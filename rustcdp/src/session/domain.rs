@@ -13,6 +13,7 @@ pub(crate) struct Domains {
     dom: Mutex<DomState>,
     page: Mutex<PageState>,
     runtime: Mutex<usize>,
+    network: Mutex<usize>,
 }
 
 #[derive(Default)]
@@ -33,6 +34,7 @@ enum Domain {
     Dom,
     Page { explicit_false: bool },
     Runtime,
+    Network,
 }
 
 impl Domain {
@@ -41,6 +43,7 @@ impl Domain {
             Self::Dom => "DOM",
             Self::Page { .. } => "Page",
             Self::Runtime => "Runtime",
+            Self::Network => "Network",
         }
     }
 }
@@ -49,12 +52,13 @@ enum Acquisition {
     Dom(Option<bool>),
     Page(Option<bool>),
     Runtime,
+    Network,
 }
 
 const TRANSITION_TIMEOUT: Duration = Duration::from_secs(30);
 const DETACH_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Shared ownership of an enabled DOM, Page, or Runtime domain.
+/// Shared ownership of an enabled DOM, Page, Runtime, or Network domain.
 /// Await `close` to confirm the final disable; Drop schedules the same cleanup.
 /// Counts and configuration are shared across handles of the same session.
 /// Omitted options inherit an active configuration, or select protocol defaults
@@ -168,6 +172,15 @@ impl Session {
     /// enable/disable commands bypass accounting; see [`DomainGuard`].
     pub async fn enable_runtime(&self) -> Result<DomainGuard> {
         self.enable_domain(Acquisition::Runtime, json!({})).await
+    }
+
+    /// Enable Network reporting until the last shared guard is released.
+    /// Subscribe before acquisition and retain the guard through response/body
+    /// observation. The first acquisition uses protocol defaults. Direct Network
+    /// enable/disable commands bypass this accounting and must not be mixed with
+    /// managed guards. Acquisition and cleanup follow [`DomainGuard`].
+    pub async fn enable_network(&self) -> Result<DomainGuard> {
+        self.enable_domain(Acquisition::Network, json!({})).await
     }
 
     /// Only for a newly created target whose enclosing owner owns all recovery.
@@ -290,6 +303,15 @@ async fn acquire(session: &Session, request: Acquisition, params: Value) -> Resu
             *users += 1;
             Ok(Domain::Runtime)
         }
+        Acquisition::Network => {
+            let mut users = acquisition_lock(&session.domains.network).await?;
+            ensure_open(session)?;
+            if *users == 0 {
+                transition(session, "Network.enable", params).await?;
+            }
+            *users += 1;
+            Ok(Domain::Network)
+        }
     }
 }
 
@@ -358,6 +380,16 @@ async fn release(session: Session, domain: Domain) -> Result<()> {
                 disable(&session, "Runtime.disable").await?;
             }
         }
+        Domain::Network => {
+            let mut users = session.domains.network.lock().await;
+            if *users == 0 {
+                return Ok(());
+            }
+            *users -= 1;
+            if *users == 0 {
+                disable(&session, "Network.disable").await?;
+            }
+        }
     }
     Ok(())
 }
@@ -419,5 +451,68 @@ impl Drop for DomainGuard {
                 let _ = release(session, domain).await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Browser;
+
+    #[tokio::test]
+    #[ignore = "requires Chrome; verifies shared and canceled Network acquisition"]
+    async fn network_guards_share_ownership_and_cancel_without_leaking() {
+        let browser = Browser::builder()
+            .headless(true)
+            .arg("--no-sandbox")
+            .launch()
+            .await
+            .unwrap();
+        let session = browser.page().session();
+        let (first, second) = tokio::join!(session.enable_network(), session.enable_network());
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(*session.domains.network.lock().await, 2);
+        first.close().await.unwrap();
+        assert_eq!(*session.domains.network.lock().await, 1);
+        let mut responses = session.listen::<crate::cdp::network::events::ResponseReceived>();
+        browser
+            .page()
+            .navigate("data:text/html,<title>Network guard</title>")
+            .send()
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), responses.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.response.url.starts_with("data:text/html,"));
+
+        // Hold admission while the caller starts and abandons acquisition. The
+        // owned acquisition still completes and its unclaimed guard is released.
+        let held = session.domains.network.lock().await;
+        let mut acquisition = Box::pin(session.enable_network());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut acquisition)
+                .await
+                .is_err()
+        );
+        drop(acquisition);
+        drop(held);
+        second.close().await.unwrap();
+        // Acquire/release once more behind the abandoned transition. This also
+        // exercises subsequent reuse after the unclaimed guard's cleanup.
+        let third = session.enable_network().await.unwrap();
+        third.close().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if *session.domains.network.lock().await == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }
