@@ -1,4 +1,4 @@
-use super::{Element, EvaluationBuilder, FunctionCallBuilder, Page};
+use super::{Element, EvaluationBuilder, FunctionCallBuilder, Locator, Page};
 use crate::{
     Error, Result,
     cdp::{
@@ -231,6 +231,14 @@ impl Frame {
     /// and cancellation guarantees.
     pub fn call(&self, function: impl Into<String>) -> FunctionCallBuilder<'_> {
         FunctionCallBuilder::for_frame(&self.page, self.id.clone(), function)
+    }
+
+    /// Create an owned CSS locator scoped to this frame's current document.
+    /// Construction performs no protocol work. The locator retains this frame's
+    /// identity across document navigation, but does not adopt a removed frame or
+    /// follow a process swap. See [`Locator::wait_for`] for state and timeout rules.
+    pub fn locator(&self, selector: impl Into<String>) -> Locator {
+        Locator::for_frame(self.clone(), selector)
     }
 
     /// Serialize this frame's document, including its doctype when present.

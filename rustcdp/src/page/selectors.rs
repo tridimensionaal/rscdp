@@ -300,7 +300,7 @@ impl Page {
     }
 }
 
-fn is_context_change(error: &Error) -> bool {
+pub(super) fn is_context_change(error: &Error) -> bool {
     match error {
         Error::ExecutionContextChanged => true,
         Error::Protocol(error) if error.code == -32602 => {
@@ -319,5 +319,48 @@ fn is_context_change(error: &Error) -> bool {
             .any(|known| message.contains(known))
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_context_change;
+    use crate::{Error, error::ProtocolError};
+
+    fn protocol(code: i64, message: &str) -> Error {
+        Error::Protocol(ProtocolError {
+            code,
+            message: message.into(),
+            data: None,
+        })
+    }
+
+    #[test]
+    fn only_recognized_context_changes_can_retry_a_lookup() {
+        for error in [
+            Error::ExecutionContextChanged,
+            protocol(-32602, "uniqueContextId not found"),
+            protocol(-32000, "Execution context was destroyed."),
+            protocol(-32000, "Cannot find context with specified id"),
+            protocol(-32000, "No frame for given id found"),
+        ] {
+            assert!(is_context_change(&error), "{error}");
+        }
+        for error in [
+            Error::JavaScript(serde_json::json!({"text": "invalid selector"})),
+            Error::Timeout("query deadline".into()),
+            Error::Lagged(1),
+            Error::ExecutionContextUnavailable("ambiguous context".into()),
+            Error::FrameNotFound(crate::cdp::page::FrameId("gone".into())),
+            protocol(-32602, "Invalid selector"),
+            protocol(-32000, "Internal error"),
+            protocol(-32601, "Execution context was destroyed."),
+            Error::Cleanup {
+                source: Box::new(Error::ExecutionContextChanged),
+                cleanup: Box::new(Error::Timeout("release failed".into())),
+            },
+        ] {
+            assert!(!is_context_change(&error), "{error}");
+        }
     }
 }

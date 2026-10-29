@@ -18,6 +18,7 @@ mod frame;
 mod function;
 mod input;
 mod lifecycle;
+mod locator;
 pub(crate) use lifecycle::TargetKind;
 mod navigation;
 mod pdf;
@@ -33,6 +34,7 @@ pub use evaluation::{EvaluationBuilder, EvaluationWorld, RemoteValue};
 pub use frame::Frame;
 pub use function::{ElementCallBuilder, FunctionCallBuilder};
 pub use input::KeyModifiers;
+pub use locator::{ElementState, Locator};
 pub use navigation::{
     NavigationBuilder, NavigationObserverBuilder, ObservedNavigation, PreparedNavigation, WaitUntil,
 };
