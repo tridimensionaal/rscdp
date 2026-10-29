@@ -3,12 +3,15 @@ use crate::{
     Error, Result,
     cdp::network::{
         self, RequestId,
+        commands::GetResponseBody,
         events::{LoadingFailed, LoadingFinished, RequestWillBeSent, ResponseReceived},
     },
     connection::{EventOptions, EventStream, RawEvent},
     error::decode_ref,
     session::DomainGuard,
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
+use serde::de::DeserializeOwned;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -41,7 +44,7 @@ struct Observation {
 /// The response retains its Page, exact-session event stream and Network guard.
 /// Dropping it releases only its share of managed Network reporting. Direct
 /// Network enable/disable commands bypass that ownership and must not be mixed
-/// with these observers. Metadata describes Chrome's responseReceived headers;
+/// with these observers. Metadata describes Chrome's responseReceived or redirectResponse headers;
 /// it does not merge the separately reported extra-info headers.
 #[must_use = "retain the response while inspecting its metadata"]
 pub struct Response {
@@ -153,6 +156,69 @@ impl PreparedResponse {
 }
 
 impl Response {
+    /// Read the selected response after its load completes, using the remaining
+    /// observation budget. This consumes the response; retain the returned bytes
+    /// if they are needed more than once. HTTP error statuses can have valid bodies.
+    ///
+    /// Redirect bodies are unavailable. Chrome may also evict bodies or discard
+    /// them on navigation; those protocol errors propagate without refetching.
+    /// The event queue, Chrome's retention buffers and transport message limits
+    /// impose different bounds. This method does not impose an allocation cap.
+    /// Cancellation does not cancel the browser's network request.
+    pub async fn body(mut self) -> Result<Vec<u8>> {
+        check_deadline(self.observation.deadline)?;
+        if self.redirect {
+            return Err(Error::ResponseBody("redirect response".into()));
+        }
+        loop {
+            match self.observation.recv().await? {
+                NetworkEvent::Finished(event) if event.request_id == self.request_id => break,
+                NetworkEvent::Failed(event) if event.request_id == self.request_id => {
+                    return Err(Error::ResponseBody(event.error_text));
+                }
+                NetworkEvent::Request(event) if event.request_id == self.request_id => {
+                    return Err(Error::ResponseBody(
+                        "request ID was reused for another hop".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        check_deadline(self.observation.deadline)?;
+        let response = tokio::time::timeout_at(
+            self.observation.deadline,
+            self.observation
+                .page
+                .session()
+                .execute(&GetResponseBody::new(self.request_id)),
+        )
+        .await
+        .map_err(|_| observation_timeout())??;
+        let bytes = if response.base64_encoded {
+            STANDARD.decode(response.body)?
+        } else {
+            response.body.into_bytes()
+        };
+        check_deadline(self.observation.deadline)?;
+        Ok(bytes)
+    }
+
+    /// Read the body as strict UTF-8. Invalid bytes produce [`Error::Utf8`].
+    pub async fn text(self) -> Result<String> {
+        let deadline = self.observation.deadline;
+        let text = String::from_utf8(self.body().await?)?;
+        check_deadline(deadline)?;
+        Ok(text)
+    }
+
+    /// Read and deserialize the completed JSON body, without refetching it.
+    pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
+        let deadline = self.observation.deadline;
+        let value = serde_json::from_slice(&self.body().await?)?;
+        check_deadline(deadline)?;
+        Ok(value)
+    }
+
     pub fn metadata(&self) -> &network::Response {
         &self.metadata
     }

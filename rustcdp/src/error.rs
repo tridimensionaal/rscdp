@@ -33,6 +33,11 @@ pub enum Error {
     /// A decoded response or event payload violates the operation's expected protocol contract.
     #[error("unexpected response to {method}: {payload}")]
     UnexpectedResponse { method: String, payload: Value },
+    /// The selected response completed without a retrievable body.
+    #[error("response body unavailable: {0}")]
+    ResponseBody(String),
+    #[error(transparent)]
+    Utf8(#[from] std::string::FromUtf8Error),
     #[error(transparent)]
     Base64(#[from] base64::DecodeError),
     #[error(transparent)]
