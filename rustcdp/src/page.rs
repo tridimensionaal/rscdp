@@ -14,6 +14,7 @@ mod dom;
 mod element;
 mod evaluation;
 mod execution_context;
+mod form;
 mod frame;
 mod function;
 mod input;

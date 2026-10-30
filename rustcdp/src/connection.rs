@@ -637,6 +637,26 @@ impl Connection {
         session_id: Option<String>,
         admission_deadline: Option<tokio::time::Instant>,
     ) -> Result<Value> {
+        let mut admitted = false;
+        self.execute_session_tracked(
+            method,
+            params,
+            session_id,
+            admission_deadline,
+            &mut admitted,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_session_tracked(
+        &self,
+        method: &str,
+        params: Value,
+        session_id: Option<String>,
+        admission_deadline: Option<tokio::time::Instant>,
+        admitted: &mut bool,
+    ) -> Result<Value> {
+        *admitted = false;
         if let Some(error) = self.closed_error() {
             return Err(error);
         }
@@ -688,6 +708,7 @@ impl Connection {
                 return Err(Error::Timeout(format!("admitting {method}")));
             }
             let (reply, response) = oneshot::channel();
+            *admitted = true;
             slot.send(Request {
                 method: method.into(),
                 params,
@@ -974,6 +995,31 @@ mod tests {
                 .await,
             Err(Error::Timeout(_))
         ));
+        let mut admitted = true;
+        assert!(matches!(
+            connection
+                .execute_session_tracked(
+                    "Input.insertText",
+                    json!({"text":"unsent"}),
+                    Some(page.session().id().0.clone()),
+                    Some(deadline),
+                    &mut admitted
+                )
+                .await,
+            Err(Error::Timeout(_))
+        ));
+        assert!(
+            !admitted,
+            "expired admission cannot create a remote resource"
+        );
+        let response = connection.execute_session_tracked("Runtime.evaluate",
+            json!({"expression":"new Promise(resolve => setTimeout(() => resolve(42), 150))", "awaitPromise":true,"returnByValue":true}),
+            Some(page.session().id().0.clone()), Some(tokio::time::Instant::now() + Duration::from_millis(50)), &mut admitted).await?;
+        assert!(admitted);
+        assert_eq!(
+            response["result"]["value"], 42,
+            "admitted replies outlive the admission deadline"
+        );
         assert_eq!(
             page.evaluate("document.querySelector('input').value")
                 .json::<String>()

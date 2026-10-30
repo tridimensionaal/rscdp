@@ -263,6 +263,7 @@ impl ExecutionRequest {
                 world,
             },
             mode,
+            None,
         )
         .await
     }
@@ -271,8 +272,9 @@ impl ExecutionRequest {
         self,
         element: &Element,
         mode: ResultMode,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<RemoteValue> {
-        self.execute_on(ExecutionTarget::Element(element.clone()), mode)
+        self.execute_on(ExecutionTarget::Element(element.clone()), mode, deadline)
             .await
     }
 
@@ -285,13 +287,21 @@ impl ExecutionRequest {
         mode: ResultMode,
         objects: &mut Vec<Element>,
         unknown_resource: &mut bool,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<RemoteValue> {
         let method = self.method();
         let by_value = matches!(mode, ResultMode::Json);
         let commands = target.session().clone().with_command_timeout(None);
-        *unknown_resource = true;
+        // Admission sets this flag synchronously with queueing. A deadline
+        // before admission cannot have created remote references.
+        *unknown_resource = false;
         let response = match commands
-            .execute_raw(method, self.params(binding, by_value))
+            .execute_raw_tracked(
+                method,
+                self.params(binding, by_value),
+                deadline,
+                unknown_resource,
+            )
             .await
         {
             Ok(response) => response,
@@ -340,7 +350,12 @@ impl ExecutionRequest {
         Ok(RemoteValue { metadata, resource })
     }
 
-    async fn execute_on(self, target: ExecutionTarget, mode: ResultMode) -> Result<RemoteValue> {
+    async fn execute_on(
+        self,
+        target: ExecutionTarget,
+        mode: ResultMode,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<RemoteValue> {
         let timeout = target.session().connection().command_timeout();
         let runtime = target.session().connection().runtime();
         let task = runtime.spawn(async move {
@@ -352,6 +367,7 @@ impl ExecutionRequest {
             };
             let mut unknown_resource = false;
             let result = tokio::time::timeout(EXECUTION_TIMEOUT, async {
+                check_execution_deadline(deadline)?;
                 let binding = target.binding().await?;
                 if matches!(&target, ExecutionTarget::Element(_)) {
                     let check = Self::Function {
@@ -365,6 +381,7 @@ impl ExecutionRequest {
                             ResultMode::Json,
                             &mut objects,
                             &mut unknown_resource,
+                            deadline,
                         )
                         .await?
                         .into_json("Runtime.callFunctionOn element attachment")?;
@@ -374,8 +391,18 @@ impl ExecutionRequest {
                         ));
                     }
                 }
-                self.dispatch(&target, &binding, mode, &mut objects, &mut unknown_resource)
-                    .await
+                // Check inside the owner, after attachment validation, before
+                // submitting user code. An expired operation cannot start new user code.
+                check_execution_deadline(deadline)?;
+                self.dispatch(
+                    &target,
+                    &binding,
+                    mode,
+                    &mut objects,
+                    &mut unknown_resource,
+                    deadline,
+                )
+                .await
             })
             .await
             .unwrap_or_else(|_| Err(Error::Timeout("evaluating JavaScript".into())));
@@ -397,13 +424,25 @@ impl ExecutionRequest {
                 }
             }
         });
-        if let Some(timeout) = timeout {
+        let result = if let Some(timeout) = timeout {
             tokio::time::timeout(timeout, task)
                 .await
                 .map_err(|_| Error::Timeout("waiting for JavaScript evaluation".into()))??
         } else {
             task.await?
+        };
+        if result.is_ok() {
+            check_execution_deadline(deadline)?;
         }
+        result
+    }
+}
+
+fn check_execution_deadline(deadline: Option<tokio::time::Instant>) -> Result<()> {
+    if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+        Err(Error::Timeout("calling element function".into()))
+    } else {
+        Ok(())
     }
 }
 

@@ -261,6 +261,19 @@ impl Session {
         params: Value,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<Value> {
+        let mut admitted = false;
+        self.execute_raw_tracked(method, params, deadline, &mut admitted)
+            .await
+    }
+
+    pub(crate) async fn execute_raw_tracked(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Option<tokio::time::Instant>,
+        admitted: &mut bool,
+    ) -> Result<Value> {
+        *admitted = false;
         if self.is_closed() {
             return Err(self
                 .connection
@@ -268,7 +281,7 @@ impl Session {
                 .unwrap_or_else(|| Error::SessionClosed(self.id.0.clone())));
         }
         self.connection
-            .execute_session_before(method, params, Some(self.id.0.clone()), deadline)
+            .execute_session_tracked(method, params, Some(self.id.0.clone()), deadline, admitted)
             .await
     }
 

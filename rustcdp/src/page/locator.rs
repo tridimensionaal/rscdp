@@ -7,6 +7,7 @@ use tokio::time::Instant;
 
 mod action;
 mod fill;
+mod form;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const POLLING_INTERVAL: Duration = Duration::from_millis(100);
@@ -164,6 +165,32 @@ impl Locator {
                 frame.element_for_expression(expression).await
             }
         }
+    }
+
+    pub(super) async fn attached_until(&self, deadline: Instant) -> Result<Element> {
+        let expired = || Error::Timeout(format!("resolving CSS locator {:?}", self.selector));
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                if Instant::now() >= deadline {
+                    return Err(expired());
+                }
+                let resolved = self.resolve().await;
+                if Instant::now() >= deadline {
+                    return Err(expired());
+                }
+                match resolved {
+                    Ok(Some(element)) => return Ok(element),
+                    Ok(None) => {}
+                    Err(error) if is_context_change(&error) => {
+                        self.check_frame_session(&error).await?;
+                    }
+                    Err(error) => return Err(error),
+                }
+                tokio::time::sleep(POLLING_INTERVAL).await;
+            }
+        })
+        .await
+        .map_err(|_| expired())?
     }
 
     async fn sample(&self, state: ElementState) -> Result<Sample> {

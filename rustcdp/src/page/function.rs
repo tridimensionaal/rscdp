@@ -148,6 +148,7 @@ pub struct ElementCallBuilder<'a> {
     element: &'a Element,
     function: String,
     args: Vec<Value>,
+    deadline: Option<tokio::time::Instant>,
 }
 
 impl<'a> ElementCallBuilder<'a> {
@@ -156,7 +157,13 @@ impl<'a> ElementCallBuilder<'a> {
             element,
             function: function.into(),
             args: Vec::new(),
+            deadline: None,
         }
+    }
+
+    pub(super) fn deadline(mut self, deadline: Option<tokio::time::Instant>) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     /// Append one JSON argument, preserving its position and explicit null values.
@@ -185,7 +192,7 @@ impl<'a> ElementCallBuilder<'a> {
             source: self.function,
             args: self.args,
         }
-        .execute_element(self.element, ResultMode::Json)
+        .execute_element(self.element, ResultMode::Json, self.deadline)
         .await?
         .into_json("Runtime.callFunctionOn JSON value")
     }
@@ -200,7 +207,7 @@ impl<'a> ElementCallBuilder<'a> {
             source: self.function,
             args: self.args,
         }
-        .execute_element(self.element, ResultMode::Discard)
+        .execute_element(self.element, ResultMode::Discard, self.deadline)
         .await
         .map(|_| ())
     }
