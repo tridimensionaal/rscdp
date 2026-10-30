@@ -61,3 +61,7 @@ path = "native_controls.rs"
 [[example]]
 name = "structured_extract"
 path = "structured_extract.rs"
+
+[[example]]
+name = "live_search"
+path = "live_search.rs"

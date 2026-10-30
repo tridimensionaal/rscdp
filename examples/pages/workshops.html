@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Neighbourhood workshops</title>
+<style>body { max-width: 40rem; margin: 3rem auto; font: 18px system-ui; } input, button { font: inherit; padding: .5rem; } article { margin: 2rem 0; }</style>
+<h1>Neighbourhood workshops</h1>
+<label>Find a workshop <input id="query" type="search"></label>
+<p id="loading" role="status" hidden>Finding workshops…</p>
+<section id="results" data-query="">
+  <article id="original-card"><h2>Morning painting</h2><button id="reserve">Reserve</button></article>
+</section>
+<output id="confirmation"></output>
+<script>
+  const query = document.querySelector('#query');
+  const results = document.querySelector('#results');
+  const loading = document.querySelector('#loading');
+  const confirmation = document.querySelector('#confirmation');
+  let pending;
+  function reserve(title) { confirmation.textContent = `Reserved: ${title}`; }
+  document.querySelector('#reserve').onclick = () => reserve('Morning painting');
+  query.oninput = () => {
+    clearTimeout(pending);
+    loading.hidden = false;
+    results.dataset.query = 'pending';
+    confirmation.textContent = '';
+    // A local stand-in for asynchronous search; consumers wait on state, not this delay.
+    pending = setTimeout(() => {
+      results.replaceChildren();
+      if (query.value.toLowerCase() === 'ceramics') {
+        const card = document.createElement('article');
+        const title = document.createElement('h2');
+        title.textContent = 'Evening ceramics';
+        const button = document.createElement('button');
+        button.id = 'reserve';
+        button.textContent = 'Reserve';
+        button.onclick = () => reserve(title.textContent);
+        card.append(title, button);
+        results.append(card);
+      } else {
+        results.textContent = 'No matching workshops.';
+      }
+      loading.hidden = true;
+      results.dataset.query = query.value.toLowerCase();
+    }, 150);
+  };
+</script>
+</html>
