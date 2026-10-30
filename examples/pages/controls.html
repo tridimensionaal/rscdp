@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Workshop account preferences</title>
+<style>
+  body { max-width: 34rem; margin: 4rem auto; font: 18px system-ui; color: #23313d; }
+  label { display: block; margin: 1.5rem 0; }
+  select, button { font: inherit; padding: .5rem; }
+  output { display: block; margin-top: 2rem; }
+</style>
+<h1>Workshop account preferences</h1>
+<p>Choose how often to hear about new workshops and receive booking receipts.</p>
+<form>
+  <label>Workshop digest
+    <select id="digest">
+      <option value="daily">Every day</option>
+      <option value="weekly">Once a week</option>
+      <option value="off">No digest</option>
+    </select>
+  </label>
+  <label><input id="receipts" type="checkbox"> Email booking receipts</label>
+  <button id="save">Save preferences</button>
+</form>
+<output aria-live="polite"></output>
+<script>
+  document.querySelector('form').addEventListener('submit', event => {
+    event.preventDefault();
+    const digest = document.querySelector('#digest').selectedOptions[0].textContent;
+    const receipts = document.querySelector('#receipts').checked ? 'on' : 'off';
+    document.querySelector('output').textContent = `Saved: ${digest}; booking receipts ${receipts}.`;
+  });
+</script>
+</html>

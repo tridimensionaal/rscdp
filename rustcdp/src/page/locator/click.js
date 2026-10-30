@@ -1,4 +1,4 @@
-function readiness(selector, budgetMs) {
+function readiness(selector, budgetMs, desiredChecked) {
     const target = this;
     const wait = reason => ({ status: 'wait', reason });
     const unsupported = reason => ({ status: 'unsupported', reason });
@@ -17,9 +17,17 @@ function readiness(selector, budgetMs) {
     };
     function preflight() {
         if (!target.isConnected) return { status: 'detached' };
-        const matches = target.ownerDocument.querySelectorAll(selector);
-        if (matches.length > 1) return { status: 'ambiguous', count: matches.length };
-        if (matches.length !== 1 || matches[0] !== target) return { status: 'detached' };
+        if (selector !== null) {
+            const matches = target.ownerDocument.querySelectorAll(selector);
+            if (matches.length > 1) return { status: 'ambiguous', count: matches.length };
+            if (matches.length !== 1 || matches[0] !== target) return { status: 'detached' };
+        }
+        if (typeof desiredChecked === 'boolean') {
+            const view = target.ownerDocument.defaultView;
+            if (!view || !(target instanceof view.HTMLInputElement) || target.type !== 'checkbox')
+                return unsupported('set_checked requires a native checkbox input');
+            if (target.checked === desiredChecked) return { status: 'checked' };
+        }
         if (!visible(target)) return wait('element is not visible');
         if (target.matches(':disabled')) return wait('native control is disabled');
         return null;

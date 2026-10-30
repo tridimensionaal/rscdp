@@ -53,3 +53,7 @@ path = "response_body.rs"
 [[example]]
 name = "connect"
 path = "connect.rs"
+
+[[example]]
+name = "native_controls"
+path = "native_controls.rs"

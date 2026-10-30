@@ -5,7 +5,7 @@ use serde_json::json;
 use std::time::Duration;
 use tokio::time::Instant;
 
-mod action;
+pub(super) mod action;
 mod fill;
 mod form;
 
