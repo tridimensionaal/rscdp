@@ -1,6 +1,6 @@
 //! Select a local CSV with CDP and verify its File API preview; no network submission.
 mod common;
-use rustcdp::{Error, Page, Result, cdp::dom::commands::SetFileInputFiles};
+use rustcdp::{Error, Page, Result};
 use serde_json::json;
 use std::{path::Path, time::Duration};
 
@@ -8,21 +8,12 @@ async fn preview_stock(page: &Page) -> Result<()> {
     let csv = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("pages/stock.csv")
         .canonicalize()?;
-    let csv = csv
-        .to_str()
-        .ok_or_else(|| Error::InvalidArgument("CSV path is not UTF-8".into()))?;
     page.navigate(common::page_url("import.html")?.as_str())
         .timeout(Duration::from_secs(10))
         .send()
         .await?;
 
-    let element = page.require_element("#stock-file").await?;
-    page.session()
-        .execute(
-            &SetFileInputFiles::new(vec![csv.to_owned()])
-                .with_object_id(element.object_id().clone()),
-        )
-        .await?;
+    page.locator("#stock-file").set_input_files(&[csv]).await?;
     page.wait_for_element("#summary[data-state=done]", Duration::from_secs(5))
         .await?;
 
