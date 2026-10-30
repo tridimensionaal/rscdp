@@ -291,3 +291,156 @@ fn check_deadline(deadline: Instant) -> Result<()> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{cdp::target::TargetId, connection::ConnectionOptions, page::TargetKind};
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::Message;
+
+    const URL: &str = "https://response.invalid/data";
+
+    // A narrow protocol peer lets the observer see malformed events and a full
+    // queue without depending on Chrome timing or corrupting a browser session.
+    async fn peer_page(capacity: usize) -> (Page, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if message.is_close() {
+                    break;
+                }
+                let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "Target.attachToTarget" => json!({"sessionId": "observer"}),
+                    "Page.enable"
+                    | "Runtime.enable"
+                    | "Network.enable"
+                    | "Page.disable"
+                    | "Runtime.disable"
+                    | "Network.disable"
+                    | "Target.detachFromTarget" => json!({}),
+                    "Test.emit" => {
+                        for event in request["params"]["events"].as_array().unwrap() {
+                            let mut event = event.clone();
+                            event["sessionId"] = json!("observer");
+                            socket
+                                .send(Message::Text(event.to_string().into()))
+                                .await
+                                .unwrap();
+                        }
+                        json!({})
+                    }
+                    method => panic!("unexpected command after observation failure: {method}"),
+                };
+                // Receipt of this reply proves earlier events reached the actor;
+                // no sleeps or timing assumptions are needed to overflow a queue.
+                socket
+                    .send(Message::Text(
+                        json!({"id": request["id"], "result": result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let connection = ConnectionOptions::default()
+            .event_capacity(capacity)
+            .connect(&endpoint)
+            .await
+            .unwrap();
+        let session = connection.attach(TargetId("tab".into())).await.unwrap();
+        let page = Page::from_session(session, None, TargetKind::Tab)
+            .await
+            .unwrap();
+        (page, peer)
+    }
+
+    async fn emit(page: &Page, events: Value) {
+        page.session()
+            .connection()
+            .execute_raw("Test.emit", json!({"events": events}))
+            .await
+            .unwrap();
+    }
+
+    async fn select_headers(page: &Page, prepared: PreparedResponse) -> Response {
+        emit(
+            page,
+            json!([{
+                "method": "Network.responseReceived",
+                "params": {
+                    "requestId": "selected", "loaderId": "loader", "timestamp": 1,
+                    "type": "Fetch", "hasExtraInfo": false,
+                    "response": {
+                        "url": URL, "status": 200, "statusText": "OK", "headers": {},
+                        "mimeType": "text/plain", "charset": "utf-8",
+                        "connectionReused": false, "connectionId": 1,
+                        "encodedDataLength": 0, "securityState": "secure"
+                    }
+                }
+            }]),
+        )
+        .await;
+        prepared.wait().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn malformed_events_fail_before_and_after_response_selection() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for after_headers in [false, true] {
+                for method in ["Network.responseReceived", "Network.requestWillBeSent",
+                    "Network.loadingFinished", "Network.loadingFailed"] {
+                    let (page, peer) = peer_page(8).await;
+                    let prepared = page.expect_response(URL).prepare().await.unwrap();
+                    let events = json!([{"method": method, "params": {}}]);
+                    let outcome = if after_headers {
+                        let response = select_headers(&page, prepared).await;
+                        emit(&page, events).await;
+                        response.body().await.map(|_| ())
+                    } else {
+                        emit(&page, events).await;
+                        prepared.wait().await.map(|_| ())
+                    };
+                    assert!(matches!(outcome, Err(Error::Decode { method: actual, .. }) if actual == method));
+                    page.session().connection().close().await;
+                    peer.await.unwrap();
+                }
+            }
+        }).await.expect("malformed events must fail promptly");
+    }
+
+    #[tokio::test]
+    async fn queue_overflow_fails_before_and_after_response_selection() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for after_headers in [false, true] {
+                let (page, peer) = peer_page(1).await;
+                let prepared = page.expect_response(URL).prepare().await.unwrap();
+                let events = json!([
+                    {"method": "Network.loadingFinished", "params": {
+                        "requestId": "unrelated", "timestamp": 2, "encodedDataLength": 0}},
+                    {"method": "Network.loadingFinished", "params": {
+                        "requestId": "selected", "timestamp": 3, "encodedDataLength": 0}}
+                ]);
+                let outcome = if after_headers {
+                    let response = select_headers(&page, prepared).await;
+                    emit(&page, events).await;
+                    response.body().await.map(|_| ())
+                } else {
+                    emit(&page, events).await;
+                    prepared.wait().await.map(|_| ())
+                };
+                assert!(matches!(outcome, Err(Error::Lagged(1))));
+                page.session().connection().close().await;
+                peer.await.unwrap();
+            }
+        })
+        .await
+        .expect("queue overflow must fail promptly");
+    }
+}
