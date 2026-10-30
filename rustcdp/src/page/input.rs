@@ -168,6 +168,14 @@ impl Element {
     /// can follow side effects; the operation is never retried or rolled back.
     /// Received exception object IDs are released best-effort, not owned by errors.
     pub async fn fill(&self, text: &str) -> Result<()> {
+        self.fill_until(text, None).await
+    }
+
+    pub(super) async fn fill_until(
+        &self,
+        text: &str,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<()> {
         let element = self.clone();
         let text = text.to_owned();
         let limit = Duration::from_secs(30);
@@ -179,9 +187,10 @@ impl Element {
             .unwrap_or(limit)
             .min(limit);
         let session = self.0.session.clone().with_command_timeout(Some(timeout));
-        self.0.session.connection().runtime().spawn(async move {
+        let task = self.0.session.connection().runtime().spawn(async move {
             let result = async {
-                let response = session.execute_raw("Runtime.callFunctionOn", json!({
+                check_fill_deadline(deadline)?;
+                let response = session.execute_raw_before("Runtime.callFunctionOn", json!({
                     "objectId": element.object_id(),
                     "functionDeclaration": r#"function() {
                         const view = this.ownerDocument && this.ownerDocument.defaultView;
@@ -206,7 +215,7 @@ impl Element {
                     }"#,
                     "userGesture": true,
                     "returnByValue": true,
-                })).await?;
+                }), deadline).await?;
                 // Share ownership with any result/exception that aliases the
                 // original element, and release other received IDs exactly once.
                 let mut objects = vec![element.clone()];
@@ -242,15 +251,18 @@ impl Element {
                         payload: response,
                     }),
                 };
+                check_fill_deadline(deadline)?;
                 if !text.is_empty() {
-                    insert_text(&session, &text).await
+                    session.execute_before(&InsertText::new(text), deadline).await.map(|_| ())
                 } else if !empty {
-                    dispatch_pair(
+                    dispatch_pair_before(
                         &session,
                         element.0.context_lease.clone(),
                         "Input.dispatchKeyEvent",
                         json!({"type":"keyDown","key":"Backspace","code":"Backspace","windowsVirtualKeyCode":8,"modifiers":0}),
                         json!({"type":"keyUp","key":"Backspace","code":"Backspace","windowsVirtualKeyCode":8,"modifiers":0}),
+                        deadline,
+                        Some(element.clone()),
                     ).await
                 } else {
                     Ok(())
@@ -258,7 +270,24 @@ impl Element {
             }.await;
             drop(element);
             result
-        }).await?
+        });
+        if let Some(deadline) = deadline {
+            let result = tokio::time::timeout_at(deadline, task)
+                .await
+                .map_err(|_| Error::Timeout("filling element".into()))??;
+            check_fill_deadline(Some(deadline))?;
+            result
+        } else {
+            task.await?
+        }
+    }
+}
+
+fn check_fill_deadline(deadline: Option<tokio::time::Instant>) -> Result<()> {
+    if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+        Err(Error::Timeout("filling element".into()))
+    } else {
+        Ok(())
     }
 }
 
@@ -348,12 +377,12 @@ async fn dispatch_pair_before(
             // Check inside the owner, not just before spawning it. Once pressing
             // starts, even an uncertain/failed result must still reach release.
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                return Err(Error::Timeout("click deadline expired before press".into()));
+                return Err(Error::Timeout("input deadline expired before press".into()));
             }
             let pressed = if let Some(deadline) = deadline {
                 tokio::select! {
                     biased;
-                    () = tokio::time::sleep_until(deadline) => Err(Error::Timeout("click deadline expired during press".into())),
+                    () = tokio::time::sleep_until(deadline) => Err(Error::Timeout("input deadline expired during press".into())),
                     result = session.execute_raw(method, press) => result,
                 }
             } else {

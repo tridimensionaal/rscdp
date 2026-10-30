@@ -624,6 +624,19 @@ impl Connection {
         params: Value,
         session_id: Option<String>,
     ) -> Result<Value> {
+        self.execute_session_before(method, params, session_id, None)
+            .await
+    }
+
+    // Stop waiting for a command slot at the operation deadline, but retain the
+    // reply of admitted commands for their owner's normal response/cleanup bound.
+    pub(crate) async fn execute_session_before(
+        &self,
+        method: &str,
+        params: Value,
+        session_id: Option<String>,
+        admission_deadline: Option<tokio::time::Instant>,
+    ) -> Result<Value> {
         if let Some(error) = self.closed_error() {
             return Err(error);
         }
@@ -656,6 +669,13 @@ impl Connection {
                 Ok::<_, Error>((permit, slot))
             };
             let (_permit, slot) = tokio::select! {
+                biased;
+                () = async {
+                    match admission_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => return Err(Error::Timeout(format!("admitting {method}"))),
                 result = admission => result?,
                 error = wait_closed_state(&mut connection_closed) => return Err(error),
                 _ = async {
@@ -664,6 +684,9 @@ impl Connection {
                     } else { std::future::pending::<()>().await; }
                 } => return Err(self.closed_error().unwrap_or_else(|| Error::SessionClosed(session_id.clone().unwrap_or_default()))),
             };
+            if admission_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                return Err(Error::Timeout(format!("admitting {method}")));
+            }
             let (reply, response) = oneshot::channel();
             slot.send(Request {
                 method: method.into(),
@@ -907,6 +930,58 @@ impl EventStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires Chrome; verifies admission deadlines prevent late input"]
+    async fn expired_admission_cannot_insert_text_after_capacity_returns() -> Result<()> {
+        let browser = crate::Browser::builder()
+            .headless(true)
+            .arg("--no-sandbox")
+            .connection_options(ConnectionOptions::default().max_in_flight(2))
+            .launch()
+            .await?;
+        let page = browser.page();
+        page.session()
+            .execute_raw("Page.bringToFront", json!({}))
+            .await?;
+        page.evaluate(
+            "document.body.innerHTML = '<input>'; document.querySelector('input').focus();",
+        )
+        .run()
+        .await?;
+        let connection = page.session().connection();
+        let slots = connection.0.permits.acquire_many(2).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            page.session().execute_before(
+                &crate::cdp::input::commands::InsertText::new("late"),
+                Some(deadline),
+            ),
+        )
+        .await
+        .expect("admission did not expire")
+        .unwrap_err();
+        assert!(matches!(error, Error::Timeout(_)));
+        drop(slots);
+        // Ready capacity must not override an already-expired absolute deadline.
+        assert!(matches!(
+            page.session()
+                .execute_before(
+                    &crate::cdp::input::commands::InsertText::new("also late"),
+                    Some(deadline)
+                )
+                .await,
+            Err(Error::Timeout(_))
+        ));
+        assert_eq!(
+            page.evaluate("document.querySelector('input').value")
+                .json::<String>()
+                .await?,
+            ""
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn malformed_attachment_identity_fails_with_the_received_payload() {

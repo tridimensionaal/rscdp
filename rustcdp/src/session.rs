@@ -232,9 +232,17 @@ impl Session {
     /// Typed commands do not acquire cleanup ownership of returned resources;
     /// prefer owned helpers such as [`Connection::attach`] where available.
     pub async fn execute<C: Command>(&self, command: &C) -> Result<C::Response> {
+        self.execute_before(command, None).await
+    }
+
+    pub(crate) async fn execute_before<C: Command>(
+        &self,
+        command: &C,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<C::Response> {
         crate::error::decode(
             C::METHOD,
-            self.execute_raw(C::METHOD, serde_json::to_value(command)?)
+            self.execute_raw_before(C::METHOD, serde_json::to_value(command)?, deadline)
                 .await?,
         )
     }
@@ -244,6 +252,15 @@ impl Session {
     /// Cancellation or timeout stops waiting, not remote execution; retries can
     /// repeat side effects. The ownership caveats of [`Self::execute`] also apply.
     pub async fn execute_raw(&self, method: &str, params: Value) -> Result<Value> {
+        self.execute_raw_before(method, params, None).await
+    }
+
+    pub(crate) async fn execute_raw_before(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Value> {
         if self.is_closed() {
             return Err(self
                 .connection
@@ -251,7 +268,7 @@ impl Session {
                 .unwrap_or_else(|| Error::SessionClosed(self.id.0.clone())));
         }
         self.connection
-            .execute_session(method, params, Some(self.id.0.clone()))
+            .execute_session_before(method, params, Some(self.id.0.clone()), deadline)
             .await
     }
 

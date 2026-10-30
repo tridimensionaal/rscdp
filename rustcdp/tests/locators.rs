@@ -652,3 +652,238 @@ async fn overflow_clip_with_transformed_ancestor_is_rejected() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies fill readiness, replacement, Unicode and empty replacement"]
+async fn fill_waits_for_a_replacement_input_then_replaces_unicode_and_empty_text() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    set_html(page, "<input id='target' hidden disabled value='original'>").await?;
+    page.call(
+        r#"() => {
+        globalThis.oldInput = document.getElementById('target');
+        document.body.dataset.edits = '0';
+        document.body.oninput = () => document.body.dataset.edits++;
+    }"#,
+    )
+    .run()
+    .await?;
+    let target = locator(page, "#target");
+    let text = "mañana 雪 🦀 'quoted'";
+    let fill = target.fill(text);
+    tokio::pin!(fill);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut fill)
+            .await
+            .is_err()
+    );
+    page.call(
+        r#"() => {
+        const replacement = document.createElement('input');
+        replacement.id = 'target';
+        replacement.disabled = true;
+        oldInput.replaceWith(replacement);
+    }"#,
+    )
+    .run()
+    .await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut fill)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        page.evaluate("Number(document.body.dataset.edits)")
+            .json::<u64>()
+            .await?,
+        0
+    );
+    page.call("() => { document.getElementById('target').disabled = false; }")
+        .run()
+        .await?;
+    fill.await?;
+    assert_eq!(
+        page.evaluate("[document.getElementById('target').value, oldInput.value, Number(document.body.dataset.edits)]")
+            .json::<serde_json::Value>().await?,
+        json!([text, "original", 1])
+    );
+    target.fill("").await?;
+    assert_eq!(
+        page.evaluate(
+            "[document.getElementById('target').value, Number(document.body.dataset.edits)]"
+        )
+        .json::<serde_json::Value>()
+        .await?,
+        json!(["", 2])
+    );
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies readonly waits and unsupported fill types fail without editing"]
+async fn fill_times_out_on_readonly_and_rejects_unsupported_controls() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    set_html(page, "<input id='target' readonly value='keep'>").await?;
+    assert!(matches!(
+        page.locator("#target")
+            .timeout(Duration::from_millis(300))
+            .fill("changed")
+            .await,
+        Err(Error::Timeout(_))
+    ));
+    assert_eq!(
+        page.evaluate("document.getElementById('target').value")
+            .json::<String>()
+            .await?,
+        "keep"
+    );
+    for html in [
+        "<input id='target' type='checkbox'>",
+        "<input id='target' type='number' value='42'>",
+        "<div id='target' contenteditable>keep</div>",
+    ] {
+        set_html(page, html).await?;
+        page.call("() => { document.body.dataset.effects = '0'; document.body.oninput = document.body.onfocusin = () => document.body.dataset.effects++; }")
+            .run().await?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            locator(page, "#target").fill("changed"),
+        )
+        .await
+        .expect("unsupported control must fail before the readiness deadline");
+        assert!(
+            matches!(result, Err(Error::InvalidArgument(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            page.evaluate("Number(document.body.dataset.effects)")
+                .json::<u64>()
+                .await?,
+            0
+        );
+    }
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies cancellation after insertion starts never causes a second edit"]
+async fn canceling_fill_after_its_first_input_event_does_not_repeat_the_edit() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    set_html(page, "<input id='target' value='old'>").await?;
+    // Subscribe before triggering a native edit. A binding event reaches Rust
+    // while the input handler still holds the renderer, making abort observable.
+    let mut events = page.session().subscribe_with(
+        rustcdp::connection::EventOptions::default().methods(["Runtime.bindingCalled"]),
+    )?;
+    page.session()
+        .execute_raw("Runtime.addBinding", json!({"name": "c3FillEdited"}))
+        .await?;
+    page.call(
+        r#"() => {
+        document.body.dataset.edits = '0';
+        document.getElementById('target').oninput = () => {
+            document.body.dataset.edits++;
+            c3FillEdited(document.body.dataset.edits);
+            const end = performance.now() + 1500;
+            while (performance.now() < end) {}
+        };
+    }"#,
+    )
+    .run()
+    .await?;
+    let target = locator(page, "#target");
+    let task = tokio::spawn(async move { target.fill("new 雪").await });
+    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("fill never produced its first input event")?;
+    assert_eq!(event.params["name"], "c3FillEdited");
+    assert_eq!(event.params["payload"], "1");
+    assert!(
+        !task.is_finished(),
+        "input handler must still hold the dispatched edit"
+    );
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    // This command waits behind the deliberately stalled input handler. The
+    // original owned insertion can finish, but must not dispatch another edit.
+    assert_eq!(
+        page.evaluate(
+            "[document.getElementById('target').value, Number(document.body.dataset.edits)]"
+        )
+        .json::<serde_json::Value>()
+        .await?,
+        json!(["new 雪", 1])
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), events.recv())
+            .await
+            .is_err(),
+        "a canceled fill emitted another edit"
+    );
+    assert_eq!(
+        page.evaluate("Number(document.body.dataset.edits)")
+            .json::<u64>()
+            .await?,
+        1
+    );
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies a late focus response cannot admit text insertion"]
+async fn fill_deadline_during_focus_prevents_late_insertion() -> Result<()> {
+    let browser = launch().await?;
+    let page = browser.page();
+    page.session()
+        .execute_raw("Page.bringToFront", json!({}))
+        .await?;
+    assert!(page.evaluate("document.hasFocus()").json::<bool>().await?);
+    set_html(page, "<input id='target' value='old'>").await?;
+    let mut events = page.session().subscribe_with(
+        rustcdp::connection::EventOptions::default().methods(["Runtime.bindingCalled"]),
+    )?;
+    page.session()
+        .execute_raw("Runtime.addBinding", json!({"name": "fillFocused"}))
+        .await?;
+    page.call(
+        r#"() => {
+        document.body.dataset.edits = '0';
+        const input = document.getElementById('target');
+        input.oninput = () => document.body.dataset.edits++;
+        input.onfocus = () => {
+            fillFocused('focused');
+            const end = performance.now() + 1500;
+            while (performance.now() < end) {}
+        };
+    }"#,
+    )
+    .run()
+    .await?;
+    let input = page.locator("#target").timeout(Duration::from_millis(700));
+    let task = tokio::spawn(async move { input.fill("new").await });
+    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("focus was not dispatched")?;
+    assert_eq!(event.params["name"], "fillFocused");
+    assert!(matches!(task.await.unwrap(), Err(Error::Timeout(_))));
+    // This evaluation queues behind the focus handler. The owned preparation
+    // may finish, but its expired deadline must prevent a later InsertText.
+    assert_eq!(
+        page.evaluate(
+            "[document.getElementById('target').value, Number(document.body.dataset.edits)]"
+        )
+        .json::<serde_json::Value>()
+        .await?,
+        json!(["old", 0])
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        page.evaluate("document.getElementById('target').value")
+            .json::<String>()
+            .await?,
+        "old"
+    );
+    Ok(())
+}

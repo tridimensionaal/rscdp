@@ -147,7 +147,7 @@ impl Locator {
         Error::Timeout(format!("clicking CSS locator {:?}: {last}", self.selector))
     }
 
-    async fn check_frame_session(&self, error: &Error) -> Result<()> {
+    pub(super) async fn check_frame_session(&self, error: &Error) -> Result<()> {
         if let Target::Frame(frame) = &self.target
             && let Error::Protocol(protocol) = error
             && (protocol
@@ -168,7 +168,7 @@ impl Locator {
     }
 }
 
-fn is_detached(error: &Error) -> bool {
+pub(super) fn is_detached(error: &Error) -> bool {
     // B2's explicit attachment validation, not arbitrary user InvalidArguments.
     matches!(error, Error::InvalidArgument(message) if message == "cannot call a detached element")
 }

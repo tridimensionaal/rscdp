@@ -8,8 +8,9 @@ async fn reserve_notebook(page: &Page) -> Result<()> {
         .timeout(Duration::from_secs(10))
         .send()
         .await?;
-    let customer = page.require_element("input[name=customer]").await?;
-    customer.fill("Ada Muñoz").await?;
+    page.locator("input[name=customer]")
+        .fill("Ada Muñoz")
+        .await?;
     page.press_key("Tab").await?;
     page.insert_text("For your next idea ✨").await?;
     page.press_key("Enter").await?;
