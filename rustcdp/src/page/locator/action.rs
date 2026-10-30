@@ -222,6 +222,6 @@ impl Locator {
 }
 
 pub(super) fn is_detached(error: &Error) -> bool {
-    // B2's explicit attachment validation, not arbitrary user InvalidArguments.
+    // Match only the explicit attachment validation error.
     matches!(error, Error::InvalidArgument(message) if message == "cannot call a detached element")
 }

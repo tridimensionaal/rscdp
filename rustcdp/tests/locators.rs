@@ -778,14 +778,14 @@ async fn canceling_fill_after_its_first_input_event_does_not_repeat_the_edit() -
         rustcdp::connection::EventOptions::default().methods(["Runtime.bindingCalled"]),
     )?;
     page.session()
-        .execute_raw("Runtime.addBinding", json!({"name": "c3FillEdited"}))
+        .execute_raw("Runtime.addBinding", json!({"name": "fillEdited"}))
         .await?;
     page.call(
         r#"() => {
         document.body.dataset.edits = '0';
         document.getElementById('target').oninput = () => {
             document.body.dataset.edits++;
-            c3FillEdited(document.body.dataset.edits);
+            fillEdited(document.body.dataset.edits);
             const end = performance.now() + 1500;
             while (performance.now() < end) {}
         };
@@ -798,7 +798,7 @@ async fn canceling_fill_after_its_first_input_event_does_not_repeat_the_edit() -
     let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
         .await
         .expect("fill never produced its first input event")?;
-    assert_eq!(event.params["name"], "c3FillEdited");
+    assert_eq!(event.params["name"], "fillEdited");
     assert_eq!(event.params["payload"], "1");
     assert!(
         !task.is_finished(),
