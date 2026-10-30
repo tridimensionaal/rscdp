@@ -1,9 +1,11 @@
-use super::{EvaluationWorld, Frame, Page, selectors::is_context_change};
+use super::{Element, EvaluationWorld, Frame, Page, selectors::is_context_change};
 use crate::{Error, Result};
 use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 use tokio::time::Instant;
+
+mod action;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const POLLING_INTERVAL: Duration = Duration::from_millis(100);
@@ -102,9 +104,7 @@ impl Locator {
     /// completing under [`super::FunctionCallBuilder`]'s execution, recovery, and
     /// cleanup bounds. No remote element is retained by the locator.
     pub async fn wait_for(&self, state: ElementState) -> Result<()> {
-        let deadline = Instant::now().checked_add(self.timeout).ok_or_else(|| {
-            Error::InvalidArgument("locator timeout exceeds the monotonic deadline range".into())
-        })?;
+        let deadline = self.operation_deadline()?;
         tokio::time::timeout_at(deadline, async {
             loop {
                 self.check_deadline(deadline, state)?;
@@ -138,6 +138,31 @@ impl Locator {
         })
         .await
         .unwrap_or_else(|_| Err(self.expired(state)))
+    }
+
+    pub(super) fn operation_deadline(&self) -> Result<Instant> {
+        Instant::now().checked_add(self.timeout).ok_or_else(|| {
+            Error::InvalidArgument("locator timeout exceeds the monotonic deadline range".into())
+        })
+    }
+
+    // Count and acquire in the same synchronous isolated-world expression.
+    // Callers supply the operation deadline and decide which readiness is needed.
+    pub(super) async fn resolve(&self) -> Result<Option<Element>> {
+        let selector = serde_json::to_string(&self.selector)?;
+        let expression = format!(
+            "(() => {{ const selector = {selector}; const matches = document.querySelectorAll(selector); \
+             if (matches.length > 1) throw new Error('CSS locator ' + JSON.stringify(selector) + \
+             ' matched ' + matches.length + ' elements; expected at most one'); \
+             return matches[0] || null; }})()"
+        );
+        match &self.target {
+            Target::Page(page) => page.element_for_expression(expression).await,
+            Target::Frame(frame) => {
+                frame.info().await?;
+                frame.element_for_expression(expression).await
+            }
+        }
     }
 
     async fn sample(&self, state: ElementState) -> Result<Sample> {

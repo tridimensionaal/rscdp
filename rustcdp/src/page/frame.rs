@@ -182,6 +182,10 @@ impl Page {
 }
 
 impl Frame {
+    pub(super) fn page(&self) -> &Page {
+        &self.page
+    }
+
     pub fn id(&self) -> &FrameId {
         &self.id
     }
@@ -313,7 +317,10 @@ impl Frame {
             .await
     }
 
-    async fn element_for_expression(&self, expression: String) -> Result<Option<Element>> {
+    pub(super) async fn element_for_expression(
+        &self,
+        expression: String,
+    ) -> Result<Option<Element>> {
         self.page
             .element_for_expression_in_frame(expression, Some(self.id.clone()))
             .await

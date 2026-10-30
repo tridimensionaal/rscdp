@@ -262,3 +262,393 @@ async fn frame_locators_follow_their_document_but_never_substitute_a_removed_fra
     }
     browser.close().await
 }
+
+async fn clicks(page: &Page) -> Result<u64> {
+    page.evaluate("Number(document.body.dataset.clicks || 0)")
+        .json()
+        .await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies movement, native fieldset disabling, and pointer covering"]
+async fn click_waits_for_stability_enabled_state_and_hit_testing() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    set_html(page, r#"<fieldset disabled><button id="target" style="position:absolute;left:20px;top:20px;width:120px;height:50px"><span>Buy</span></button></fieldset><div id="cover" style="position:fixed;inset:0;z-index:99"></div>"#).await?;
+    page.call(
+        r#"() => {
+        document.body.dataset.clicks = '0';
+        const button = document.getElementById('target');
+        button.onclick = () => document.body.dataset.clicks++;
+        window.moving = true;
+        let x = 20;
+        const move = () => {
+            if (!window.moving) return;
+            button.style.left = (x = x === 20 ? 80 : 20) + 'px';
+            requestAnimationFrame(move);
+        };
+        requestAnimationFrame(move);
+    }"#,
+    )
+    .run()
+    .await?;
+    let target = locator(page, "#target");
+    let click = target.click();
+    tokio::pin!(click);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut click)
+            .await
+            .is_err()
+    );
+    assert_eq!(clicks(page).await?, 0);
+    page.call("() => { document.querySelector('fieldset').disabled = false; document.getElementById('cover').remove(); }").run().await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut click)
+            .await
+            .is_err()
+    );
+    assert_eq!(clicks(page).await?, 0);
+    page.call("() => { window.moving = false; }").run().await?;
+    click.await?;
+    assert_eq!(clicks(page).await?, 1);
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies viewport clipping and descendant hit acceptance"]
+async fn click_uses_a_point_inside_the_visible_clipped_rectangle() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    set_html(page, r#"<button id="target" style="position:fixed;left:-180px;top:40px;width:200px;height:60px;padding:0;border:0"><span style="display:block;width:100%;height:100%">Buy</span></button>"#).await?;
+    page.call("() => { document.getElementById('target').onclick = e => { document.body.dataset.clicks = '1'; document.body.dataset.x = e.clientX; }; }").run().await?;
+    locator(page, "#target").click().await?;
+    assert_eq!(clicks(page).await?, 1);
+    let x: f64 = page
+        .evaluate("Number(document.body.dataset.x)")
+        .json()
+        .await?;
+    assert!((0.0..20.0).contains(&x));
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies fresh strict resolution after replacement during readiness"]
+async fn click_re_resolves_a_replaced_element_before_dispatch() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    set_html(page, "<button id='target' disabled>Old</button>").await?;
+    page.call("() => { document.getElementById('target').onclick = () => { document.body.dataset.oldClick = 'yes'; }; }").run().await?;
+    let target = locator(page, "#target");
+    let click = target.click();
+    tokio::pin!(click);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut click)
+            .await
+            .is_err()
+    );
+    page.call(
+        r#"() => {
+        const old = document.getElementById('target');
+        old.disabled = false;
+        requestAnimationFrame(() => {
+            const replacement = document.createElement('button');
+            replacement.id = 'target';
+            replacement.textContent = 'New';
+            replacement.onclick = () => document.body.dataset.clicks = '1';
+            old.replaceWith(replacement);
+        });
+    }"#,
+    )
+    .run()
+    .await?;
+    click.await?;
+    assert_eq!(clicks(page).await?, 1);
+    assert!(
+        !page
+            .evaluate("document.body.dataset.oldClick === 'yes'")
+            .json::<bool>()
+            .await?
+    );
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies nested iframe offsets, borders, and ancestor hit testing"]
+async fn click_in_nested_frames_checks_the_parent_overlay() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    page.call(r#"() => new Promise(resolve => {
+        document.body.dataset.clicks = '0';
+        const outer = document.createElement('iframe');
+        outer.style.cssText = 'margin:65px;border:7px solid black;width:360px;height:260px';
+        outer.onload = () => {
+            const inner = outer.contentDocument.createElement('iframe');
+            inner.style.cssText = 'margin:25px;border:5px solid black;width:220px;height:150px';
+            inner.onload = () => {
+                inner.contentDocument.querySelector('button').onclick = () => document.body.dataset.clicks++;
+                resolve();
+            };
+            inner.srcdoc = '<button style="margin:20px;width:100px;height:50px">Buy</button>';
+            outer.contentDocument.body.append(inner);
+        };
+        outer.srcdoc = '<body></body>';
+        document.body.append(outer);
+        const cover = document.createElement('div');
+        cover.id = 'cover';
+        cover.style.cssText = 'position:fixed;inset:0;z-index:99';
+        document.body.append(cover);
+    })"#).run().await?;
+    let root = page.main_frame().await?;
+    let outer = root.children().await?.remove(0);
+    let inner = outer.children().await?.remove(0);
+    let target = inner.locator("button").timeout(Duration::from_secs(5));
+    let click = target.click();
+    tokio::pin!(click);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut click)
+            .await
+            .is_err()
+    );
+    assert_eq!(clicks(page).await?, 0);
+    page.call("() => document.getElementById('cover').remove()")
+        .run()
+        .await?;
+    click.await?;
+    assert_eq!(clicks(page).await?, 1);
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies unsupported iframe transforms and cross-origin ancestry"]
+async fn click_rejects_unsupported_frame_coordinate_mappings() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    for sandbox in [false, true] {
+        page.call(
+            r#"sandbox => new Promise(resolve => {
+            document.body.innerHTML = '';
+            const frame = document.createElement('iframe');
+            if (sandbox) frame.setAttribute('sandbox', 'allow-scripts');
+            else frame.style.transform = 'scale(1.2)';
+            frame.onload = () => resolve();
+            frame.srcdoc = '<button>Buy</button>';
+            document.body.append(frame);
+        })"#,
+        )
+        .arg(json!(sandbox))
+        .run()
+        .await?;
+        let root = page.main_frame().await?;
+        let children = root.children().await?;
+        let target = if let Some(child) = children.into_iter().next() {
+            child.locator("button")
+        } else {
+            // Chrome can isolate a sandboxed frame into a separate target.
+            // Explicitly attach it and exercise the target-kind refusal too.
+            let info = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let targets = page
+                        .session()
+                        .connection()
+                        .execute(&rustcdp::cdp::target::commands::GetTargets::new())
+                        .await?;
+                    if let Some(info) = targets
+                        .target_infos
+                        .into_iter()
+                        .find(|info| info.type_ == "iframe")
+                    {
+                        break Ok::<_, Error>(info);
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("sandboxed iframe target was not discovered")?;
+            page.attach_frame_target(&info.target_id)
+                .await?
+                .locator("button")
+        };
+        let error = target
+            .timeout(Duration::from_secs(3))
+            .click()
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidArgument(_)), "{error}");
+    }
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies pre-dispatch deadlines and selector/readiness diagnostics"]
+async fn click_deadlines_reject_zero_overflow_and_covered_targets() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    set_html(
+        page,
+        "<button id='target'>Buy</button><div style='position:fixed;inset:0;z-index:99'></div>",
+    )
+    .await?;
+    for selector in ["#target", "["] {
+        assert!(matches!(
+            page.locator(selector).timeout(Duration::ZERO).click().await,
+            Err(Error::Timeout(_))
+        ));
+    }
+    assert!(matches!(
+        page.locator("#target").timeout(Duration::MAX).click().await,
+        Err(Error::InvalidArgument(_))
+    ));
+    let error = page
+        .locator("#target")
+        .timeout(Duration::from_millis(500))
+        .click()
+        .await
+        .unwrap_err();
+    let Error::Timeout(message) = error else {
+        panic!("{error}");
+    };
+    assert!(
+        message.contains("#target") && message.contains("covered"),
+        "{message}"
+    );
+    assert_eq!(clicks(page).await?, 0);
+    set_html(
+        page,
+        "<button class='duplicate'>One</button><button class='duplicate'>Two</button>",
+    )
+    .await?;
+    assert!(matches!(
+        locator(page, ".duplicate").click().await,
+        Err(Error::JavaScript(_))
+    ));
+    assert!(matches!(
+        locator(page, "[").click().await,
+        Err(Error::JavaScript(_))
+    ));
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies timeout after press never replays input and release continues"]
+async fn click_timeout_after_dispatch_still_releases_once() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    set_html(page, "<button id='target'>Buy</button>").await?;
+    page.call(
+        r#"() => {
+        document.body.dataset.presses = '0';
+        document.body.dataset.releases = '0';
+        document.body.dataset.clicks = '0';
+        const button = document.getElementById('target');
+        button.onmousedown = () => {
+            document.body.dataset.presses++;
+            const end = performance.now() + 1500;
+            while (performance.now() < end) {}
+        };
+        button.onmouseup = () => document.body.dataset.releases++;
+        button.onclick = () => document.body.dataset.clicks++;
+    }"#,
+    )
+    .run()
+    .await?;
+    let error = page
+        .locator("#target")
+        .timeout(Duration::from_millis(700))
+        .click()
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Timeout(_)), "{error}");
+    // A subsequent command can wait behind the deliberately stalled renderer.
+    // Poll until the owned release arrives; do not start another locator action.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let released: u64 = page
+                .evaluate("Number(document.body.dataset.releases)")
+                .json()
+                .await?;
+            if released == 1 {
+                break Ok::<(), Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("owned mouse release did not finish")?;
+    assert_eq!(
+        page.evaluate("Number(document.body.dataset.presses)")
+            .json::<u64>()
+            .await?,
+        1
+    );
+    assert_eq!(clicks(page).await?, 1);
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies bounded RAF sampling does not detach a usable session"]
+async fn click_with_unavailable_animation_frames_times_out_without_detaching() -> Result<()> {
+    let mut browser = launch().await?;
+    let page = browser.page();
+    set_html(page, "<button id='target'>Buy</button>").await?;
+    // Simulate RAF throttling in the library's world; local timers still work.
+    page.evaluate(
+        "globalThis.savedRAF = requestAnimationFrame; globalThis.requestAnimationFrame = () => 0;",
+    )
+    .world(rustcdp::page::EvaluationWorld::Isolated)
+    .run()
+    .await?;
+    let result = page
+        .locator("#target")
+        .timeout(Duration::from_millis(600))
+        .click()
+        .await;
+    assert!(matches!(result, Err(Error::Timeout(_))));
+    page.evaluate(
+        "globalThis.requestAnimationFrame = globalThis.savedRAF; delete globalThis.savedRAF;",
+    )
+    .world(rustcdp::page::EvaluationWorld::Isolated)
+    .run()
+    .await?;
+    // A still-running final sample also has a 250ms local timer. Allow it to
+    // settle, then exercise the same session instead of merely checking a flag.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(page.call("() => 42").json::<u64>().await?, 42);
+    assert!(!page.session().is_closed());
+    browser.close().await
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies overflow candidates respect actual containing blocks"]
+async fn overflow_candidates_follow_browser_hit_testing() -> Result<()> {
+    let browser = launch().await?;
+    let page = browser.page();
+    for position in ["fixed", "absolute", "static"] {
+        set_html(page, &format!(r#"<div style="overflow:hidden;width:10px;height:40px">
+            <button id="target" style="position:{position};left:100px;top:100px;width:200px;height:30px;padding:0;border:0">Click</button>
+        </div>"#)).await?;
+        page.call("() => { document.body.dataset.clicks = '0'; document.getElementById('target').onclick = () => document.body.dataset.clicks++; }").run().await?;
+        page.locator("#target")
+            .timeout(Duration::from_secs(1))
+            .click()
+            .await?;
+        assert_eq!(clicks(page).await?, 1, "{position}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; verifies transforms above overflow clips fail explicitly"]
+async fn overflow_clip_with_transformed_ancestor_is_rejected() -> Result<()> {
+    let browser = launch().await?;
+    let page = browser.page();
+    set_html(page, r#"<div style="transform:scale(2);transform-origin:0 0;width:100px">
+        <div style="overflow:hidden;width:100px;height:50px">
+            <button id="target" style="display:block;margin-left:70px;width:20px;height:20px;padding:0;border:0">X</button>
+        </div>
+    </div>"#).await?;
+    assert!(
+        matches!(page.locator("#target").timeout(Duration::from_secs(1)).click().await,
+        Err(Error::InvalidArgument(message)) if message.contains("transformed clipping"))
+    );
+    Ok(())
+}

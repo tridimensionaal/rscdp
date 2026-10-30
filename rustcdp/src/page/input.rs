@@ -9,6 +9,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
+use tokio::time::Instant;
 
 /// Modifier flags applied to both key-down and key-up events.
 #[derive(Debug, Clone, Copy, Default)]
@@ -267,17 +268,47 @@ pub(super) async fn click_cdp(
     x: f64,
     y: f64,
 ) -> Result<()> {
+    click_cdp_owned(session, context_lease, x, y, None, None).await
+}
+
+pub(super) async fn click_cdp_before(
+    element: &Element,
+    x: f64,
+    y: f64,
+    deadline: Instant,
+) -> Result<()> {
+    click_cdp_owned(
+        &element.0.session,
+        element.0.context_lease.clone(),
+        x,
+        y,
+        Some(deadline),
+        Some(element.clone()),
+    )
+    .await
+}
+
+async fn click_cdp_owned(
+    session: &Session,
+    context_lease: Option<Arc<crate::browser::ContextLease>>,
+    x: f64,
+    y: f64,
+    deadline: Option<Instant>,
+    element: Option<Element>,
+) -> Result<()> {
     if !x.is_finite() || !y.is_finite() {
         return Err(Error::InvalidArgument(
             "click coordinates must be finite".into(),
         ));
     }
-    dispatch_pair(
+    dispatch_pair_before(
         session,
         context_lease,
         "Input.dispatchMouseEvent",
         json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1}),
         json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":1}),
+        deadline,
+        element,
     )
     .await
 }
@@ -288,6 +319,18 @@ async fn dispatch_pair(
     method: &'static str,
     press: Value,
     release: Value,
+) -> Result<()> {
+    dispatch_pair_before(session, context_lease, method, press, release, None, None).await
+}
+
+async fn dispatch_pair_before(
+    session: &Session,
+    context_lease: Option<Arc<crate::browser::ContextLease>>,
+    method: &'static str,
+    press: Value,
+    release: Value,
+    deadline: Option<Instant>,
+    element: Option<Element>,
 ) -> Result<()> {
     // Bound each attempt separately so a stalled press still reaches release,
     // including when the caller has disabled command timeouts.
@@ -302,8 +345,24 @@ async fn dispatch_pair(
         .connection()
         .runtime()
         .spawn(async move {
-            let pressed = session.execute_raw(method, press).await;
+            // Check inside the owner, not just before spawning it. Once pressing
+            // starts, even an uncertain/failed result must still reach release.
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(Error::Timeout("click deadline expired before press".into()));
+            }
+            let pressed = if let Some(deadline) = deadline {
+                tokio::select! {
+                    biased;
+                    () = tokio::time::sleep_until(deadline) => Err(Error::Timeout("click deadline expired during press".into())),
+                    result = session.execute_raw(method, press) => result,
+                }
+            } else {
+                session.execute_raw(method, press).await
+            };
+            // Release uses the original bounded handle timeout, not the now
+            // possibly exhausted action budget. Never retry the press.
             let released = session.execute_raw(method, release).await;
+            drop(element);
             // Session ownership alone does not retain a fallback browser context.
             drop(context_lease);
             with_cleanup(pressed.map(|_| ()), released.map(|_| ()))
