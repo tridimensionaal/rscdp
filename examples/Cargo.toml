@@ -57,3 +57,7 @@ path = "connect.rs"
 [[example]]
 name = "native_controls"
 path = "native_controls.rs"
+
+[[example]]
+name = "structured_extract"
+path = "structured_extract.rs"
