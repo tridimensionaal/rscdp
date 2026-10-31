@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Reading draft</title>
+<style>
+  body { max-width: 34rem; margin: 4rem auto; font: 18px system-ui; color: #23313d; }
+  label, textarea, output { display: block; margin: 1rem 0; }
+  textarea { box-sizing: border-box; width: 100%; min-height: 8rem; }
+  textarea, button { font: inherit; padding: .5rem; }
+</style>
+<h1>Reading draft</h1>
+<p>Save your next reading idea and return to it on another visit.</p>
+<form>
+  <label for="draft">Reading idea</label>
+  <textarea id="draft"></textarea>
+  <button id="save">Save draft</button>
+</form>
+<output aria-live="polite"></output>
+<script>
+  const draft = document.querySelector('#draft');
+  draft.value = localStorage.getItem('reading-draft') ?? '';
+  document.querySelector('form').addEventListener('submit', event => {
+    event.preventDefault();
+    localStorage.setItem('reading-draft', draft.value);
+    document.querySelector('output').textContent = 'Draft saved';
+  });
+</script>
+</html>

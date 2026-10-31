@@ -64,6 +64,7 @@ Replace `checkout` with a launch example below:
 | [structured_extract](examples/structured_extract.rs) | Pass JSON arguments and extract a typed seed catalogue |
 | [live_search](examples/live_search.rs) | Reuse locators across changing search results and wait for DOM states |
 | [parallel_pages](examples/parallel_pages.rs) | Collect independent warehouse summaries concurrently |
+| [local_storage](examples/local_storage.rs) | Restore a saved draft across navigation and remove its storage key |
 | [checkout](examples/checkout.rs) | Fill and submit a form with Unicode text and keyboard input |
 | [page_report](examples/page_report.rs) | Export a report to PNG and PDF |
 | [frame_walk](examples/frame_walk.rs) | Traverse nested frames and update inventory |

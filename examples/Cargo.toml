@@ -69,3 +69,7 @@ path = "live_search.rs"
 [[example]]
 name = "parallel_pages"
 path = "parallel_pages.rs"
+
+[[example]]
+name = "local_storage"
+path = "local_storage.rs"
