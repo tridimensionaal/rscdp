@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Reading list</title>
+<style>
+  body { max-width: 34rem; margin: 4rem auto; font: 18px system-ui; color: #23313d; }
+  button { font: inherit; padding: .5rem; margin-right: .5rem; }
+  output { display: block; margin-top: 2rem; }
+</style>
+<h1>My reading list</h1>
+<ul id="books"><li>The Dispossessed</li><li>Kindred</li></ul>
+<button id="rename">Rename list</button>
+<button id="delete">Delete list</button>
+<output id="status" aria-live="polite"></output>
+<script>
+  const heading = document.querySelector('h1');
+  const status = document.querySelector('#status');
+  document.querySelector('#rename').addEventListener('click', () => {
+    const name = prompt('Name this reading list:', heading.textContent);
+    if (name !== null && name.trim() !== '') {
+      heading.textContent = name.trim();
+      status.textContent = 'List renamed';
+      status.dataset.state = 'renamed';
+    }
+  });
+  document.querySelector('#delete').addEventListener('click', () => {
+    if (confirm(`Delete ${heading.textContent}?`)) {
+      document.querySelector('#books').replaceChildren();
+      heading.textContent = 'Deleted list';
+      status.textContent = 'List deleted';
+      status.dataset.state = 'deleted';
+    } else {
+      status.textContent = 'Deletion canceled';
+      status.dataset.state = 'kept';
+    }
+  });
+</script>
+</html>

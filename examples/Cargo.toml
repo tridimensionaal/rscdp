@@ -73,3 +73,7 @@ path = "parallel_pages.rs"
 [[example]]
 name = "local_storage"
 path = "local_storage.rs"
+
+[[example]]
+name = "dialogs"
+path = "dialogs.rs"
