@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Warehouse stock</title>
+<style>body { max-width: 36rem; margin: 4rem auto; font: 20px system-ui; } output { font-weight: bold; }</style>
+<h1>Unknown warehouse</h1>
+<p>Available notebooks: <output>0</output></p>
+<script>
+  const warehouses = new Map([
+    ['north', ['North warehouse', 12]],
+    ['south', ['South warehouse', 8]],
+    ['east', ['East warehouse', 5]],
+  ]);
+  const stock = warehouses.get(new URLSearchParams(location.search).get('warehouse'));
+  if (stock) {
+    document.querySelector('h1').textContent = stock[0];
+    document.querySelector('output').textContent = stock[1];
+  }
+</script>
+</html>

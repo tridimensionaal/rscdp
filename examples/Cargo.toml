@@ -65,3 +65,7 @@ path = "structured_extract.rs"
 [[example]]
 name = "live_search"
 path = "live_search.rs"
+
+[[example]]
+name = "parallel_pages"
+path = "parallel_pages.rs"
