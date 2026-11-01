@@ -77,3 +77,7 @@ path = "local_storage.rs"
 [[example]]
 name = "dialogs"
 path = "dialogs.rs"
+
+[[example]]
+name = "popup_handoff"
+path = "popup_handoff.rs"

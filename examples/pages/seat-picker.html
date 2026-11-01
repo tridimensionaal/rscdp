@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Choose your seat</title>
+<style>
+  body { max-width: 28rem; margin: 2rem auto; font: 18px system-ui; color: #23313d; }
+  button { font: inherit; padding: 1rem; margin: .5rem; }
+  output { display: block; margin-top: 1rem; }
+</style>
+<h1>Choose your seat</h1>
+<div id="picker">
+  <button data-seat="A3">Seat A3</button>
+  <button id="seat-b7" data-seat="B7">Seat B7</button>
+</div>
+<output aria-live="polite"></output>
+<script>
+  for (const button of document.querySelectorAll('[data-seat]')) {
+    button.addEventListener('click', () => {
+      if (window.opener === null) return;
+      window.opener.postMessage({type: 'seat-selected', seat: button.dataset.seat}, location.origin);
+      document.querySelector('output').textContent = `Sent seat ${button.dataset.seat}`;
+    });
+  }
+  document.querySelector('#picker').dataset.state = 'ready';
+</script>
+</html>

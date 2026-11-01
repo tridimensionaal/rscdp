@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Workshop seat booking</title>
+<style>
+  body { max-width: 34rem; margin: 4rem auto; font: 18px system-ui; color: #23313d; }
+  button { font: inherit; padding: .5rem; }
+  output { display: block; margin-top: 2rem; }
+</style>
+<h1>Book a workshop seat</h1>
+<p>Choose your seat in the seating-plan window.</p>
+<button id="choose-seat">Choose a seat</button>
+<output id="selection" aria-live="polite">No seat selected</output>
+<script>
+  let picker = null;
+  const selection = document.querySelector('#selection');
+  document.querySelector('#choose-seat').addEventListener('click', () => {
+    // Retain the opener relationship so the picker can send its selection back.
+    picker = window.open('seat-picker.html', '_blank', 'popup,width=560,height=440');
+    if (picker === null) {
+      selection.textContent = 'Seat picker was blocked';
+      selection.dataset.state = 'blocked';
+    }
+  });
+  window.addEventListener('message', event => {
+    if (event.origin !== location.origin || event.source !== picker || picker === null) return;
+    if (event.data?.type !== 'seat-selected' || !['A3', 'B7'].includes(event.data.seat)) return;
+    selection.textContent = `Seat ${event.data.seat} selected`;
+    selection.dataset.state = 'selected';
+  });
+</script>
+</html>
