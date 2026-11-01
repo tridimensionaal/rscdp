@@ -67,6 +67,7 @@ Replace `checkout` with a launch example below:
 | [local_storage](examples/local_storage.rs) | Restore a saved draft across navigation and remove its storage key |
 | [dialogs](examples/dialogs.rs) | Answer a prompt and dismiss a blocking confirmation dialog |
 | [popup_handoff](examples/popup_handoff.rs) | Discover a popup and return its seat selection to the opener |
+| [downloads](examples/downloads.rs) | Correlate browser download events and verify an exported CSV |
 | [checkout](examples/checkout.rs) | Fill and submit a form with Unicode text and keyboard input |
 | [page_report](examples/page_report.rs) | Export a report to PNG and PDF |
 | [frame_walk](examples/frame_walk.rs) | Traverse nested frames and update inventory |
@@ -84,7 +85,8 @@ cargo run -p rustcdp-examples --example connect -- http://127.0.0.1:9222
 ```
 
 Report files go to `rustcdp-report/` in the system temporary directory;
-set `RUSTCDP_OUTPUT` to choose another location. Example dependencies are separate
+Downloads go to `rustcdp-downloads/` in the system temporary directory.
+Set `RUSTCDP_OUTPUT` to choose the output directory for either example. Example dependencies are separate
 from the library's dependencies.
 
 ## API documentation

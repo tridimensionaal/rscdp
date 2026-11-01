@@ -81,3 +81,7 @@ path = "dialogs.rs"
 [[example]]
 name = "popup_handoff"
 path = "popup_handoff.rs"
+
+[[example]]
+name = "downloads"
+path = "downloads.rs"

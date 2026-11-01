@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Reading history export</title>
+<style>body { max-width: 40rem; margin: 3rem auto; font: 18px system-ui; } a { display: inline-block; padding: 1rem; }</style>
+<h1>Your reading history</h1>
+<ul><li>The Dispossessed — finished</li><li>Kindred — reading</li></ul>
+<a id="export" download="reading-history.csv">Export CSV</a>
+<script>
+  const csv = 'title,status\nThe Dispossessed,finished\nKindred,reading\n';
+  document.querySelector('#export').href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+</script>
+</html>
