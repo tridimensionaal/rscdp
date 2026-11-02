@@ -101,3 +101,7 @@ path = "offline_recovery.rs"
 [[example]]
 name = "init_script"
 path = "init_script.rs"
+
+[[example]]
+name = "accessibility_tree"
+path = "accessibility_tree.rs"
