@@ -21,17 +21,11 @@ async fn read_menu(page: &Page, server: &server::Server) -> Result<()> {
             response.metadata().status
         )));
     }
-    let body = response.body().await?;
-
-    let menu: Value = serde_json::from_slice(&body)?;
+    let menu = response.json::<Value>().await?;
     if menu["special"]["name"] != "Orange blossom latte" || menu["special"]["price"] != 4.5 {
         return Err(Error::InvalidArgument(format!("unexpected menu: {menu}")));
     }
-    println!(
-        "Captured {} response bytes: {}",
-        body.len(),
-        menu["special"]
-    );
+    println!("Captured menu special: {}", menu["special"]);
     Ok(())
 }
 
