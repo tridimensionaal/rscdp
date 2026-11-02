@@ -68,6 +68,7 @@ Replace `checkout` with a launch example below:
 | [dialogs](examples/dialogs.rs) | Answer a prompt and dismiss a blocking confirmation dialog |
 | [popup_handoff](examples/popup_handoff.rs) | Discover a popup and return its seat selection to the opener |
 | [downloads](examples/downloads.rs) | Correlate browser download events and verify an exported CSV |
+| [responsive_preview](examples/responsive_preview.rs) | Check responsive layout and light/dark appearance |
 | [checkout](examples/checkout.rs) | Fill and submit a form with Unicode text and keyboard input |
 | [page_report](examples/page_report.rs) | Export a report to PNG and PDF |
 | [frame_walk](examples/frame_walk.rs) | Traverse nested frames and update inventory |

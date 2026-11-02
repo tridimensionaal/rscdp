@@ -85,3 +85,7 @@ path = "popup_handoff.rs"
 [[example]]
 name = "downloads"
 path = "downloads.rs"
+
+[[example]]
+name = "responsive_preview"
+path = "responsive_preview.rs"
