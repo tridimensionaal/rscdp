@@ -93,3 +93,7 @@ path = "responsive_preview.rs"
 [[example]]
 name = "geolocation"
 path = "geolocation.rs"
+
+[[example]]
+name = "offline_recovery"
+path = "offline_recovery.rs"

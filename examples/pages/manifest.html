@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Museum manifest</title>
+  </head>
+  <body>
+    <h1>Museum exhibits</h1>
+    <button id="load-manifest">Load or retry exhibits</button>
+    <p id="status" data-state="idle" aria-live="polite">Load the exhibit manifest.</p>
+    <ul id="exhibits"></ul>
+    <script>
+      document.querySelector('#load-manifest').addEventListener('click', async event => {
+        const button = event.currentTarget;
+        const status = document.querySelector('#status');
+        const exhibits = document.querySelector('#exhibits');
+        button.disabled = true;
+        status.dataset.state = 'loading';
+        delete status.dataset.errorName;
+        status.textContent = 'Loading exhibits…';
+        exhibits.replaceChildren();
+
+        // Always attempt the request, even if navigator.onLine reports false.
+        // Only a rejected fetch enters the transport-failure state.
+        let response;
+        try {
+          response = await fetch('api/manifest.json', { cache: 'no-store' });
+        } catch (error) {
+          status.dataset.errorName = error.name;
+          status.textContent = 'Manifest request failed';
+          status.dataset.state = 'failed';
+          button.disabled = false;
+          return;
+        }
+
+        try {
+          if (!response.ok) throw new Error(`Manifest returned HTTP ${response.status}`);
+          const manifest = await response.json();
+          for (const title of manifest.exhibits) {
+            const item = document.createElement('li');
+            item.textContent = title;
+            exhibits.append(item);
+          }
+          status.textContent = `${manifest.exhibits.length} exhibits available`;
+          status.dataset.state = 'ready';
+        } catch (error) {
+          status.textContent = error.message;
+          status.dataset.state = 'invalid';
+        } finally {
+          button.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
