@@ -71,6 +71,7 @@ Replace `checkout` with a launch example below:
 | [responsive_preview](examples/responsive_preview.rs) | Check responsive layout and light/dark appearance |
 | [geolocation](examples/geolocation.rs) | Emulate coordinates and exercise granted and denied permissions |
 | [offline_recovery](examples/offline_recovery.rs) | Fail an uncached request offline, then restore connectivity and retry |
+| [init_script](examples/init_script.rs) | Set configuration before page scripts and remove the registration |
 | [checkout](examples/checkout.rs) | Fill and submit a form with Unicode text and keyboard input |
 | [page_report](examples/page_report.rs) | Export a report to PNG and PDF |
 | [frame_walk](examples/frame_walk.rs) | Traverse nested frames and update inventory |

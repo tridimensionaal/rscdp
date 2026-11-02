@@ -97,3 +97,7 @@ path = "geolocation.rs"
 [[example]]
 name = "offline_recovery"
 path = "offline_recovery.rs"
+
+[[example]]
+name = "init_script"
+path = "init_script.rs"

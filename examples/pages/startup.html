@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Timetable startup</title>
+<style>
+  body { max-width: 36rem; margin: 4rem auto; font: 18px system-ui; color: #23313d; }
+  li { margin: 1rem 0; }
+</style>
+<h1 id="welcome"></h1>
+<p>Your next workshops</p>
+<ul><li>18:00 — Bookbinding</li><li>19:00 — Ceramics</li></ul>
+<script>
+  // Read once during bootstrap; later configuration changes do not rewrite the welcome.
+  document.querySelector('#welcome').textContent =
+    window.timetableConfig?.welcome ?? 'Daily timetable';
+</script>
+</html>
