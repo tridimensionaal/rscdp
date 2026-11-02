@@ -4,6 +4,7 @@ use rustcdp::{
     Error, Page, Result,
     page::{ClickMethod, ClickOptions},
 };
+use serde_json::json;
 use std::time::Duration;
 
 async fn update_inventory(page: &Page) -> Result<()> {
@@ -35,7 +36,8 @@ async fn update_inventory(page: &Page) -> Result<()> {
         })
         .await?;
     let stock = shelf
-        .evaluate("Number(document.querySelector('output').textContent)")
+        .call("selector => Number(document.querySelector(selector).textContent)")
+        .arg(json!("output"))
         .json::<u64>()
         .await?;
     println!("Shelf A now holds {stock} notebooks");
