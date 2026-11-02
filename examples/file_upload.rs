@@ -39,6 +39,24 @@ async fn preview_stock(page: &Page) -> Result<()> {
         )));
     }
     println!("Verified local CSV preview: 3 rows, 50 units total.");
+
+    page.locator("#stock-file").set_input_files(&[]).await?;
+    page.wait_for_element("#summary[data-state=idle]", Duration::from_secs(5))
+        .await?;
+    let cleared = page
+        .call(
+            "() => [document.querySelector('#stock-file').files.length,
+                document.querySelectorAll('tbody tr').length,
+                document.querySelector('#summary').textContent]",
+        )
+        .json::<(usize, usize, String)>()
+        .await?;
+    if cleared != (0, 0, "Choose a CSV file.".into()) {
+        return Err(Error::InvalidArgument(format!(
+            "file selection did not clear: {cleared:?}"
+        )));
+    }
+    println!("Cleared file selection and preview.");
     Ok(())
 }
 
