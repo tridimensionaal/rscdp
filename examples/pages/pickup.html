@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Workshop pickup</title>
+  </head>
+  <body>
+    <h1>Find a nearby pickup point</h1>
+    <p>Choose between Central workshop and Riverside workshop.</p>
+    <button id="find-pickup">Use my location</button>
+    <p id="status" data-state="idle" aria-live="polite">Choose a pickup point using your location.</p>
+    <script>
+      const locations = [
+        { name: 'Central workshop', latitude: -33.451, longitude: -70.659 },
+        { name: 'Riverside workshop', latitude: -33.434, longitude: -70.631 }
+      ];
+      document.querySelector('#find-pickup').addEventListener('click', event => {
+        const button = event.currentTarget;
+        const status = document.querySelector('#status');
+        button.disabled = true;
+        status.dataset.state = 'locating';
+        status.textContent = 'Finding your nearest pickup point…';
+        navigator.geolocation.getCurrentPosition(position => {
+          const { latitude, longitude, accuracy } = position.coords;
+          // Compare nearby points with longitude scaled to this latitude.
+          const distance = location => (location.latitude - latitude) ** 2
+            + ((location.longitude - longitude) * Math.cos(latitude * Math.PI / 180)) ** 2;
+          const nearest = locations.reduce((best, location) =>
+            distance(location) < distance(best) ? location : best);
+          status.dataset.latitude = latitude;
+          status.dataset.longitude = longitude;
+          status.dataset.accuracy = accuracy;
+          status.textContent = nearest.name;
+          status.dataset.state = 'selected';
+          button.disabled = false;
+        }, error => {
+          status.dataset.errorCode = error.code;
+          status.textContent = error.code === 1
+            ? 'Location permission denied' : 'Location unavailable';
+          status.dataset.state = error.code === 1 ? 'denied' : 'unavailable';
+          button.disabled = false;
+        }, { maximumAge: 0, timeout: 5000 });
+      });
+    </script>
+  </body>
+</html>
