@@ -46,7 +46,7 @@ to attach to an existing browser.
 
 ## Examples
 
-The launch examples use local [HTML pages](examples/pages), with a localhost server where
+The examples use local [HTML pages](examples/pages), with a localhost server where
 cookies or HTTP requests are needed. No external site is required. They open a
 Chrome window by default; append `-- --headless=new` for headless mode.
 
@@ -54,12 +54,12 @@ Chrome window by default; append `-- --headless=new` for headless mode.
 cargo run -p rustcdp-examples --example checkout
 ```
 
-Replace `checkout` with a launch example below:
+Replace `checkout` with any example below:
 
 | Example | Demonstrates |
 | --- | --- |
 | [navigation](examples/navigation.rs) | Observe a click-triggered navigation and wait for application readiness |
-| [connect](examples/connect.rs) | Inspect an existing browser and dispose a temporary tab without stopping Chrome |
+| [connect](examples/connect.rs) | Attach and disconnect a second connection without stopping the launched browser |
 | [native_controls](examples/native_controls.rs) | Save account preferences with native select and checkbox helpers |
 | [structured_extract](examples/structured_extract.rs) | Pass JSON arguments and extract a typed seed catalogue |
 | [live_search](examples/live_search.rs) | Reuse locators across changing search results and wait for DOM states |
@@ -81,13 +81,6 @@ Replace `checkout` with a launch example below:
 | [response_body](examples/response_body.rs) | Correlate network events and read a completed response body |
 | [request_interception](examples/request_interception.rs) | Continue requests, replace responses, and block analytics |
 | [file_upload](examples/file_upload.rs) | Select a CSV and read its local preview; no server upload |
-
-`connect` takes an existing browser endpoint and optional target ID instead of
-Chrome launch flags:
-
-```sh
-cargo run -p rustcdp-examples --example connect -- http://127.0.0.1:9222
-```
 
 ## API documentation
 
