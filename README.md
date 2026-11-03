@@ -46,41 +46,7 @@ to attach to an existing browser.
 
 ## Examples
 
-The examples use local [HTML pages](examples/pages), with a localhost server where
-cookies or HTTP requests are needed. No external site is required. They open a
-Chrome window by default; append `-- --headless=new` for headless mode.
-
-```sh
-cargo run -p rustcdp-examples --example checkout
-```
-
-Replace `checkout` with any example below:
-
-| Example | Demonstrates |
-| --- | --- |
-| [navigation](examples/navigation.rs) | Observe a click-triggered navigation and wait for application readiness |
-| [connect](examples/connect.rs) | Attach and disconnect a second connection without stopping the launched browser |
-| [native_controls](examples/native_controls.rs) | Save account preferences with native select and checkbox helpers |
-| [structured_extract](examples/structured_extract.rs) | Pass JSON arguments and extract a typed seed catalogue |
-| [live_search](examples/live_search.rs) | Reuse locators across changing search results and wait for DOM states |
-| [parallel_pages](examples/parallel_pages.rs) | Collect independent warehouse summaries concurrently |
-| [local_storage](examples/local_storage.rs) | Restore a saved draft across navigation and remove its storage key |
-| [dialogs](examples/dialogs.rs) | Answer a prompt and dismiss a blocking confirmation dialog |
-| [popup_handoff](examples/popup_handoff.rs) | Discover a popup and return its seat selection to the opener |
-| [downloads](examples/downloads.rs) | Correlate browser download events and verify an exported CSV |
-| [responsive_preview](examples/responsive_preview.rs) | Check responsive layout and light/dark appearance |
-| [geolocation](examples/geolocation.rs) | Emulate coordinates and exercise granted and denied permissions |
-| [offline_recovery](examples/offline_recovery.rs) | Fail an uncached request offline, then restore connectivity and retry |
-| [init_script](examples/init_script.rs) | Set configuration before page scripts and remove the registration |
-| [accessibility_tree](examples/accessibility_tree.rs) | Inspect accessible roles, names and state, then repair an unnamed control |
-| [checkout](examples/checkout.rs) | Fill and submit a form with Unicode text and keyboard input |
-| [page_report](examples/page_report.rs) | Export a report to PNG and PDF |
-| [frame_walk](examples/frame_walk.rs) | Traverse nested frames and update inventory |
-| [event_watch](examples/event_watch.rs) | Subscribe to console events before navigation |
-| [browser_contexts](examples/browser_contexts.rs) | Isolate cookies and share them between tabs in one context |
-| [response_body](examples/response_body.rs) | Correlate network events and read a completed response body |
-| [request_interception](examples/request_interception.rs) | Continue requests, replace responses, and block analytics |
-| [file_upload](examples/file_upload.rs) | Select a CSV and read its local preview; no server upload |
+See [examples](examples/README.md) for runnable examples and instructions.
 
 ## API documentation
 
