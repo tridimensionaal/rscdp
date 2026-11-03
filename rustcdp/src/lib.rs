@@ -40,6 +40,12 @@
 //!
 //! The browser leaves scope on success or an early return from `?`. Automatic
 //! process cleanup completes during Drop; cleanup errors cannot be returned.
+//!
+//! # Diagnostics
+//!
+//! Enable the optional `tracing` feature for CDP request diagnostics. The library
+//! emits debug events on the `rustcdp` target; configure a tracing subscriber in
+//! your application to collect them. It does not install a subscriber itself.
 
 #[cfg(feature = "tracing")]
 mod diagnostics;
