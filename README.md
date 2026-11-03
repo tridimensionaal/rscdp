@@ -89,11 +89,6 @@ Chrome launch flags:
 cargo run -p rustcdp-examples --example connect -- http://127.0.0.1:9222
 ```
 
-Report files go to `rustcdp-report/` in the system temporary directory;
-Downloads go to `rustcdp-downloads/` in the system temporary directory.
-Set `RUSTCDP_OUTPUT` to choose the output directory for either example. Example dependencies are separate
-from the library's dependencies.
-
 ## API documentation
 
 - [Browser](rustcdp/src/browser.rs), [Page](rustcdp/src/page.rs), and

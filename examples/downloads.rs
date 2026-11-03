@@ -1,4 +1,4 @@
-//! Wait for a browser-managed CSV download and verify its saved contents.
+//! Download a CSV into output/downloads/ and verify its saved contents.
 mod common;
 #[path = "common/server.rs"]
 mod server;
@@ -13,10 +13,7 @@ use rustcdp::{
     },
     session::TypedEvents,
 };
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 async fn completed_download(
     beginnings: &mut TypedEvents<DownloadWillBegin>,
@@ -101,10 +98,8 @@ async fn export_history(browser: &Browser, server: &server::Server, output: &Pat
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let output = std::env::var_os("RUSTCDP_OUTPUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("rustcdp-downloads"));
-    tokio::fs::create_dir_all(&output).await?;
+    let output = Path::new("output/downloads");
+    tokio::fs::create_dir_all(output).await?;
     let output = output.canonicalize()?;
     let server = server::Server::start().await?;
     let browser = common::launch().await?;
