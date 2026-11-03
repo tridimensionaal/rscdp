@@ -56,6 +56,15 @@ Generate and open the API reference for this checkout:
 cargo doc -p rustcdp --no-deps --open
 ```
 
+## CDP bindings
+
+[Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
+defines the commands and events used to control Chrome. The bindings turn its
+protocol schemas into Rust types, providing typed commands, responses, and events
+without hand-writing each JSON message. Cargo generates them automatically during
+builds from the pinned schemas. See the [generation instructions](rustcdp/protocol/README.md#generating-bindings)
+for details and schema updates.
+
 ## Development
 
 See [development instructions](scripts/README.md) for checks and running all examples.

@@ -1,17 +1,33 @@
-# Pinned CDP schemas
+# CDP bindings
+
+## Generating bindings
+
+From the repository root, build the library:
+
+```sh
+cargo build -p rustcdp
+```
+
+Cargo runs [build.rs](../build.rs), which invokes the [generator](../codegen/mod.rs)
+on [browser_protocol.json](browser_protocol.json) and
+[js_protocol.json](js_protocol.json). It writes `cdp.rs` into Cargo's `OUT_DIR`;
+the [library](../src/lib.rs) includes that file as `rustcdp::cdp`. Cargo reruns
+generation when the schemas or generator change. No separate generation command
+is needed, and generated files should not be edited or committed.
+
+[schema.rs](../codegen/schema.rs) parses and validates the schemas and resolves
+type references. [emit.rs](../codegen/emit.rs) emits Rust tokens with `quote`.
+The generator parses those tokens with `syn` and formats them with `prettyplease`.
+Generation is deterministic, requires no network access or installed `rustfmt`,
+and uses build dependencies rather than runtime dependencies.
+
+## Pinned schemas
 
 Both JSON files match the upstream Chrome DevTools Protocol snapshot at
 [`ebca9061ecc4c77b7d6b5b8f7b8afe19dc3ab9ed`](https://github.com/ChromeDevTools/devtools-protocol/commit/ebca9061ecc4c77b7d6b5b8f7b8afe19dc3ab9ed)
 (2026-10-27, “Roll protocol to r1727723”) byte-for-byte.
-The generator in `codegen/`, invoked by `build.rs`, produces Rust bindings without
-network access. Update the snapshots deliberately when updating protocol support,
-not on every build.
-
-`codegen/schema.rs` parses and validates the schemas and resolves type references.
-`codegen/emit.rs` emits Rust tokens with `quote`. The build hook parses those tokens
-with `syn`, formats them with `prettyplease`, and writes only to Cargo's `OUT_DIR`.
-Generation is deterministic and does not require an installed `rustfmt` binary.
-The generator's dependencies are build dependencies, not runtime dependencies.
+The schemas are checked in. Update them deliberately when updating protocol
+support, not on every build.
 
 Immutable source files and SHA-256 hashes:
 
