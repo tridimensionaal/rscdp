@@ -1,4 +1,6 @@
-# Development
+# Contributing
+
+These instructions are for contributors changing the library or its examples.
 
 The workspace contains the library in `rustcdp/` and examples in `examples/`.
 Run these commands from the repository root:
@@ -25,7 +27,7 @@ cargo build -p rustcdp-examples --examples
 python3 scripts/browser_smoke.py
 ```
 
-[browser_smoke.py](browser_smoke.py) runs each compiled example headlessly in a
+[browser_smoke.py](scripts/browser_smoke.py) runs each compiled example headlessly in a
 separate temporary working directory, checking that it succeeds without relying
 on the repository's working directory. Each run has a 60-second timeout; on a
 timeout, the script kills that run's process group, including Chrome.

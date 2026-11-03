@@ -16,6 +16,8 @@ rustcdp = { path = "../rustcdp/rustcdp" }
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 ```
 
+Put this example in your application's `src/main.rs`:
+
 ```rust
 use rustcdp::{Browser, Page, Result};
 use std::time::Duration;
@@ -65,6 +67,7 @@ without hand-writing each JSON message. Cargo generates them automatically durin
 builds from the pinned schemas. See the [generation instructions](rustcdp/protocol/README.md#generating-bindings)
 for details and schema updates.
 
-## Development
+## Contributing
 
-See [development instructions](scripts/README.md) for checks and running all examples.
+For changes to this repository, see [contributor instructions](CONTRIBUTING.md)
+for formatting, tests, and browser checks.
