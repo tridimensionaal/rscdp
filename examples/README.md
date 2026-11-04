@@ -24,7 +24,7 @@ Replace `checkout` with any example below:
 | [dialogs](dialogs.rs) | Answer a prompt and dismiss a blocking confirmation dialog |
 | [popup_handoff](popup_handoff.rs) | Discover a popup and return its seat selection to the opener |
 | [downloads](downloads.rs) | Correlate browser download events and read an exported CSV |
-| [responsive_preview](responsive_preview.rs) | Check responsive layout and light/dark appearance |
+| [responsive_preview](responsive_preview.rs) | Inspect responsive layout and light/dark appearance |
 | [geolocation](geolocation.rs) | Emulate coordinates and exercise granted and denied permissions |
 | [offline_recovery](offline_recovery.rs) | Fail an uncached request offline, then restore connectivity and retry |
 | [init_script](init_script.rs) | Set configuration before page scripts and remove the registration |

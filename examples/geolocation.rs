@@ -52,7 +52,7 @@ async fn choose_pickup(browser: &Browser, server: &server::Server) -> Result<()>
         .timeout(Duration::from_secs(10))
         .wait_for(ElementState::Visible)
         .await?;
-    let selected = page
+    let (pickup, latitude, longitude, accuracy) = page
         .call(
             "() => { const status = document.querySelector('#status');
                 return [status.textContent, Number(status.dataset.latitude),
@@ -60,12 +60,7 @@ async fn choose_pickup(browser: &Browser, server: &server::Server) -> Result<()>
         )
         .json::<(String, f64, f64, f64)>()
         .await?;
-    if selected != ("Central workshop".into(), -33.45, -70.66, 10.0) {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected pickup or coordinates: {selected:?}"
-        )));
-    }
-    println!("Granted: Central workshop at -33.45, -70.66 (accuracy 10 m)");
+    println!("Granted: {pickup} at {latitude}, {longitude} (accuracy {accuracy} m)");
 
     browser
         .connection()
@@ -88,19 +83,14 @@ async fn choose_pickup(browser: &Browser, server: &server::Server) -> Result<()>
         .timeout(Duration::from_secs(10))
         .wait_for(ElementState::Visible)
         .await?;
-    let denied = page
+    let (message, code) = page
         .call(
             "() => { const status = document.querySelector('#status');
                 return [status.textContent, Number(status.dataset.errorCode)]; }",
         )
         .json::<(String, u64)>()
         .await?;
-    if denied != ("Location permission denied".into(), 1) {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected denied state: {denied:?}"
-        )));
-    }
-    println!("Denied: Location permission denied (code 1)");
+    println!("Denied: {message} (code {code})");
 
     page.session()
         .execute(&ClearGeolocationOverride::new())

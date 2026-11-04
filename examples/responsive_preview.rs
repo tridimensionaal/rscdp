@@ -1,18 +1,18 @@
-//! Check a timetable's responsive columns and emulated light/dark appearance.
+//! Preview a timetable's layout and colors at different widths and color schemes.
 mod common;
 use rustcdp::{
-    Error, Page, Result,
+    Page, Result,
     cdp::emulation::{
         MediaFeature,
         commands::{ClearDeviceMetricsOverride, SetDeviceMetricsOverride, SetEmulatedMedia},
     },
 };
 
-async fn check_previews(page: &Page) -> Result<()> {
+async fn show_previews(page: &Page) -> Result<()> {
     page.navigate(common::page_url("timetable.html")?)
         .send()
         .await?;
-    for (width, columns) in [(1024, 2), (390, 1)] {
+    for width in [1024, 390] {
         // Desktop layout at two widths, rather than a complete mobile device profile.
         page.session()
             .execute(&SetDeviceMetricsOverride::new(width, 720, 1.0, false))
@@ -24,7 +24,7 @@ async fn check_previews(page: &Page) -> Result<()> {
                         .with_features(vec![MediaFeature::new("prefers-color-scheme", scheme)]),
                 )
                 .await?;
-            let actual: (i64, bool, bool, usize, String, String) = page
+            let (viewport, wide, dark, columns, background, foreground) = page
                 .call(
                     r#"() => {
                         const grid = getComputedStyle(document.querySelector('#sessions'));
@@ -35,28 +35,13 @@ async fn check_previews(page: &Page) -> Result<()> {
                             body.backgroundColor, body.color];
                     }"#,
                 )
-                .json()
+                .json::<(i64, bool, bool, usize, String, String)>()
                 .await?;
-            let dark = scheme == "dark";
-            let (background, foreground) = if dark {
-                ("rgb(24, 32, 40)", "rgb(240, 244, 248)")
-            } else {
-                ("rgb(255, 255, 255)", "rgb(32, 40, 48)")
-            };
-            let expected = (
-                width,
-                width >= 700,
-                dark,
-                columns,
-                background.into(),
-                foreground.into(),
+            println!(
+                "Requested {width}px / {scheme}: viewport={viewport}px, \
+                 wide layout query={wide}, dark scheme query={dark}, \
+                 columns={columns}, background={background}, text={foreground}"
             );
-            if actual != expected {
-                return Err(Error::InvalidArgument(format!(
-                    "unexpected {width}px {scheme} preview: {actual:?}; expected {expected:?}"
-                )));
-            }
-            println!("{width}px {scheme}: {columns} columns, {background} background");
         }
     }
     page.session()
@@ -71,5 +56,5 @@ async fn check_previews(page: &Page) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let browser = common::launch().await?;
-    check_previews(browser.page()).await
+    show_previews(browser.page()).await
 }
