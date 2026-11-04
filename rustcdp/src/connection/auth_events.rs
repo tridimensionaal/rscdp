@@ -15,11 +15,13 @@ pub(super) type AuthSubscriptions = Arc<Mutex<HashMap<EventKey, Vec<Weak<Sender>
 
 pub(crate) struct AuthEvent {
     pub(crate) id: String,
+    pub(crate) network_id: Option<String>,
     pub(crate) kind: AuthEventKind,
 }
 
 pub(crate) enum AuthEventKind {
     Request,
+    NetworkFailure,
     Response {
         rejected: bool,
         failed: bool,
@@ -46,16 +48,37 @@ impl Sender {
         if self.failure.borrow().is_some() {
             return;
         }
-        let Some(id) = event.params["requestId"].as_str() else {
+        let Some(id) = event.params["requestId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+        else {
             self.failure
                 .send_replace(Some("authentication event has no request ID"));
             return;
+        };
+        let network_id = if event.method == "Fetch.requestPaused" {
+            match event.params.get("networkId") {
+                None => None,
+                Some(value) => match value.as_str().filter(|id| !id.is_empty()) {
+                    Some(id) => Some(id),
+                    None => {
+                        self.failure
+                            .send_replace(Some("authentication event has invalid Network ID"));
+                        return;
+                    }
+                },
+            }
+        } else {
+            None
         };
         let challenge = event.method == "Fetch.authRequired";
         let origin = challenge
             .then(|| event.params["authChallenge"]["origin"].as_str())
             .flatten();
-        let bytes = id.len().saturating_add(origin.map_or(0, str::len));
+        let bytes = id
+            .len()
+            .saturating_add(origin.map_or(0, str::len))
+            .saturating_add(network_id.map_or(0, str::len));
         if bytes > TEXT_BUDGET {
             self.failure.send_replace(Some(OVERFLOW));
             return;
@@ -65,7 +88,9 @@ impl Sender {
             return;
         };
         // Keep only fields needed for authentication; headers and bodies can be large.
-        let kind = if challenge {
+        let kind = if event.method == "Network.loadingFailed" {
+            AuthEventKind::NetworkFailure
+        } else if challenge {
             AuthEventKind::Challenge {
                 is_proxy: event.params["authChallenge"]["source"] == "Proxy",
                 origin: origin.map(str::to_owned),
@@ -83,6 +108,7 @@ impl Sender {
         let queued = QueuedEvent {
             event: AuthEvent {
                 id: id.into(),
+                network_id: network_id.map(str::to_owned),
                 kind,
             },
             _permit: permit,
@@ -125,7 +151,11 @@ impl Connection {
             senders.retain(|sender| sender.strong_count() > 0);
             !senders.is_empty()
         });
-        for method in ["Fetch.authRequired", "Fetch.requestPaused"] {
+        for method in [
+            "Fetch.authRequired",
+            "Fetch.requestPaused",
+            "Network.loadingFailed",
+        ] {
             subscriptions
                 .entry((Some(session.into()), method.into()))
                 .or_default()
@@ -184,5 +214,96 @@ impl AuthEvents {
                 event = self.receiver.recv() => return event.map(|queued| queued.event).ok_or_else(|| close_error(&self.closed.borrow())),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sender() -> (Arc<Sender>, mpsc::Receiver<QueuedEvent>) {
+        let (sender, receiver) = mpsc::channel(CAPACITY);
+        let (failure, _) = watch::channel(None);
+        (
+            Arc::new(Sender {
+                sender,
+                budget: Arc::new(Semaphore::new(TEXT_BUDGET)),
+                failure,
+            }),
+            receiver,
+        )
+    }
+
+    #[test]
+    fn network_failure_is_not_a_fetch_request() {
+        let (sender, mut events) = sender();
+        sender.send(
+            &serde_json::from_value(json!({
+                "method":"Network.loadingFailed", "sessionId":"session",
+                "params":{"requestId":"network-id", "errorText":"net::ERR_ABORTED"}
+            }))
+            .unwrap(),
+        );
+        let event = events.try_recv().unwrap().event;
+        assert_eq!(event.id, "network-id");
+        assert!(!matches!(event.kind, AuthEventKind::Request));
+    }
+    #[test]
+    fn fetch_and_network_ids_are_distinct_and_budgeted() {
+        let (sender, mut events) = sender();
+        sender.send(&serde_json::from_value(json!({
+            "method":"Fetch.requestPaused", "params":{"requestId":"fetch-id","networkId":"network-id"}
+        })).unwrap());
+        let queued = events.try_recv().unwrap();
+        assert_eq!(queued.event.id, "fetch-id");
+        assert_eq!(queued.event.network_id.as_deref(), Some("network-id"));
+        assert!(matches!(queued.event.kind, AuthEventKind::Request));
+        assert_eq!(sender.budget.available_permits(), TEXT_BUDGET - 18);
+        drop(queued);
+        assert_eq!(sender.budget.available_permits(), TEXT_BUDGET);
+    }
+
+    #[test]
+    fn malformed_and_oversized_events_fail_explicitly() {
+        for params in [
+            json!({}),
+            json!({"requestId":""}),
+            json!({"requestId":42}),
+            json!({"requestId":"fetch", "networkId":42}),
+            json!({"requestId":"fetch", "networkId":""}),
+            json!({"requestId":"fetch", "networkId":"x".repeat(TEXT_BUDGET)}),
+        ] {
+            let (sender, mut events) = sender();
+            sender.send(
+                &serde_json::from_value(json!({"method":"Fetch.requestPaused","params":params}))
+                    .unwrap(),
+            );
+            assert!(sender.failure.borrow().is_some());
+            assert!(events.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn other_sessions_do_not_reach_authentication_and_overflow_is_explicit() {
+        let (sender, mut events) = sender();
+        let subscriptions = Arc::new(Mutex::new(HashMap::from([(
+            (Some("selected".into()), "Network.loadingFailed".into()),
+            vec![Arc::downgrade(&sender)],
+        )])));
+        let mut event:RawEvent=serde_json::from_value(json!({"sessionId":"other","method":"Network.loadingFailed","params":{"requestId":"network"}})).unwrap();
+        dispatch(&subscriptions, &event);
+        assert!(events.try_recv().is_err());
+        event.session_id = Some("selected".into());
+        for _ in 0..CAPACITY {
+            dispatch(&subscriptions, &event);
+        }
+        assert!(sender.failure.borrow().is_none());
+        dispatch(&subscriptions, &event);
+        assert!(sender.failure.borrow().is_some());
+        assert!(matches!(
+            events.try_recv().unwrap().event.kind,
+            AuthEventKind::NetworkFailure
+        ));
     }
 }

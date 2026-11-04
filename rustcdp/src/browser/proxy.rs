@@ -77,8 +77,10 @@ impl Browser {
     /// intended destination; readiness alone does not prove proxy traversal.
     ///
     /// The caller's command deadline limits waiting. Context acquisition and
-    /// authentication setup each have their own 30-second bounds and continue
-    /// after cancellation. Unclaimed contexts are disposed after setup finishes.
+    /// Fetch enablement each have their own 30-second bounds. Authentication first
+    /// acquires shared Network reporting under [`crate::session::DomainGuard`]'s
+    /// independent bounds. Setup and recovery continue after cancellation and can
+    /// extend elapsed time. Unclaimed contexts are disposed after setup finishes.
     pub async fn new_context_with_proxy(&self, proxy: Proxy) -> Result<BrowserContext> {
         self.create_context_with_auth(
             json!({"disposeOnDetach":true,"proxyServer":proxy.server()}),

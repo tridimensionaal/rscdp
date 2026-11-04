@@ -8,11 +8,12 @@
 use crate::{
     Error, Result, Session,
     connection::{AuthEvent, AuthEventKind, AuthEvents},
+    error::with_cleanup,
     proxy::Proxy,
 };
 use serde_json::json;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 use tokio::{
@@ -21,6 +22,8 @@ use tokio::{
 };
 
 const MAX_PENDING: usize = 256;
+const MAX_TRACKED: usize = 4096;
+const TRACKED_TEXT_BUDGET: usize = 4 * 1024 * 1024;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -55,7 +58,9 @@ enum Stop {
 /// The event queue holds at most 4,096 compact events and 4 MiB of request-ID/origin
 /// text, without headers or bodies. Held requests and challenges are each capped
 /// at 256; excess work is aborted or canceled. Queue overflow fails authentication
-/// and triggers recovery rather than silently losing paused requests.
+/// and triggers recovery rather than silently losing paused requests. Outstanding
+/// Fetch/Network correlations have a separate 4,096-entry, 4 MiB ID-text limit,
+/// including IDs retained by the worker's active and queued requests.
 /// See the module documentation for recovery behavior.
 #[must_use = "retain this worker while authentication is needed; await stop() to finish cleanup"]
 pub struct ProxyAuth {
@@ -66,7 +71,9 @@ pub struct ProxyAuth {
 
 impl ProxyAuth {
     /// Arm before navigation. Only one worker may own a session at a time.
-    /// Setup has a 30-second upper bound even when command timeouts are disabled.
+    /// First acquires shared Network reporting under [`crate::session::DomainGuard`]'s
+    /// independent lock and transition bounds, then enables Fetch within 30 seconds.
+    /// Recovery can extend setup beyond these bounds, even after caller cancellation.
     /// Interception covers only this session, not other tabs or separate child
     /// sessions. This does not configure proxy routing or navigate the page.
     /// Retain the returned worker; dropping it requests shutdown.
@@ -82,90 +89,117 @@ impl ProxyAuth {
         let (ready, started) = oneshot::channel();
         let task = session.connection().runtime().spawn(async move {
             let _ownership = ownership;
-            let enable = session.execute_raw(
-                "Fetch.enable",
-                json!({
-                    "patterns": [
-                        {"urlPattern": "*", "requestStage": "Request"},
-                        {"urlPattern": "*", "requestStage": "Response"}
-                    ],
-                    "handleAuthRequests": true
-                }),
-            );
-            let enabled = tokio::select! {
-                result = tokio::time::timeout(SETUP_TIMEOUT, enable) => result
-                    .map_err(|_| Error::Timeout("enabling proxy interception".into()))
-                    .and_then(|result| result),
-                _ = failure.changed() => Err(event_failure(&failure)),
-                _ = stopped.changed() => Err(Error::ProxyAuthentication(
-                    "authentication stopped during setup".into(),
-                )),
-            };
-            if let Err(error) = enabled {
-                status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
-                let _ = ready.send(Err(error));
-                recover_interception(&session).await;
-                return Ok(());
-            }
-            let _ = ready.send(Ok(()));
-            let mut handler = Handler {
-                session: session.clone(),
-                proxy,
-                status: status_sender.clone(),
-                attempted: HashSet::new(),
-                challenges: VecDeque::new(),
-                requests: VecDeque::new(),
-                cold: None,
-                probe: None,
-                gate_open: false,
-                verified: false,
-                rejected: false,
-            };
-            let outcome = if *stopped.borrow() != Stop::Running {
-                Ok(())
-            } else {
-                tokio::select! {
-                    result = handler.run(&mut events) => result,
-                    _ = failure.changed() => Err(event_failure(&failure)),
-                    _ = stopped.changed() => Ok(()),
-                    _ = session.closed() => Ok(()),
-                }
-            };
-            if session.is_closed() {
-                status_sender.send_replace(ProxyAuthStatus::Stopped);
-                return Ok(());
-            }
-            if let Err(error) = outcome {
-                status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
-                recover_interception(&session).await;
-                return Err(error);
-            }
-            let _ = tokio::time::timeout(DRAIN_TIMEOUT, handler.drain()).await;
-            let disabled = tokio::time::timeout(
-                CLEANUP_TIMEOUT,
-                session.execute_raw("Fetch.disable", json!({})),
-            )
-            .await
-            .map_err(|_| Error::Timeout("disabling proxy interception".into()))
-            .and_then(|result| result)
-            .map(|_| ());
-            let outcome = if failure.borrow().is_some() {
-                Err(event_failure(&failure))
-            } else {
-                disabled
-            };
-            match outcome {
-                Ok(()) => {
-                    status_sender.send_replace(ProxyAuthStatus::Stopped);
-                    Ok(())
-                }
+            // Do not cancel this nested owner: await its bounded acquisition and
+            // recovery so setup/stop cannot leave an unclaimed domain transition.
+            let network = match session.enable_network().await {
+                Ok(network) => network,
                 Err(error) => {
                     status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
-                    // A protocol failure must not leave requests stranded.
+                    let _ = ready.send(Err(error));
+                    return Ok(());
+                }
+            };
+            let outcome = async {
+                if *stopped.borrow() != Stop::Running {
+                    let _ = ready.send(Err(Error::ProxyAuthentication(
+                        "authentication stopped during setup".into(),
+                    )));
+                    status_sender.send_replace(ProxyAuthStatus::Stopped);
+                    return Ok(());
+                }
+                let enable = session.execute_raw(
+                    "Fetch.enable",
+                    json!({
+                        "patterns": [
+                            {"urlPattern": "*", "requestStage": "Request"},
+                            {"urlPattern": "*", "requestStage": "Response"}
+                        ],
+                        "handleAuthRequests": true
+                    }),
+                );
+                let enabled = tokio::select! {
+                    result = tokio::time::timeout(SETUP_TIMEOUT, enable) => result
+                        .map_err(|_| Error::Timeout("enabling proxy interception".into()))
+                        .and_then(|result| result),
+                    _ = failure.changed() => Err(event_failure(&failure)),
+                    _ = stopped.changed() => Err(Error::ProxyAuthentication(
+                        "authentication stopped during setup".into(),
+                    )),
+                };
+                if let Err(error) = enabled {
+                    status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
+                    let _ = ready.send(Err(error));
                     recover_interception(&session).await;
-                    Err(error)
+                    return Ok(());
+                }
+                let _ = ready.send(Ok(()));
+                let mut handler = Handler {
+                    session: session.clone(),
+                    proxy,
+                    status: status_sender.clone(),
+                    attempted: HashSet::new(),
+                    network_requests: HashMap::new(),
+                    challenges: VecDeque::new(),
+                    requests: VecDeque::new(),
+                    cold: None,
+                    probe: None,
+                    gate_open: false,
+                    verified: false,
+                    rejected: false,
+                };
+                let outcome = if *stopped.borrow() != Stop::Running {
+                    Ok(())
+                } else {
+                    tokio::select! {
+                        result = handler.run(&mut events) => result,
+                        _ = failure.changed() => Err(event_failure(&failure)),
+                        _ = stopped.changed() => Ok(()),
+                        _ = session.closed() => Ok(()),
+                    }
+                };
+                if session.is_closed() {
+                    status_sender.send_replace(ProxyAuthStatus::Stopped);
+                    return Ok(());
+                }
+                if let Err(error) = outcome {
+                    status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
+                    recover_interception(&session).await;
+                    return Err(error);
+                }
+                let _ = tokio::time::timeout(DRAIN_TIMEOUT, handler.drain()).await;
+                let disabled = tokio::time::timeout(
+                    CLEANUP_TIMEOUT,
+                    session.execute_raw("Fetch.disable", json!({})),
+                )
+                .await
+                .map_err(|_| Error::Timeout("disabling proxy interception".into()))
+                .and_then(|result| result)
+                .map(|_| ());
+                let outcome = if failure.borrow().is_some() {
+                    Err(event_failure(&failure))
+                } else {
+                    disabled
+                };
+                match outcome {
+                    Ok(()) => {
+                        status_sender.send_replace(ProxyAuthStatus::Stopped);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
+                        // A protocol failure must not leave requests stranded.
+                        recover_interception(&session).await;
+                        Err(error)
+                    }
                 }
             }
+            .await;
+            // Fetch recovery must finish before releasing Network reporting.
+            let outcome = with_cleanup(outcome, network.close().await);
+            if let Err(error) = &outcome {
+                status_sender.send_replace(ProxyAuthStatus::Failed(error.to_string()));
+            }
+            outcome
         });
         let auth = Self {
             stop,
@@ -226,7 +260,9 @@ impl ProxyAuth {
     }
 
     /// Stop the worker and await cleanup. Fetch disable has a one-second limit
-    /// before recovery, even when ordinary command timeouts are disabled.
+    /// before recovery, even when ordinary command timeouts are disabled. Shared
+    /// Network reporting is released afterward under [`crate::session::DomainGuard`]'s
+    /// independent cleanup bounds.
     /// Canceling this wait leaves cleanup running; another call can await it.
     /// Concurrent calls serialize; only the call that joins reports a worker error.
     pub async fn stop(&self) -> Result<()> {
@@ -254,6 +290,7 @@ struct Handler {
     proxy: Proxy,
     status: watch::Sender<ProxyAuthStatus>,
     attempted: HashSet<String>,
+    network_requests: HashMap<String, String>,
     challenges: VecDeque<String>,
     requests: VecDeque<String>,
     cold: Option<String>,
@@ -272,13 +309,30 @@ impl Handler {
     }
 
     async fn event(&mut self, event: AuthEvent) -> Result<()> {
-        let AuthEvent { id, kind } = event;
+        let AuthEvent {
+            id,
+            network_id,
+            kind,
+        } = event;
         let (rejected, failed) = match kind {
+            AuthEventKind::NetworkFailure => {
+                if let Some(fetch_id) = self.network_requests.remove(&id) {
+                    self.retire(&fetch_id);
+                    self.advance().await?;
+                }
+                return Ok(());
+            }
             AuthEventKind::Challenge { is_proxy, origin } => {
                 self.challenge(id, is_proxy, origin.as_deref()).await?;
                 return Ok(());
             }
             AuthEventKind::Request => {
+                if let Some(network_id) = network_id {
+                    self.track(&id, network_id)?;
+                }
+                if !self.gate_open && !self.rejected {
+                    self.require_correlation(&id)?;
+                }
                 self.request(id).await?;
                 return Ok(());
             }
@@ -287,13 +341,7 @@ impl Handler {
         self.continue_request(&id).await?;
         let attempted = self.probe.as_ref() == Some(&id);
         let cold = self.cold.as_ref() == Some(&id);
-        if attempted {
-            self.probe = None;
-            self.attempted.remove(&id);
-        }
-        if cold {
-            self.cold = None;
-        }
+        self.retire(&id);
         if !attempted && !cold {
             if self.gate_open
                 && self.probe.is_none()
@@ -320,8 +368,76 @@ impl Handler {
                 self.status.send_replace(ProxyAuthStatus::Unchallenged);
             }
         }
-        // A network failure is inconclusive: retire this probe and let another
-        // request try, instead of latching an incorrect credential rejection.
+        // Failure is inconclusive; retire the slot without rejecting credentials.
+        self.advance().await
+    }
+
+    fn retire(&mut self, id: &str) {
+        self.network_requests.retain(|_, fetch_id| fetch_id != id);
+        self.attempted.remove(id);
+        self.requests.retain(|pending| pending != id);
+        self.challenges.retain(|pending| pending != id);
+        if self.cold.as_deref() == Some(id) {
+            self.cold = None;
+        }
+        if self.probe.as_deref() == Some(id) {
+            self.probe = None;
+        }
+    }
+
+    fn require_correlation(&self, id: &str) -> Result<()> {
+        if self
+            .network_requests
+            .values()
+            .any(|fetch_id| fetch_id == id)
+        {
+            Ok(())
+        } else {
+            Err(Error::ProxyAuthentication(
+                "active authentication request has no Network identity".into(),
+            ))
+        }
+    }
+
+    fn check_tracking_space(&self, additional: usize) -> Result<()> {
+        // Include every retained string copy, not just map keys and values.
+        let text = self
+            .network_requests
+            .iter()
+            .map(|(network, fetch)| network.len() + fetch.len())
+            .chain(self.attempted.iter().map(String::len))
+            .chain(self.requests.iter().map(String::len))
+            .chain(self.challenges.iter().map(String::len))
+            .chain(self.cold.iter().map(String::len))
+            .chain(self.probe.iter().map(String::len))
+            .fold(additional, usize::saturating_add);
+        if text > TRACKED_TEXT_BUDGET {
+            return Err(Error::ProxyAuthentication(
+                "authentication request tracking exceeded its text capacity".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn track(&mut self, id: &str, network: String) -> Result<()> {
+        // A redirect may reuse a Network ID. Later predecessor retirement only
+        // removes mappings whose Fetch identity still matches that predecessor.
+        self.network_requests
+            .retain(|key, fetch| key != &network && fetch != id);
+        if self.network_requests.len() >= MAX_TRACKED {
+            return Err(Error::ProxyAuthentication(
+                "authentication request tracking exceeded its capacity".into(),
+            ));
+        }
+        self.check_tracking_space(network.len().saturating_add(id.len()))?;
+        self.network_requests.insert(network, id.into());
+        Ok(())
+    }
+
+    async fn advance(&mut self) -> Result<()> {
+        if self.rejected {
+            return Ok(());
+        }
         if self.probe.is_none()
             && let Some(id) = self.challenges.pop_front()
         {
@@ -348,11 +464,13 @@ impl Handler {
         } else if self.gate_open || self.cold.as_ref() == Some(&id) {
             self.continue_request(&id).await?;
         } else if self.cold.is_none() {
+            self.check_tracking_space(id.len())?;
             self.cold = Some(id.clone());
             self.continue_request(&id).await?;
         } else if self.requests.len() >= MAX_PENDING {
             self.fail(&id).await?;
         } else if !self.requests.contains(&id) {
+            self.check_tracking_space(id.len())?;
             self.requests.push_back(id);
         }
         Ok(())
@@ -371,6 +489,7 @@ impl Handler {
                 "challenge origin does not match the configured proxy".into(),
             ));
         }
+        self.require_correlation(&id)?;
         if self.attempted.contains(&id) {
             self.respond(&id, "CancelAuth").await?;
             return self.reject().await;
@@ -379,6 +498,7 @@ impl Handler {
             if self.challenges.len() >= MAX_PENDING {
                 self.respond(&id, "CancelAuth").await?;
             } else if !self.challenges.contains(&id) {
+                self.check_tracking_space(id.len())?;
                 self.challenges.push_back(id);
             }
             return Ok(());
@@ -391,6 +511,7 @@ impl Handler {
             .proxy
             .credentials()
             .ok_or_else(|| Error::ProxyAuthentication("missing credentials".into()))?;
+        self.check_tracking_space(id.len().saturating_mul(2))?;
         self.verified = false;
         self.status.send_replace(ProxyAuthStatus::Pending);
         self.probe = Some(id.clone());
@@ -543,3 +664,8 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
+mod state_tests;
