@@ -244,7 +244,9 @@ impl PreparedNavigation<'_> {
                             }
                             continue;
                         }
-                        if event.frame.parent_id.is_some() || event.frame.loader_id.0.is_empty() {
+                        // An attached iframe is this target's root even though it
+                        // still has a parent in the browser's full frame tree.
+                        if event.frame.loader_id.0.is_empty() {
                             return Err(Error::Navigation(
                                 "root commit has no usable document identity".into(),
                             ));
@@ -531,3 +533,6 @@ impl Page {
         Ok(true)
     }
 }
+
+#[cfg(test)]
+mod tests;
