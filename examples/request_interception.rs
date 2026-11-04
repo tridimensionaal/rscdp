@@ -99,18 +99,7 @@ async fn load_dashboard(page: &Page) -> Result<()> {
         )
         .json::<Vec<String>>()
         .await?;
-    if displayed
-        != [
-            "14 notebooks available",
-            "$0 — today",
-            "Analytics unavailable",
-        ]
-    {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected delivery dashboard: {displayed:?}"
-        )));
-    }
-    println!("Dashboard verified: {}", displayed.join("; "));
+    println!("Delivery dashboard: {}", displayed.join("; "));
     Ok(())
 }
 

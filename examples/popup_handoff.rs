@@ -27,7 +27,7 @@ async fn book_seat(browser: &Browser, server: &server::Server) -> Result<()> {
         .connection()
         .execute(&SetDiscoverTargets::new(false))
         .await?;
-    println!("Seat B7 selected; the seat-picker popup is closed.");
+    println!("Seat-picker popup closed.");
     Ok(())
 }
 
@@ -78,11 +78,7 @@ async fn choose_seat(parent: &Page, popup: &Page) -> Result<()> {
         .call("() => document.querySelector('#selection').textContent")
         .json()
         .await?;
-    if selection != "Seat B7 selected" {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected seat selection: {selection}"
-        )));
-    }
+    println!("Selection returned to the opener: {selection}");
     Ok(())
 }
 

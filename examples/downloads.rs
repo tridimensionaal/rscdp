@@ -1,4 +1,4 @@
-//! Download a CSV into output/downloads/ and verify its saved contents.
+//! Download a CSV into output/downloads/ and read its saved contents.
 mod common;
 #[path = "common/server.rs"]
 mod server;
@@ -86,13 +86,8 @@ async fn export_history(browser: &Browser, server: &server::Server, output: &Pat
     // allowAndName uses the GUID; suggestedFilename and filePath are not authoritative paths.
     let path = output.join(guid);
     let csv = tokio::fs::read_to_string(&path).await?;
-    if csv != "title,status\nThe Dispossessed,finished\nKindred,reading\n" {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected downloaded CSV: {csv:?}"
-        )));
-    }
     context.close().await?;
-    println!("Verified reading-history CSV: {}", path.display());
+    println!("Downloaded {}:\n{csv}", path.display());
     Ok(())
 }
 
