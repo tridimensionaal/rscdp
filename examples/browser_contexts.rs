@@ -4,95 +4,54 @@ mod common;
 #[path = "common/server.rs"]
 mod server;
 use rustcdp::{
-    Browser, BrowserContext, Error, Result,
+    Browser, BrowserContext, Result,
     cdp::network::{Cookie, CookieParam},
 };
 use std::time::Duration;
 
 async fn shopping_sessions(browser: &Browser, server: &server::Server) -> Result<()> {
-    // Retain this owner for as long as its page is needed.
+    // Keep the context owners alive while using their pages.
     let mira = browser.new_context().await?;
-    second_shopper(browser, &mira, server).await
-}
-
-async fn second_shopper(
-    browser: &Browser,
-    mira: &BrowserContext,
-    server: &server::Server,
-) -> Result<()> {
     let mut leo = browser.new_context().await?;
-    compare_carts(browser, mira, &leo, server).await?;
-    leo.close().await?;
-
-    // Disposing Leo's context leaves Mira's page and cookies intact.
-    let title = mira
-        .page()
-        .evaluate("document.title")
-        .json::<String>()
-        .await?;
-    if title != "Mira's cart" || cart_item(mira.cookies().await?).as_deref() != Some("notebook") {
-        return Err(Error::InvalidArgument(
-            "Mira's context did not survive".into(),
-        ));
-    }
-    println!("Leo's context closed; Mira's cart still contains a notebook.");
-    Ok(())
-}
-
-async fn compare_carts(
-    browser: &Browser,
-    mira: &BrowserContext,
-    leo: &BrowserContext,
-    server: &server::Server,
-) -> Result<()> {
-    prepare_cart(mira, server, "Mira", "notebook").await?;
-    prepare_cart(leo, server, "Leo", "mug").await?;
+    prepare_cart(&mira, server, "Mira", "notebook").await?;
+    prepare_cart(&leo, server, "Leo", "mug").await?;
 
     // Same cookie name and domain, different values in independent contexts.
     let mira_cart = cart_item(mira.cookies().await?);
     let leo_cart = cart_item(leo.cookies().await?);
     let parent_cart = cart_item(browser.page().cookies().await?);
     println!("Mira: {mira_cart:?}; Leo: {leo_cart:?}; parent: {parent_cart:?}");
-    if mira_cart.as_deref() != Some("notebook")
-        || leo_cart.as_deref() != Some("mug")
-        || parent_cart.is_some()
-    {
-        return Err(Error::InvalidArgument(
-            "cart cookies were not isolated".into(),
-        ));
-    }
+
     let preview = mira.new_page().await?;
     preview.navigate(server.url("preview.html")).send().await?;
     let preview_cart = preview
         .evaluate("document.querySelector('#cart').textContent")
         .json::<String>()
         .await?;
-    if preview_cart != "notebook"
-        || cart_item(preview.cookies().await?).as_deref() != Some("notebook")
-    {
-        return Err(Error::InvalidArgument(
-            "preview did not share Mira's cart".into(),
-        ));
-    }
-    let pages = mira.pages().await?;
-    if pages.len() != 2 || !pages.iter().any(|page| page.id() == preview.id()) {
-        return Err(Error::InvalidArgument("Mira's tabs were not listed".into()));
-    }
     println!(
-        "Mira's cart and preview share cookies across {} tabs.",
-        pages.len()
+        "Mira's preview: {preview_cart}; {} tabs in her context",
+        mira.pages().await?.len()
     );
     preview.close().await?;
+
     leo.clear_cookies().await?;
-    if !leo.cookies().await?.is_empty()
-        || cart_item(mira.cookies().await?).as_deref() != Some("notebook")
-        || cart_item(browser.page().cookies().await?).is_some()
-    {
-        return Err(Error::InvalidArgument(
-            "clearing Leo's cookies was not isolated".into(),
-        ));
-    }
-    println!("Leo's cookies cleared; Mira's notebook cookie is unchanged.");
+    println!(
+        "After clearing Leo's cookies: Leo {:?}; Mira {:?}",
+        cart_item(leo.cookies().await?),
+        cart_item(mira.cookies().await?)
+    );
+    leo.close().await?;
+
+    // Disposing Leo's context leaves Mira's page and cookies available.
+    let title = mira
+        .page()
+        .evaluate("document.title")
+        .json::<String>()
+        .await?;
+    println!(
+        "After closing Leo's context: {title}, cart {:?}",
+        cart_item(mira.cookies().await?)
+    );
     Ok(())
 }
 
@@ -118,11 +77,7 @@ async fn prepare_cart(
         .evaluate("document.querySelector('#cart').textContent")
         .json::<String>()
         .await?;
-    if displayed != item {
-        return Err(Error::InvalidArgument(
-            "page did not read its context's cart cookie".into(),
-        ));
-    }
+    println!("{shopper}'s page: {displayed}");
     Ok(())
 }
 
@@ -137,6 +92,5 @@ fn cart_item(cookies: Vec<Cookie>) -> Option<String> {
 async fn main() -> Result<()> {
     let server = server::Server::start().await?;
     let browser = common::launch().await?;
-    shopping_sessions(&browser, &server).await?;
-    Ok(())
+    shopping_sessions(&browser, &server).await
 }

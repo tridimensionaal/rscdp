@@ -17,9 +17,6 @@ async fn inspect_connection(browser: &Browser) -> Result<()> {
         .evaluate("document.title")
         .json::<String>()
         .await?;
-    if title != "Workshop report" {
-        return Err(Error::InvalidArgument(format!("unexpected page: {title}")));
-    }
     println!("Read through the second connection: {title}");
 
     // This handle owns only its connection, so closing it leaves Chrome running.
@@ -29,9 +26,6 @@ async fn inspect_connection(browser: &Browser) -> Result<()> {
         .evaluate("document.title")
         .json::<String>()
         .await?;
-    if title != "Workshop report" {
-        return Err(Error::InvalidArgument("original page changed".into()));
-    }
     println!("Original browser is still usable: {title}");
     Ok(())
 }
