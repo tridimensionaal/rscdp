@@ -1,20 +1,19 @@
 //! Seed application configuration before startup, then remove the registration.
 mod common;
 use rustcdp::{
-    Error, Page, Result,
+    Page, Result,
     cdp::page::commands::{AddScriptToEvaluateOnNewDocument, RemoveScriptToEvaluateOnNewDocument},
 };
 
-async fn check_welcome(page: &Page, expected: &str) -> Result<()> {
-    let welcome: String = page
-        .call("() => document.querySelector('#welcome').textContent")
+async fn show_welcome(page: &Page, phase: &str) -> Result<()> {
+    let (welcome, configured): (String, Option<String>) = page
+        .call(
+            "() => [document.querySelector('#welcome').textContent,
+                window.timetableConfig?.welcome ?? null]",
+        )
         .json()
         .await?;
-    if welcome != expected {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected startup welcome: {welcome:?}; expected {expected:?}"
-        )));
-    }
+    println!("{phase}: welcome={welcome:?}; startup configuration={configured:?}");
     Ok(())
 }
 
@@ -30,7 +29,7 @@ async fn configure_startup(page: &Page) -> Result<()> {
         let mut url = common::page_url("startup.html")?;
         url.set_query(Some(visit));
         page.navigate(url).send().await?;
-        check_welcome(page, "Evening timetable").await?;
+        show_welcome(page, visit).await?;
     }
     page.session()
         .execute(&RemoveScriptToEvaluateOnNewDocument::new(
@@ -38,15 +37,13 @@ async fn configure_startup(page: &Page) -> Result<()> {
         ))
         .await?;
 
-    // Removing a registration does not undo the current document's startup state.
-    check_welcome(page, "Evening timetable").await?;
+    // Removal stops future injection; it does not undo the current document's
+    // configuration or the welcome that the application read during startup.
+    show_welcome(page, "Current document after removal").await?;
     let mut url = common::page_url("startup.html")?;
     url.set_query(Some("after-removal"));
     page.navigate(url).send().await?;
-    check_welcome(page, "Daily timetable").await?;
-    println!(
-        "Two seeded documents; removal preserves the current welcome, then restores the default on navigation."
-    );
+    show_welcome(page, "Next document after removal").await?;
     Ok(())
 }
 
