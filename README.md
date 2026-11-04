@@ -1,14 +1,16 @@
 # rustcdp
 
-An asynchronous Rust library for Chrome DevTools Protocol (CDP): typed commands
-and events, browser contexts, and page automation. Uses Tokio.
+rustcdp is an asynchronous Rust library for controlling Chrome and Chromium through
+the Chrome DevTools Protocol (CDP). It uses Tokio and provides page automation
+helpers, isolated browser contexts, and typed protocol commands and events.
 
 ## Quickstart
 
-Requires Rust 1.99.1 or newer and Chrome/Chromium. Set `CHROME_PATH` if Chrome
-is not discoverable on your system.
+You need Rust 1.99.1 or newer and Chrome or Chromium. Set `CHROME_PATH` if the
+browser is not discoverable on your system.
 
-Add these dependencies, adjusting the path to the library in your checkout:
+Add these dependencies to your application’s `Cargo.toml`, adjusting the path
+to the library in your checkout:
 
 ```toml
 [dependencies]
@@ -16,7 +18,7 @@ rustcdp = { path = "../rustcdp/rustcdp" }
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Put this example in your application's `src/main.rs`:
+Here is a complete example:
 
 ```rust
 use rustcdp::{Browser, Page, Result};
@@ -42,17 +44,14 @@ async fn main() -> Result<()> {
 This program opens Chrome, visits example.com, and prints the page title.
 Add `.headless(true)` before `.launch()` to run without a window.
 
-Use the [browser builder](rustcdp/src/browser/builder.rs) for launch settings,
-including profiles, proxies, and Chrome arguments. Use `Browser::connect(endpoint)`
-to attach to an existing browser.
+The [browser builder](rustcdp/src/browser/builder.rs) also supports profiles,
+proxies, and Chrome arguments. To attach to an existing browser, use
+`Browser::connect(endpoint)`.
 
-## Examples
+## Documentation and examples
 
-See [examples](examples/README.md) for runnable examples and instructions.
-
-## API documentation
-
-Generate and open the API reference for this checkout:
+Explore the [examples](examples/README.md) for complete workflows and instructions
+for running them. To browse the API reference for this checkout, run:
 
 ```sh
 cargo doc -p rustcdp --no-deps --open
@@ -61,13 +60,14 @@ cargo doc -p rustcdp --no-deps --open
 ## CDP bindings
 
 [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
-defines the commands and events used to control Chrome. The bindings turn its
-protocol schemas into Rust types, providing typed commands, responses, and events
-without hand-writing each JSON message. Cargo generates them automatically during
-builds from the pinned schemas. See the [generation instructions](rustcdp/protocol/README.md#generating-bindings)
-for details and schema updates.
+defines the messages exchanged with the browser. The bindings represent these
+commands, responses, and events as Rust types, so you can work with typed values
+instead of constructing protocol messages by hand. Cargo generates the bindings
+automatically during builds from the pinned schemas. See the
+[generation instructions](rustcdp/protocol/README.md#generating-bindings) for details
+and schema updates.
 
 ## Contributing
 
-For changes to this repository, see [contributor instructions](CONTRIBUTING.md)
-for formatting, tests, and browser checks.
+If you’re changing the library or its examples, the [contributor guide](CONTRIBUTING.md)
+explains which formatting, test, and browser checks to run.
