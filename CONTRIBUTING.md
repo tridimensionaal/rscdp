@@ -1,9 +1,10 @@
 # Contributing
 
 These instructions are for contributors changing the library or its examples.
+Run commands from the repository root and choose checks relevant to your change.
+For documentation-only changes, check the text, links, and any modified code snippets.
 
-The workspace contains the library in `rustcdp/` and examples in `examples/`.
-Run these commands from the repository root:
+## Rust changes
 
 ```sh
 cargo fmt --all -- --check
@@ -11,27 +12,24 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p rustcdp
 ```
 
-## Browser checks
+CI also compiles every example to catch API changes that break their code:
 
-These checks require Chrome/Chromium; set `CHROME_PATH` if it is not discoverable.
-Run the browser-dependent tests explicitly:
+```sh
+cargo build --locked -p rustcdp-examples --examples
+```
+
+## Browser behavior
+
+For changes to browser behavior, run the relevant integration tests in
+`rustcdp/tests/`. To run all browser-dependent tests:
 
 ```sh
 cargo test -p rustcdp -- --ignored --test-threads=1
 ```
 
-To check every example, build them and run the smoke script (Linux, Python 3.11+):
+These require Chrome/Chromium; set `CHROME_PATH` if it is not discoverable.
 
-```sh
-cargo build -p rustcdp-examples --examples
-python3 scripts/browser_smoke.py
-```
-
-[browser_smoke.py](scripts/browser_smoke.py) runs each compiled example headlessly in a
-separate temporary working directory, checking that it succeeds without relying
-on the repository's working directory. Each run has a 60-second timeout; on a
-timeout, the script kills that run's process group, including Chrome.
-
-Python's standard library handles process management, temporary directories, and
-reading the example manifest; no Python packages are needed. This is development
-tooling, not a requirement for using the library or running an individual example.
+When changing an example or an API it uses, run the affected example and inspect
+its behavior and output. See the [example instructions](examples/README.md).
+CI compiles examples but does not execute them; compilation alone cannot check
+browser behavior.

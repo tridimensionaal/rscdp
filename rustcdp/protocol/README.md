@@ -57,9 +57,10 @@ Upstream: https://github.com/ChromeDevTools/devtools-protocol (BSD-3-Clause).
 The schema pin describes the generated Rust API, not a minimum Chrome version
 or a guarantee that every browser implements every command. The high-level
 helpers and local examples are exercised with Chrome for Testing 151.0.7922.34
-on Linux. CI runs the browser smoke checks against that pinned baseline and the
-current stable Chrome channel; build and unit checks also target Windows and
-macOS. These checks cover the exercised workflows, not every CDP command.
+on Linux. CI runs browser integration tests against that pinned baseline and the
+current stable Chrome channel. Build and unit checks also target Windows and
+macOS, including compilation of all examples. CI does not execute the examples.
+These checks cover the exercised workflows, not every CDP command.
 Newer and experimental commands depend on the running browser and its
 feature configuration. Inspect `Browser.getVersion` and the browser's
 `/json/protocol` endpoint when diagnosing compatibility; the protocol version
@@ -94,7 +95,7 @@ Review downstream imports, constructors and struct literals when upgrading.
 2. Review removed commands, changed required fields, enums and numeric types.
    Keep compatibility exceptions narrow, documented and covered by a regression.
 3. Run formatting, Clippy, unit tests and doctests, build the API docs, then run
-   the browser smoke checks and examples. Record the actual Chrome version;
+   the browser integration tests and affected examples. Record the actual Chrome version;
    compilation alone does not establish runtime compatibility.
 4. Commit the schemas, generator adjustments and migration notes together. A
    generated API change can break callers even if the high-level API is unchanged.
