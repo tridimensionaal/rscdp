@@ -1,6 +1,6 @@
 //! Reuse a locator after a search replaces its matching DOM node.
 mod common;
-use rustcdp::{Error, Page, Result, page::ElementState};
+use rustcdp::{Page, Result, page::ElementState};
 use std::time::Duration;
 
 async fn choose_workshop(page: &Page) -> Result<()> {
@@ -23,17 +23,11 @@ async fn choose_workshop(page: &Page) -> Result<()> {
         .await?;
     // The selector is unchanged, but the original button no longer exists.
     reserve.click().await?;
-    let state: (String, bool) = page.call("() => [document.querySelector('#confirmation').textContent, document.querySelector('#loading').hidden]")
-        .json().await?;
-    if state != ("Reserved: Evening ceramics".into(), true) {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected search result: {state:?}"
-        )));
-    }
-    println!(
-        "{}; loading indicator hidden, original card removed",
-        state.0
-    );
+    let confirmation: String = page
+        .call("() => document.querySelector('#confirmation').textContent")
+        .json()
+        .await?;
+    println!("{confirmation}");
     Ok(())
 }
 

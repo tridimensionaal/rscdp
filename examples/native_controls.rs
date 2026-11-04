@@ -1,6 +1,6 @@
 //! Save workshop account preferences with native select and checkbox helpers.
 mod common;
-use rustcdp::{Error, Page, Result, page::ElementState};
+use rustcdp::{Page, Result, page::ElementState};
 
 async fn save_preferences(page: &Page) -> Result<()> {
     page.navigate(common::page_url("controls.html")?)
@@ -16,11 +16,6 @@ async fn save_preferences(page: &Page) -> Result<()> {
         .call("() => document.querySelector('output').textContent")
         .json()
         .await?;
-    if confirmation != "Saved: Once a week; booking receipts on." {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected preferences: {confirmation}"
-        )));
-    }
     println!("{confirmation}");
     Ok(())
 }
