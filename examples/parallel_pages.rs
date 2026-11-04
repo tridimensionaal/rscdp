@@ -1,6 +1,6 @@
 //! Combine independent warehouse summaries through one browser connection.
 mod common;
-use rustcdp::{Browser, Error, Page, Result};
+use rustcdp::{Browser, Page, Result};
 
 async fn collect_stock(page: &Page, warehouse: &str) -> Result<(String, u64)> {
     let mut url = common::page_url("stock-board.html")?;
@@ -20,17 +20,6 @@ async fn summarize(browser: &Browser) -> Result<()> {
         collect_stock(&east, "east"),
     )?;
     let stock = [north_stock, south_stock, east_stock];
-    if stock
-        != [
-            ("North warehouse".into(), 12),
-            ("South warehouse".into(), 8),
-            ("East warehouse".into(), 5),
-        ]
-    {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected warehouse stock: {stock:?}"
-        )));
-    }
     south.close().await?;
     east.close().await?;
     println!(

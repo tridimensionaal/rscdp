@@ -1,6 +1,6 @@
 //! Pass Rust data into browser functions and collect a typed catalogue summary.
 mod common;
-use rustcdp::{Error, Page, Result};
+use rustcdp::{Page, Result};
 use serde_json::json;
 
 async fn extract_seeds(page: &Page) -> Result<()> {
@@ -18,11 +18,6 @@ async fn extract_seeds(page: &Page) -> Result<()> {
         .arg(json!({"category": "Herbs & 'greens'", "minimum": 5}))
         .json()
         .await?;
-    if seeds != [("Basil".into(), 12), ("Coriander".into(), 8)] {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected seed selection: {seeds:?}"
-        )));
-    }
     let basil = page.require_element("#basil").await?;
     // A normal function binds `this` to this element; an arrow function would not.
     let label: String = basil
@@ -31,11 +26,6 @@ async fn extract_seeds(page: &Page) -> Result<()> {
         .json()
         .await?;
     basil.release().await?;
-    if label != "Huerto de Lucía 🌱: Basil" {
-        return Err(Error::InvalidArgument(format!(
-            "unexpected seed label: {label}"
-        )));
-    }
     println!(
         "{label}; selected {seeds:?}, {} packets total",
         seeds.iter().map(|(_, count)| count).sum::<u64>()

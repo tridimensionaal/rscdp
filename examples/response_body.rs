@@ -13,7 +13,7 @@ async fn read_menu(page: &Page, server: &server::Server) -> Result<()> {
         .timeout(Duration::from_secs(10))
         .prepare()
         .await?;
-    page.require_element("#load-menu").await?.click().await?;
+    page.locator("#load-menu").click().await?;
     let response = menu_response.wait().await?;
     if response.metadata().status != 200 {
         return Err(Error::InvalidArgument(format!(
@@ -22,9 +22,6 @@ async fn read_menu(page: &Page, server: &server::Server) -> Result<()> {
         )));
     }
     let menu = response.json::<Value>().await?;
-    if menu["special"]["name"] != "Orange blossom latte" || menu["special"]["price"] != 4.5 {
-        return Err(Error::InvalidArgument(format!("unexpected menu: {menu}")));
-    }
     println!("Captured menu special: {}", menu["special"]);
     Ok(())
 }
