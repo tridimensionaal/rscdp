@@ -1,12 +1,8 @@
-//! Asynchronous Chrome DevTools Protocol client and browser automation.
+//! Async Chrome and Chromium automation with typed Chrome DevTools Protocol bindings.
 //!
-//! Use [`Browser`] and [`Page`] for browser automation, or [`Connection`] and
-//! [`Session`] to send typed [`cdp`] commands and subscribe to events.
-//! Before explicit shutdown starts, dropping an owned [`Browser`] synchronously
-//! terminates and reaps its Chrome process and removes its temporary profile.
-//! This can block; await `close` for asynchronous shutdown and cleanup errors.
-//! Protocol-resource cleanup on Drop is best effort and needs a running Tokio
-//! runtime. Call `close`, `detach`, or `release` to observe those cleanup results.
+//! Use [`Browser`] and [`Page`] for automation, or [`Connection`] and [`Session`]
+//! for typed [`cdp`] commands and events. See [`Browser`] for process lifetime
+//! and cleanup behavior.
 //!
 //! # Example
 //!
@@ -19,27 +15,22 @@
 //! use rustcdp::{Browser, Page, Result};
 //! use std::time::Duration;
 //!
+//! async fn print_title(page: &Page) -> Result<()> {
+//!     page.navigate("data:text/html,<title>Library demo</title>")
+//!         .timeout(Duration::from_secs(10))
+//!         .send()
+//!         .await?;
+//!     println!("{}", page.evaluate("document.title").json::<String>().await?);
+//!     Ok(())
+//! }
+//!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<()> {
 //!     let browser = Browser::builder().launch().await?;
 //!     print_title(browser.page()).await?;
 //!     Ok(())
 //! }
-//!
-//! async fn print_title(page: &Page) -> Result<()> {
-//!     page.navigate(
-//!         "data:text/html,<title>Library demo</title>",
-//!     )
-//!     .timeout(Duration::from_secs(10))
-//!     .send()
-//!     .await?;
-//!     println!("{}", page.evaluate("document.title").json::<String>().await?);
-//!     Ok(())
-//! }
 //! ```
-//!
-//! The browser leaves scope on success or an early return from `?`. Automatic
-//! process cleanup completes during Drop; cleanup errors cannot be returned.
 //!
 //! # Diagnostics
 //!

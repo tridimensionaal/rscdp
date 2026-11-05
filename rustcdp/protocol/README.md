@@ -71,23 +71,6 @@ One generator exception preserves older event decoding:
 151 omits it. The checked-in JSON remains an exact upstream copy. Other missing
 required fields remain errors instead of silently receiving invented defaults.
 
-This refresh removes deprecated generated APIs, including Network interception
-commands (use Fetch instead), and changes some field types and constructors.
-For example, `WebAuthn.Credential.signCount` is now `f64`, and
-`DOM.Node.isAdRelated` was replaced by `adProvenance`. Also:
-
-- `CSS.CSSContainerQuery.conditionText` is newly required; older payloads without
-  it fail typed decoding.
-- `SeekAnimations::new` now takes only the animation IDs; choose
-  `with_current_time` or `with_current_times`. `EmulateNetworkConditionsByRule::new`
-  no longer requires `offline`; use `with_offline` when needed.
-- Removed APIs include Network accepted-encoding overrides and several Storage
-  privacy APIs. `WebMCP.toolsRemoved` now carries `RemovedTool` values.
-- Added optional fields can break exhaustive struct literals; removed enum
-  variants can break named references despite unknown-string decoding support.
-
-Review downstream imports, constructors and struct literals when upgrading.
-
 ## Updating the snapshot
 
 1. Choose an exact upstream commit and replace both JSON files from that commit.
