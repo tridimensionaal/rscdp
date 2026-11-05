@@ -1,6 +1,6 @@
 //! Fill a local checkout form and submit it through keyboard input.
 mod common;
-use rustcdp::{Page, Result};
+use rscdp::{Page, Result};
 use std::time::Duration;
 
 async fn reserve_notebook(page: &Page) -> Result<()> {

@@ -2,7 +2,7 @@
 mod common;
 #[path = "common/server.rs"]
 mod server;
-use rustcdp::{
+use rscdp::{
     Browser, Error, Page, Result,
     cdp::target::{TargetId, commands::SetDiscoverTargets, events::TargetCreated},
     page::ElementState,

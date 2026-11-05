@@ -2,7 +2,7 @@
 mod common;
 #[path = "common/server.rs"]
 mod server;
-use rustcdp::{
+use rscdp::{
     Page, Result,
     cdp::dom_storage::{
         StorageId,

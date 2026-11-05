@@ -2,8 +2,8 @@
 mod common;
 #[path = "common/server.rs"]
 mod server;
-use rustcdp::page::ElementState;
-use rustcdp::{
+use rscdp::page::ElementState;
+use rscdp::{
     Error, Page, Result,
     cdp::network::{
         NetworkConditions,

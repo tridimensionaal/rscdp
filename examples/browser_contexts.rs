@@ -3,7 +3,7 @@
 mod common;
 #[path = "common/server.rs"]
 mod server;
-use rustcdp::{
+use rscdp::{
     Browser, BrowserContext, Result,
     cdp::network::{Cookie, CookieParam},
 };

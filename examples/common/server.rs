@@ -1,6 +1,6 @@
 //! Serve the example pages over HTTP when cookies or fetch need a real origin.
 use axum::Router;
-use rustcdp::Result;
+use rscdp::Result;
 use std::path::Path;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tower_http::services::ServeDir;

@@ -2,7 +2,7 @@
 mod common;
 #[path = "common/server.rs"]
 mod server;
-use rustcdp::{Error, Page, Result};
+use rscdp::{Error, Page, Result};
 use serde_json::Value;
 use std::time::Duration;
 

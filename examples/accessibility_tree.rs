@@ -1,6 +1,6 @@
 //! Inspect a form's accessible roles, names and state, then label an unnamed button.
 mod common;
-use rustcdp::{
+use rscdp::{
     Page, Result,
     cdp::accessibility::{AxNode, AxPropertyName, AxValue, commands::GetFullAxTree},
     page::ElementState,

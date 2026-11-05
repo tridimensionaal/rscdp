@@ -1,6 +1,6 @@
 //! Export the same locally rendered report to PNG and PDF in output/.
 mod common;
-use rustcdp::{Page, Result};
+use rscdp::{Page, Result};
 use std::time::Duration;
 
 async fn export_report(page: &Page) -> Result<()> {

@@ -1,6 +1,6 @@
 //! Pass Rust data into browser functions and collect a typed catalogue summary.
 mod common;
-use rustcdp::{Page, Result};
+use rscdp::{Page, Result};
 use serde_json::json;
 
 async fn extract_seeds(page: &Page) -> Result<()> {

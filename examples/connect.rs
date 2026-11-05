@@ -1,6 +1,6 @@
 //! Attach a second connection, then disconnect without stopping the browser.
 mod common;
-use rustcdp::{Browser, Error, Result};
+use rscdp::{Browser, Error, Result};
 
 async fn inspect_connection(browser: &Browser) -> Result<()> {
     browser

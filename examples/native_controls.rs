@@ -1,6 +1,6 @@
 //! Save workshop account preferences with native select and checkbox helpers.
 mod common;
-use rustcdp::{Page, Result, page::ElementState};
+use rscdp::{Page, Result, page::ElementState};
 
 async fn save_preferences(page: &Page) -> Result<()> {
     page.navigate(common::page_url("controls.html")?)

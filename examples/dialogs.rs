@@ -1,6 +1,6 @@
 //! Rename a reading list with a prompt, then cancel its deletion confirmation.
 mod common;
-use rustcdp::{
+use rscdp::{
     Error, Page, Result,
     cdp::page::{DialogType, commands::HandleJavaScriptDialog, events::JavascriptDialogOpening},
     page::ElementState,

@@ -1,4 +1,4 @@
-use rustcdp::{Browser, Result};
+use rscdp::{Browser, Result};
 
 pub async fn launch() -> Result<Browser> {
     Browser::builder()
@@ -15,6 +15,6 @@ pub fn page_url(name: &str) -> Result<url::Url> {
         .join(name)
         .canonicalize()?;
     url::Url::from_file_path(&path).map_err(|()| {
-        rustcdp::Error::InvalidArgument(format!("cannot create a file URL for {}", path.display()))
+        rscdp::Error::InvalidArgument(format!("cannot create a file URL for {}", path.display()))
     })
 }

@@ -1,4 +1,4 @@
 [workspace]
-members = ["rustcdp", "examples"]
-default-members = ["rustcdp"]
+members = ["rscdp", "examples"]
+default-members = ["rscdp"]
 resolver = "3"

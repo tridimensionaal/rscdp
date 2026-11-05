@@ -1,6 +1,6 @@
 //! Select a local CSV with CDP and read its File API preview; no network submission.
 mod common;
-use rustcdp::{Page, Result};
+use rscdp::{Page, Result};
 use std::{path::Path, time::Duration};
 
 async fn preview_stock(page: &Page) -> Result<()> {

@@ -9,22 +9,22 @@ For documentation-only changes, check the text, links, and any modified code sni
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test -p rustcdp
+cargo test -p rscdp
 ```
 
 CI also compiles every example to catch API changes that break their code:
 
 ```sh
-cargo build --locked -p rustcdp-examples --examples
+cargo build --locked -p rscdp-examples --examples
 ```
 
 ## Browser behavior
 
 For changes to browser behavior, run the relevant integration tests in
-`rustcdp/tests/`. To run all browser-dependent tests:
+`rscdp/tests/`. To run all browser-dependent tests:
 
 ```sh
-cargo test -p rustcdp -- --ignored --test-threads=1
+cargo test -p rscdp -- --ignored --test-threads=1
 ```
 
 These require Chrome/Chromium; set `CHROME_PATH` if it is not discoverable.

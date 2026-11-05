@@ -2,7 +2,7 @@
 mod common;
 #[path = "common/server.rs"]
 mod server;
-use rustcdp::{Page, Result, page::WaitUntil};
+use rscdp::{Page, Result, page::WaitUntil};
 use std::time::Duration;
 
 async fn enter_gallery(page: &Page, server: &server::Server) -> Result<()> {

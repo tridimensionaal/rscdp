@@ -1,6 +1,6 @@
 //! Preview a timetable's layout and colors at different widths and color schemes.
 mod common;
-use rustcdp::{
+use rscdp::{
     Page, Result,
     cdp::emulation::{
         MediaFeature,

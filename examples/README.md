@@ -7,7 +7,7 @@ Chrome window by default; append `-- --headless=new` for headless mode.
 Run from the repository root or this directory:
 
 ```sh
-cargo run -p rustcdp-examples --example checkout
+cargo run -p rscdp-examples --example checkout
 ```
 
 Replace `checkout` with any example below:

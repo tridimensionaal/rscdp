@@ -1,6 +1,6 @@
 //! Explore a nested dispatch board without confusing parent and child documents.
 mod common;
-use rustcdp::{
+use rscdp::{
     Error, Page, Result,
     page::{ClickMethod, ClickOptions},
 };

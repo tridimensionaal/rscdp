@@ -1,6 +1,6 @@
 //! Combine independent warehouse summaries through one browser connection.
 mod common;
-use rustcdp::{Browser, Page, Result};
+use rscdp::{Browser, Page, Result};
 
 async fn collect_stock(page: &Page, warehouse: &str) -> Result<(String, u64)> {
     let mut url = common::page_url("stock-board.html")?;

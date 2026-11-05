@@ -1,6 +1,6 @@
 //! Seed application configuration before startup, then remove the registration.
 mod common;
-use rustcdp::{
+use rscdp::{
     Page, Result,
     cdp::page::commands::{AddScriptToEvaluateOnNewDocument, RemoveScriptToEvaluateOnNewDocument},
 };

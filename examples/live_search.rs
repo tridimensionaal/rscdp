@@ -1,6 +1,6 @@
 //! Reuse a locator after a search replaces its matching DOM node.
 mod common;
-use rustcdp::{Page, Result, page::ElementState};
+use rscdp::{Page, Result, page::ElementState};
 use std::time::Duration;
 
 async fn choose_workshop(page: &Page) -> Result<()> {

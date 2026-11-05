@@ -1,6 +1,6 @@
 //! Collect structured console events from a local order-dispatch simulation.
 mod common;
-use rustcdp::{Error, Page, Result, cdp::runtime::events::ConsoleApiCalled};
+use rscdp::{Error, Page, Result, cdp::runtime::events::ConsoleApiCalled};
 use std::time::Duration;
 
 async fn watch_dispatch(page: &Page) -> Result<()> {
@@ -19,7 +19,7 @@ async fn watch_dispatch(page: &Page) -> Result<()> {
 }
 
 async fn collect_dispatch_events(
-    events: &mut rustcdp::session::TypedEvents<ConsoleApiCalled>,
+    events: &mut rscdp::session::TypedEvents<ConsoleApiCalled>,
 ) -> Result<()> {
     let mut received = 0;
     while received < 3 {

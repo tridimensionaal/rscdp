@@ -3,7 +3,7 @@ mod common;
 #[path = "common/server.rs"]
 mod server;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rustcdp::{
+use rscdp::{
     Error, Page, Result,
     cdp::{
         fetch::{
