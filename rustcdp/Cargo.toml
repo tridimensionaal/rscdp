@@ -1,13 +1,14 @@
 [package]
 name = "rustcdp"
 version = "0.1.0"
+license = "MIT OR Apache-2.0"
 description = "Async Chrome and Chromium automation in Rust, with typed access to the Chrome DevTools Protocol (CDP)."
 repository = "https://github.com/tridimensionaal/rscdp"
 keywords = ["cdp", "chrome", "browser", "automation"]
 edition = "2024"
 rust-version = "1.99.1"
 readme = "../README.md"
-include = ["/src/**", "/codegen/**", "/protocol/**", "/build.rs", "/Cargo.toml"]
+include = ["/src/**", "/codegen/**", "/protocol/**", "/build.rs", "/Cargo.toml", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [features]
 default = []

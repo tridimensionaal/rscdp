@@ -8,12 +8,11 @@ Chrome DevTools Protocol (CDP).
 You need Rust 1.99.1 or newer and Chrome or Chromium. Set `CHROME_PATH` if the
 browser is not discoverable on your system.
 
-Add these dependencies to your application’s `Cargo.toml`, adjusting the path
-to the library in your checkout:
+Add these dependencies to your application’s `Cargo.toml`:
 
 ```toml
 [dependencies]
-rustcdp = { path = "../rscdp/rustcdp" }
+rustcdp = "0.1"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 ```
 
