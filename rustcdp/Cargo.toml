@@ -1,8 +1,8 @@
 [package]
 name = "rustcdp"
 version = "0.1.0"
-description = "Asynchronous Chrome DevTools Protocol client and browser automation"
-repository = "https://github.com/tridimensionaal/rustcdp"
+description = "Async Chrome and Chromium automation in Rust, with typed access to the Chrome DevTools Protocol (CDP)."
+repository = "https://github.com/tridimensionaal/rscdp"
 keywords = ["cdp", "chrome", "browser", "automation"]
 edition = "2024"
 rust-version = "1.99.1"

@@ -1,8 +1,7 @@
-# rustcdp
+# rscdp
 
-rustcdp is an asynchronous Rust library for controlling Chrome and Chromium through
-the Chrome DevTools Protocol (CDP). It uses Tokio and provides page automation
-helpers, isolated browser contexts, and typed protocol commands and events.
+Async Chrome and Chromium automation in Rust, with typed access to the
+Chrome DevTools Protocol (CDP).
 
 ## Quickstart
 
@@ -14,7 +13,7 @@ to the library in your checkout:
 
 ```toml
 [dependencies]
-rustcdp = { path = "../rustcdp/rustcdp" }
+rustcdp = { path = "../rscdp/rustcdp" }
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 ```
 
