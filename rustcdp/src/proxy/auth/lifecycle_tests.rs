@@ -164,6 +164,15 @@ async fn canceled_start_awaits_network_acquisition_and_release_without_enabling_
         assert!(matches!(error, Error::ProxyAuthentication(message)
             if message.contains("already armed")));
         peer.reply(&disable, json!({})).await;
+        // Wait for the canceled worker to consume the reply and release its
+        // lease before closing the socket with potentially unread data.
+        loop {
+            if let Ok(lease) = session.claim_proxy_auth() {
+                drop(lease);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         peer.finish(&session).await;
     })
     .await;
