@@ -44,8 +44,8 @@ struct Observation {
 /// The response retains its Page, exact-session event stream and Network guard.
 /// Dropping it releases only its share of managed Network reporting. Direct
 /// Network enable/disable commands bypass that ownership and must not be mixed
-/// with these observers. Metadata describes Chrome's responseReceived or redirectResponse headers;
-/// it does not merge the separately reported extra-info headers.
+/// with these observers. Metadata contains Chrome's `responseReceived` or
+/// `redirectResponse` headers; separately reported extra-info headers are not merged.
 #[must_use = "retain the response while inspecting its metadata"]
 pub struct Response {
     observation: Observation,

@@ -42,7 +42,7 @@ pub use navigation::{
 pub use pdf::PdfBuilder;
 pub use selectors::CountWaitOptions;
 
-/// Page operations are shared by the initial browser page and isolated contexts.
+/// A shared handle to a browser tab or an attached iframe target.
 /// A Page retains shared Page- and Runtime-domain guards for its lifetime and
 /// subscribes to context events before enabling them. See [`Self::evaluate`] for
 /// execution-world behavior and [`crate::Browser::connect`] for fallback lifetime.

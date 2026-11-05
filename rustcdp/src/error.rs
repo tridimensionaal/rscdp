@@ -33,7 +33,7 @@ pub enum Error {
     /// A decoded response or event payload violates the operation's expected protocol contract.
     #[error("unexpected response to {method}: {payload}")]
     UnexpectedResponse { method: String, payload: Value },
-    /// The selected response completed without a retrievable body.
+    /// The selected response's body is unavailable.
     #[error("response body unavailable: {0}")]
     ResponseBody(String),
     #[error(transparent)]
@@ -109,7 +109,6 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(method: &str, payload: Valu
     })
 }
 
-// Borrow for decoding; clone the full payload only when preserving a decode error.
 pub(crate) fn decode_ref<T: serde::de::DeserializeOwned>(
     method: &str,
     payload: &Value,

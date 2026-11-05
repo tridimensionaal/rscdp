@@ -396,7 +396,6 @@ impl Connection {
                                                 close_session_requests(&active_sessions, &active_subscriptions, &mut pending, id);
                                             }
                                         }
-                                        // No subscribers is normal; subscribed readers detect lag explicitly.
                                         dispatch_events(&active_subscriptions, &event);
                                         auth_events::dispatch(&active_auth_subscriptions, &event);
                                         let _ = event_sender.send(event);
@@ -838,8 +837,9 @@ impl Connection {
     }
 }
 
-/// Raw events in the subscribed scope, buffered using the connection's configured event
-/// capacity (256 by default, rounded up to a power of two).
+/// Raw events in the subscribed scope. Capacity defaults to the connection's
+/// setting (256 by default) and can be overridden with [`EventOptions::capacity()`].
+/// Capacities round up to a power of two.
 /// Overflow reports [`Error::Lagged`]; buffered events are drained before terminal
 /// connection failure. Use ordinary Tokio tasks to run event handlers.
 /// Streams from [`crate::Session::subscribe`] retain attachment ownership and

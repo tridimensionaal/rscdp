@@ -13,8 +13,8 @@ use tokio::time::Instant;
 
 /// Options for [`Page::wait_for_selector_count_stable`] and [`Page::wait_for_xpath_count_stable`].
 ///
-/// Stability means the sampled number of matching elements stays nonzero and
-/// unchanged. It does not track element identity, visibility, or position.
+/// Stability means the sampled number of matching nodes stays nonzero and
+/// unchanged. It does not track node identity, visibility, or position.
 #[derive(Debug, Clone)]
 pub struct CountWaitOptions {
     /// Deadline for observing a stable count. Defaults to 5 seconds.
@@ -75,8 +75,7 @@ impl Page {
     ///
     /// This checks presence only, not visibility, stability, or actionability.
     /// For application readiness, wait for a selector the page publishes when
-    /// ready, such as `#results[data-ready=true]`. A matching element can still
-    /// be hidden, moving, or covered; this is not an automatic click-readiness check.
+    /// ready, such as `#results[data-ready=true]`.
     /// The element can become stale after acquisition. Cancellation or expiration
     /// stops polling but leaves an in-flight owned acquisition running under its
     /// independent 30-second limit and recovery/cleanup bounds; see

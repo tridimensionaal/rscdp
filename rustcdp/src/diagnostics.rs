@@ -2,7 +2,7 @@ use crate::{Error, Result};
 use std::time::Instant;
 
 // Never format params, results, endpoints or error text in diagnostics.
-// This measures the CDP exchange; typed response decoding happens afterward.
+// Timing includes queue admission; typed response decoding happens afterward.
 pub(crate) struct Request<'a> {
     method: &'a str,
     started: Instant,

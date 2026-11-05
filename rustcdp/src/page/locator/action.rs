@@ -59,12 +59,13 @@ impl Locator {
     /// visual viewports are unsupported and fail explicitly. This is a
     /// conservative readiness check, not an atomic guarantee against DOM changes.
     ///
-    /// One absolute timeout includes lookup, readiness and input waiting. Only
-    /// recognized context loss or a detached/replaced match can re-resolve before
-    /// input. Input is never retried, including after an error or timeout. The
-    /// owned press task checks expiry before starting; once pressing starts it
-    /// attempts release even after failure, caller cancellation or deadline expiry.
-    /// Release retains its existing independent bound and may outlast this wait.
+    /// One absolute timeout includes lookup, readiness and input waiting. Lookup
+    /// and readiness may repeat before input; only recognized context-loss or
+    /// detachment errors are retried. Input is never retried, including after an
+    /// error or timeout. The owned press task checks expiry before starting;
+    /// once pressing starts it attempts release even after failure, caller
+    /// cancellation or deadline expiry. Release has an independent bound and may
+    /// outlast this wait.
     /// Cancellation can leave an in-flight scroll/readiness call completing; its
     /// animation-frame wait has a local timer and performs no input.
     pub async fn click(&self) -> Result<()> {

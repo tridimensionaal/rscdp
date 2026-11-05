@@ -3,8 +3,9 @@
 //! Only challenges from the configured proxy origin receive credentials.
 //! Rejection stays latched until teardown; Fetch stays enabled for later challenges.
 //! Authentication buffering and held requests/challenges are bounded. Overflow
-//! fails authentication explicitly. Fatal worker failures close the target;
-//! if closing it and disabling Fetch both fail, the connection is closed.
+//! fails authentication explicitly. Interception failures trigger a target-close
+//! attempt, then Fetch disable if needed. If both fail while the session remains
+//! open, the connection is closed.
 use crate::{
     Error, Result, Session,
     connection::{AuthEvent, AuthEventKind, AuthEvents},
@@ -31,9 +32,10 @@ const DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyAuthStatus {
     Pending,
-    /// A request completed without a proxy challenge; credentials remain unverified.
+    /// A response was observed without verifying the supplied credentials.
     Unchallenged,
-    /// A credential-bearing probe succeeded; later challenges start a new probe.
+    /// A credential-bearing probe received a response without proxy rejection or
+    /// a reported network error; later challenges start a new probe.
     Authenticated,
     Rejected,
     Stopped,
@@ -224,13 +226,13 @@ impl ProxyAuth {
         self.status.borrow().clone()
     }
 
-    /// Wait for a successful request, with or without an observed proxy challenge.
+    /// Wait for a response without observed proxy rejection or network error.
     /// Returns the observed `Authenticated` or `Unchallenged` status.
-    /// This observation distinguishes verified authentication from unchallenged traffic. Cached credentials, bypasses, or a proxy without
-    /// authentication can yield an unchallenged response; readiness proves neither
+    /// Cached credentials, bypasses, or a proxy without authentication can yield
+    /// an unchallenged response; readiness proves neither
     /// proxy traversal nor use of the supplied credentials.
-    /// A ready status describes an observed request, not a guarantee for future
-    /// requests. A later credential-bearing probe returns the status to Pending.
+    /// Readiness does not imply HTTP success or body completion, or guarantee
+    /// future requests. A later credential-bearing probe resets the status to Pending.
     pub async fn wait_ready(&self, timeout: Duration) -> Result<ProxyAuthStatus> {
         let mut status = self.status.clone();
         tokio::time::timeout(timeout, async {

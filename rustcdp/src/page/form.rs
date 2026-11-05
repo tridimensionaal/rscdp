@@ -23,7 +23,7 @@ impl Element {
     ///
     /// Execution uses [`Self::call`]: the original element is retained through
     /// caller cancellation and cleanup. Cancellation does not undo a dispatched
-    /// selection or event. No fresh element is resolved behind the caller's back.
+    /// selection or event. The element is never resolved afresh.
     ///
     /// ```no_run
     /// # async fn example(element: &rustcdp::page::Element) -> rustcdp::Result<()> {
@@ -255,12 +255,12 @@ impl Element {
     /// Chrome's OS and filesystem. Selection does not submit or upload a form.
     ///
     /// Nonempty selection uses `DOM.setFileInputFiles` with this element's
-    /// existing object ID. Validation and dispatch
-    /// are separate commands, so scripts can still change the control between
-    /// them. Clearing uses the native `value` setter and dispatches synthetic
-    /// bubbling `input` (also composed) and `change` events. Attachment and empty
-    /// selection are checked after the setter and each event; a handler that
-    /// replaces or repopulates the control produces an error without replay.
+    /// existing object ID. Validation and dispatch are separate commands, so
+    /// scripts can still change the control between them. Clearing uses the
+    /// native `value` setter and dispatches synthetic bubbling `input` (also
+    /// composed) and `change` events. Attachment and empty selection are checked
+    /// after the setter and each event; handlers that replace or repopulate the
+    /// control produce an error without replay.
     /// No visibility, scrolling, or pointer-readiness check is performed.
     ///
     /// An owned operation retains the element through validation and dispatch,

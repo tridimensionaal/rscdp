@@ -80,7 +80,7 @@ impl Locator {
         }
     }
 
-    /// Set the budget for each subsequent wait on this locator (default: 30 seconds).
+    /// Set the budget for each wait or action on this locator (default: 30 seconds).
     /// A terminal future starts its own budget when first polled. Zero expires
     /// before any protocol work; a deadline overflow is an invalid argument.
     /// Existing clones keep their own configuration.
@@ -149,7 +149,7 @@ impl Locator {
     }
 
     // Count and acquire in the same synchronous isolated-world expression.
-    // Callers supply the operation deadline and decide which readiness is needed.
+    // Callers enforce the operation deadline and decide which readiness is needed.
     pub(super) async fn resolve(&self) -> Result<Option<Element>> {
         let selector = serde_json::to_string(&self.selector)?;
         let expression = format!(

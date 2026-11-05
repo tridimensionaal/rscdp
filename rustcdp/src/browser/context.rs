@@ -128,8 +128,8 @@ impl BrowserContext {
     ///
     /// The command deadline limits the caller's wait. Acquisition continues in
     /// an owned task after cancellation; an unclaimed page is closed. Gate admission
-    /// and target/session setup each have a 30-second bound. Authentication setup
-    /// and recovery finish separately before any failed acquisition is cleaned up.
+    /// has a 30-second bound; creation, attachment, and domain setup share another.
+    /// Authentication setup and recovery finish before failed acquisition cleanup.
     /// An uncertain creation without a target ID disposes this entire context;
     /// a protocol rejection leaves it usable. Failed known-target cleanup also
     /// disposes the context, closing the connection if disposal cannot be confirmed.

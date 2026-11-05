@@ -144,7 +144,7 @@ impl Browser {
         self.page.proxy_auth_status()
     }
 
-    /// Wait for a successful request without an observed authentication failure.
+    /// Wait for a response without observed proxy rejection or network error.
     /// Returns `None` without a credential worker, otherwise the observed
     /// `Authenticated` or `Unchallenged` status. Readiness does not prove proxy
     /// traversal or that supplied credentials were used.
@@ -166,7 +166,7 @@ impl BrowserContext {
         self.page.proxy_auth_status()
     }
 
-    /// Wait for a successful request without an observed authentication failure.
+    /// Wait for a response without observed proxy rejection or network error.
     /// Returns `None` without a credential worker, otherwise the observed
     /// `Authenticated` or `Unchallenged` status. Readiness does not prove proxy
     /// traversal or that supplied credentials were used.

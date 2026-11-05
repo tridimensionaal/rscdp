@@ -59,7 +59,8 @@ const TRANSITION_TIMEOUT: Duration = Duration::from_secs(30);
 const DETACH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Shared ownership of an enabled DOM, Page, Runtime, or Network domain.
-/// Await `close` to confirm the final disable; Drop schedules the same cleanup.
+/// Await `close` to release this guard and observe cleanup errors. The last guard
+/// disables the domain; Drop schedules the same cleanup.
 /// Counts and configuration are shared across handles of the same session.
 /// Omitted options inherit an active configuration, or select protocol defaults
 /// on first enable. Page chooser reporting can be upgraded and remains enabled

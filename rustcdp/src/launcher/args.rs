@@ -1,7 +1,7 @@
 use crate::{Error, Result};
 use std::ffi::{OsStr, OsString};
 
-/// Validate raw arguments against a Browser-managed proxy before lowering it.
+/// Reject raw routing flags that conflict with a configured proxy.
 pub(crate) fn validate_proxy_args(args: &[OsString]) -> Result<()> {
     for arg in args {
         if matches!(

@@ -190,7 +190,7 @@ impl Browser {
                 break;
             }
             // Chrome reports a default-profile ID too; only isolated IDs belong
-            // in Page's context/Storage routing. Preserve this normalization.
+            // in Page's context/Storage routing.
             let contexts = commands
                 .execute(&crate::cdp::target::commands::GetBrowserContexts::default())
                 .await?

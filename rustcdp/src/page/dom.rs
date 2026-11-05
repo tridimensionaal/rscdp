@@ -46,10 +46,11 @@ impl Page {
     /// awaits cleanup and reports failures; Drop schedules the same attempt
     /// best-effort, without retrying a failed explicit cleanup.
     ///
-    /// Searches are serialized across all handles for this session. Caller cancellation or timeout leaves the owner running. Queueing
-    /// and transaction work each have a 30-second limit, excluding domain
-    /// transitions and recovery. Uncertain timeouts or an invalid search identity
-    /// detach the session and descendants, falling back to connection closure.
+    /// Searches are serialized across all handles for this session. Caller
+    /// cancellation or timeout leaves the owner running. Queueing and transaction
+    /// work each have a 30-second limit, excluding domain transitions and recovery.
+    /// Uncertain timeouts or an invalid search identity detach the session and
+    /// descendants, falling back to connection closure.
     /// A DOM guard prevents disable, not frontend ID invalidation: another search,
     /// raw document reset, or navigation can invalidate returned IDs.
     /// Recovery runs before releasing the transaction gate, with a one-second

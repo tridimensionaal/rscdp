@@ -367,8 +367,9 @@ impl Session {
     }
 }
 
-/// Events filtered by session and method before buffering at the connection's
-/// configured event capacity (256 by default, rounded up to a power of two).
+/// Events filtered by session and method before buffering. Capacity defaults to
+/// the connection's setting (256 by default); `listen_with_capacity` overrides it.
+/// Capacities round up to a power of two.
 /// Overflow reports [`Error::Lagged`]. Detachment wakes session listeners,
 /// including descendants; buffered events are delivered before closure.
 /// Register with [`Session::listen`] before the action that can emit the event.

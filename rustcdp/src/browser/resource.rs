@@ -225,8 +225,7 @@ impl ManagedPages {
         self.ensure_open()?;
         let targets = self.target_snapshot().await?;
         // Chrome may report a default-profile ID which Storage must not receive.
-        // This branch supports the same helper's eventual default-scope caller;
-        // Context.pages always filters by the exact explicit context ID.
+        // Context pages are filtered by their exact context ID.
         let isolated = if self.scope == Scope::Default {
             self.connection
                 .clone()
@@ -271,8 +270,8 @@ impl ManagedPages {
         Ok(pages)
     }
 
-    // Caller owns the scope gate. Reuse this for later browser lookup as well as
-    // enumeration: this operation never owns permission to close an existing tab.
+    // Caller holds the scope gate. Acquisition cleanup detaches the session;
+    // proxy authentication recovery can also close the target or connection.
     async fn adopt_owned(self: &Arc<Self>, id: &TargetId) -> Result<Option<Page>> {
         let (cached, proxy) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -401,8 +400,8 @@ impl ManagedPages {
         state.entries.push(Entry::new(page, delivered));
     }
 
-    // The pending guard calls this synchronously on receipt. Future enumeration
-    // must also hold the gate so publication cannot race unclaimed-tab cleanup.
+    // The pending guard publishes synchronously on receipt. Enumeration holds
+    // the gate to prevent unclaimed-tab cleanup during adoption and publication.
     fn publish(&self, id: &TargetId) -> Result<Page> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closing {
@@ -432,7 +431,7 @@ struct KnownContext {
     id: BrowserContextId,
     pages: Weak<ManagedPages>,
     disposed: Arc<AtomicBool>,
-    // Only fallback Pages regain a lease when returned by future lookup APIs.
+    // Only fallback Pages regain a lease during lookup.
     fallback: Option<Weak<ContextLease>>,
 }
 
